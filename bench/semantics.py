@@ -85,8 +85,14 @@ def vllm_semantics(resolved: dict, extra: list[str], env: dict) -> dict:
     }
 
 
+SGLANG_NEUTRAL_ENV = {"OMNI_SGLANG_MPS", "OMNI_SGLANG_MAX_SEQ"}
+
+
 def sglang_semantics(extra: list[str], env: dict) -> dict:
     _check_args("sglang-omni", extra)
+    unknown = sorted(k for k in env if k not in SGLANG_NEUTRAL_ENV)
+    if unknown:
+        raise SemanticsUnknown(f"environment {unknown} has unknown effect on reference semantics")
     text = SGLANG_CONFIG.read_text()
     if 'dtype="float16"' not in text or "def speech_stages" not in text:
         raise SemanticsUnknown("pinned sglang-omni code2wav stage changed")

@@ -7,16 +7,19 @@ and ``pack_mode=minicpm-interleave`` (1 fps frames interleaved with matching
 1 s audio segments as ``image_url``/``audio_url`` parts, inlined as data URLs),
 plus the same client body as vllm-omni's MiniCPM-o accuracy test
 (``modalities=["text"]``, ``enable_thinking=false``, temperature 0, 512
-tokens).  Scoring is ``compute_daily_omni_accuracy_metrics``.
+tokens).  Scoring is ``evaluate_answer_official`` /
+``compute_daily_omni_accuracy_metrics``.  The QA file and media come from the
+pinned snapshot given in the job.
 
-Job: ``url``, ``model``, ``concurrency``, ``max_samples`` (None = all 1197),
-``timeout_s``, ``video_dir``, ``qa_json``.  ``dump_payloads`` returns the first N
-request bodies (for the frames-plus-audio fixture comparison).
+Modes: ``manifest`` (per-item content sha256: QA fields plus the video and audio
+file bytes), ``run``, ``rescore`` (saved raw responses -> official correctness),
+and ``dump_payloads`` (first N request bodies, for the native-form fixture test).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 import time
@@ -28,13 +31,51 @@ EXTRA_BODY = {"modalities": ["text"], "chat_template_kwargs": {"enable_thinking"
 MAX_TOKENS = 512
 
 
+def _dataset(job: dict):
+    from vllm_omni.benchmarks.data_modules.daily_omni_dataset import DailyOmniDataset
+
+    return DailyOmniDataset(qa_json_path=job["qa_json"], video_dir=job["video_dir"], input_mode="all", pack_mode="minicpm-interleave",
+                            inline_local_video=True, random_seed=0)
+
+
+def _items(job: dict) -> list[dict]:
+    """The dataset's own (seeded) order and field normalization; request i is item i."""
+    ds = _dataset(job)
+    rows = [ds._normalize_qa_fields(ds._coerce_row(it)) for it in ds.data]
+    n = job.get("max_samples") or len(rows)
+    return rows[:n]
+
+
+def _key(i: int, f: dict) -> str:
+    return f"{f['video_id']}#{i}"
+
+
+def _file_sha(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def manifest(job: dict) -> dict:
+    vdir = Path(job["video_dir"])
+    items = []
+    for i, f in enumerate(_items(job)):
+        h = hashlib.sha256()
+        for part in (f["video_id"], f["question"], json.dumps(f["choice"], default=str), f["answer"], f["task_type"]):
+            h.update(str(part).encode())
+            h.update(b"\0")
+        for rel in (f"{f['video_id']}/{f['video_id']}_video.mp4", f"{f['video_id']}/{f['video_id']}_audio.wav"):
+            h.update(_file_sha(vdir / rel).encode())
+        items.append([_key(i, f), h.hexdigest()])
+    return {"bench": "daily_omni", "items": items, "qa_json_sha256": _file_sha(Path(job["qa_json"]))}
+
+
 def load_requests(job: dict) -> list:
     from transformers import AutoTokenizer
 
-    from vllm_omni.benchmarks.data_modules.daily_omni_dataset import DailyOmniDataset
-
-    ds = DailyOmniDataset(qa_json_path=job["qa_json"], video_dir=job["video_dir"], input_mode="all", pack_mode="minicpm-interleave",
-                          inline_local_video=True, random_seed=0)
+    ds = _dataset(job)
     tok = AutoTokenizer.from_pretrained(job["tokenizer"], trust_remote_code=True)
     n = job.get("max_samples") or len(ds.data)
     return ds.sample(tok, n, output_len=MAX_TOKENS, no_oversample=True)
@@ -48,15 +89,27 @@ def payload(job: dict, req) -> dict:
     return body
 
 
+def rescore(job: dict) -> dict:
+    from vllm_omni.benchmarks.data_modules.daily_omni_eval import evaluate_answer_official, extract_predicted_choice, normalize_gold_answer
+
+    resp = job["responses"]
+    per = []
+    for i, f in enumerate(_items(job)):
+        key = _key(i, f)
+        raw = resp.get(key)
+        ok = isinstance(raw, str) and bool(raw)
+        per.append({"id": key, "video_id": f["video_id"], "task_type": f["task_type"], "question": f["question"], "gold_raw": f["answer"],
+                    "expected": normalize_gold_answer(f["answer"]), "predicted": extract_predicted_choice(raw) if ok else None,
+                    "is_correct": bool(ok and evaluate_answer_official(raw, f["answer"])), "is_success": ok, "error": "" if ok else "no response",
+                    "raw": raw if ok else None})
+    acc = sum(p["is_correct"] for p in per) / len(per) if per else float("nan")
+    return {"bench": "daily_omni", "ids": [p["id"] for p in per], "per_sample": per, "accuracy": acc}
+
+
 async def run(job: dict) -> dict:
     from vllm.benchmarks.lib.endpoint_request_func import RequestFuncOutput
 
-    from vllm_omni.benchmarks.data_modules.daily_omni_eval import (
-        compute_daily_omni_accuracy_metrics,
-        evaluate_answer_official,
-        extract_predicted_choice,
-        normalize_gold_answer,
-    )
+    from vllm_omni.benchmarks.data_modules.daily_omni_eval import compute_daily_omni_accuracy_metrics
 
     reqs = load_requests(job)
     if job.get("dump_payloads"):
@@ -90,20 +143,27 @@ async def run(job: dict) -> dict:
     async with aiohttp.ClientSession(timeout=timeout) as session:
         await asyncio.gather(*(one(i, session) for i in range(len(reqs))))
     metrics = compute_daily_omni_accuracy_metrics(reqs, outs, include_per_item=True) or {}
-    per = []
-    for r, o in zip(reqs, outs):
-        gold = normalize_gold_answer(r.daily_omni_gold_answer or "")
-        pred = extract_predicted_choice(o.generated_text) if o.success else None
-        per.append({"id": f"{r.daily_omni_video_id}#{r.request_id}", "video_id": r.daily_omni_video_id, "task_type": r.daily_omni_task_type,
-                    "expected": gold, "predicted": pred, "is_correct": bool(o.success and evaluate_answer_official(o.generated_text, r.daily_omni_gold_answer)), "is_success": bool(o.success),
-                    "error": o.error, "raw": (o.generated_text or "")[:2000]})
-    return {"bench": "daily_omni", "ids": [p["id"] for p in per], "per_sample": per, "summary": {k: v for k, v in metrics.items() if k != "per_item"},
-            "per_item": metrics.get("per_item"), "wall_s": time.time() - t0}
+    # the stored per-sample record is the rescore of the raw responses, so evidence and verification agree by construction
+    responses = {f"{r.daily_omni_video_id}#{i}": (o.generated_text if o.success else None) for i, (r, o) in enumerate(zip(reqs, outs))}
+    res = rescore({**job, "responses": responses})
+    for p, o in zip(res["per_sample"], outs):
+        if not o.success:
+            p["error"] = o.error
+    res["summary"] = {k: v for k, v in metrics.items() if k != "per_item"}
+    res["wall_s"] = time.time() - t0
+    return res
 
 
 def main() -> int:
     job = json.loads(Path(sys.argv[1]).read_text())
-    Path(sys.argv[2]).write_text(json.dumps(asyncio.run(run(job)), default=str))
+    mode = job.get("mode", "run")
+    if mode == "manifest":
+        out = manifest(job)
+    elif mode == "rescore":
+        out = rescore(job)
+    else:
+        out = asyncio.run(run(job))
+    Path(sys.argv[2]).write_text(json.dumps(out, default=str))
     return 0
 
 

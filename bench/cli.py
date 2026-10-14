@@ -418,8 +418,15 @@ async def _sweep(args) -> int:
         if state == "reuse":
             res = json.loads((cell_dir / "result.json").read_text())
         else:
-            res = await run_one_cell(cell=cell, out=cell_dir, port=int(spec.get("port", 18100)), url=None, cache_policy="restart",
-                                     run_order_seed=seed, save_audio=bool(spec.get("save_audio", True)), strict=True, kind=kind, spec=current)
+            try:
+                res = await run_one_cell(cell=cell, out=cell_dir, port=int(spec.get("port", 18100)), url=None, cache_policy="restart",
+                                         run_order_seed=seed, save_audio=bool(spec.get("save_audio", True)), strict=True, kind=kind, spec=current)
+            except Exception as e:  # a failed cell (e.g. server startup) is recorded and the sweep continues
+                record["cells"][cell.digest] = {"index": i, "candidate_id": cell.candidate.candidate_id, "concurrency": cell.concurrency,
+                                                "dir": str(cell_dir), "cell_compliant": False, "failure": f"{type(e).__name__}: {e}"[:500]}
+                rec_path.write_text(json.dumps(record, indent=1))
+                rc = 1
+                continue
         compliant = verify_cell(cell_dir, current_spec=current).ok
         record["cells"][cell.digest] = {"index": i, "candidate_id": cell.candidate.candidate_id, "concurrency": cell.concurrency,
                                         "dir": str(cell_dir), "reused": state == "reuse", "cell_compliant": compliant,

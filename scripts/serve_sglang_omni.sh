@@ -14,4 +14,4 @@ if [ "${OMNI_SGLANG_MPS:-0}" = "1" ]; then
 fi
 exec sgl-omni serve --model-path "$MODEL_PATH" --model-name minicpmo \
   --thinker.engine.mem_fraction_static 0.55 --talker.engine.mem_fraction_static 0.15 \
-  --thinker.factory.max_seq_len 8192 --port "$PORT" "${MPS_ARGS[@]}" "$@"
+  --thinker.factory.max_seq_len "${OMNI_SGLANG_MAX_SEQ:-8192}" --port "$PORT" "${MPS_ARGS[@]}" "$@"

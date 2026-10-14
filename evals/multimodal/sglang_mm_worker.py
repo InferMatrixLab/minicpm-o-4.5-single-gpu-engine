@@ -3,23 +3,27 @@
     <eval-env>/python evals/multimodal/sglang_mm_worker.py <job.json> <out.json>
 
 Working directory: the pinned sglang-omni checkout.  Samples, prompts, answer
-extraction and accuracy come from its ``benchmarks`` package unchanged; only
-the wire format of the request is chosen per engine:
+extraction and accuracy come from its ``benchmarks`` package unchanged.  The
+upstream loaders call ``datasets.load_dataset`` without a revision; this worker
+routes them through a loader boundary that injects the locked revision of each
+dataset repo (an unpinned repo is refused), so a different cached revision can
+never be evaluated under the accepted identity.
 
-* ``sglang`` - sglang-omni's native body (top-level ``images`` / ``audios``);
-* ``openai`` - OpenAI content parts: the media first (``image_url`` or
-  ``input_audio``), then the prompt text, which is where sglang-omni places
-  its media placeholders, so the rendered prompts agree.
+Modes (``job["mode"]``):
+* ``manifest`` - load the samples and return (id, content sha256) for each;
+  content covers the prompt, choices/answer and media bytes;
+* ``run``      - send each sample to ``url`` and score; full raw responses are kept;
+* ``rescore``  - re-score saved raw responses (``job["responses"]``: id -> text or null).
 
-Job: ``bench`` (mmmu|mmsu), ``repo_id`` (None = full set), ``max_samples``,
-``url``, ``model``, ``format``, ``concurrency``, ``max_tokens``,
-``extra_body``, ``timeout_s``.
+Wire format per engine: ``sglang`` native (top-level ``images``/``audios``) or
+``openai`` content parts with the media first, then the prompt text.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -27,6 +31,72 @@ import time
 from pathlib import Path
 
 import aiohttp
+
+#: Locked dataset revisions (must equal evals/assets.lock.json).
+REVISIONS = {
+    "MMMU/MMMU": "876ce5cb130f7f7e290ce4d9984357737d4db5cf",
+    "zhaochenyang20/mmmu-ci-50": "ff72fd69cc7e0719e04a0ddb12d160de89c6fefe",
+    "ddwang2000/MMSU": "548e2283105825bf908a7db5c09c00dbcf42bd4c",
+    "zhaochenyang20/mmsu-ci-2000": "5ae6ed4343a89566be6dd90023d529f1bd97802d",
+}
+CONSUMED: list[dict] = []
+
+
+def _pin_loaders() -> None:
+    import datasets
+
+    import benchmarks.dataset.mmmu as mmmu_mod
+    import benchmarks.dataset.mmsu as mmsu_mod
+
+    real = datasets.load_dataset
+
+    def pinned(path, *args, **kwargs):
+        if path not in REVISIONS:
+            raise RuntimeError(f"dataset {path} has no locked revision")
+        if kwargs.get("revision") not in (None, REVISIONS[path]):
+            raise RuntimeError(f"dataset {path} requested at a foreign revision {kwargs['revision']}")
+        kwargs["revision"] = REVISIONS[path]
+        ds = real(path, *args, **kwargs)
+        # offline mode may fall back to "the latest cached version": the arrow files actually
+        # consumed must come from the locked revision's cache directory
+        parts = ds.values() if isinstance(ds, dict) else [ds]
+        files = [f["filename"] for d in parts for f in d.cache_files]
+        if not files or not all(REVISIONS[path] in f for f in files):
+            raise RuntimeError(f"dataset {path} was not loaded from revision {REVISIONS[path]}: {files[:2]}")
+        CONSUMED.append({"repo": path, "revision": REVISIONS[path], "args": [str(a) for a in args], "split": kwargs.get("split"),
+                         "files": sorted(set(files))[:4]})
+        return ds
+
+    mmmu_mod.load_dataset = pinned
+    mmsu_mod.load_dataset = pinned
+
+
+def load(job: dict):
+    _pin_loaders()
+    if job["bench"] == "mmmu":
+        from benchmarks.dataset.mmmu import load_mmmu_samples
+
+        samples = load_mmmu_samples(job.get("max_samples"), repo_id=job.get("repo_id"))
+        return samples, [None] * len(samples)
+    from benchmarks.dataset.mmsu import load_mmsu_samples
+    from benchmarks.tasks.audio_understanding import DEFAULT_PROMPT, _build_question_text
+
+    samples = load_mmsu_samples(job.get("max_samples"), repo_id=job.get("repo_id"))
+    return samples, [_build_question_text(s, DEFAULT_PROMPT) for s in samples]
+
+
+def content_sha(bench: str, sample, text: str | None) -> str:
+    h = hashlib.sha256()
+    if bench == "mmmu":
+        for part in (sample.sample_id, sample.prompt, json.dumps(sample.answer, default=str), sample.question_type, *sample.image_data_uris):
+            h.update(str(part).encode())
+            h.update(b"\0")
+    else:
+        for part in (sample.sample_id, text, sample.answer_text, str(sample.answer_index), *sample.choices):
+            h.update(str(part).encode())
+            h.update(b"\0")
+        h.update(Path(sample.audio_path).read_bytes())
+    return h.hexdigest()
 
 
 def _openai_mmmu(sample) -> list:
@@ -57,20 +127,29 @@ def build_payload(job: dict, sample, mmsu_text: str | None) -> dict:
     return body
 
 
-async def run(job: dict) -> dict:
+def score(bench: str, samples, results) -> tuple[list[dict], dict, float]:
+    if bench == "mmmu":
+        from benchmarks.metrics.mmmu import compute_mmmu_metrics
+        from benchmarks.tasks.visual_understand import build_mmmu_result_records
+
+        per = build_mmmu_result_records(samples, results)
+        summ = compute_mmmu_metrics(per)
+        rows = [{"id": p["sample_id"], "expected": p["expected"], "predicted": p["predicted"], "is_correct": p["is_correct"],
+                 "is_success": p["is_success"], "error": p["error"], "raw": r.text if r.is_success else None} for p, r in zip(per, results)]
+        return rows, summ, summ["accuracy"]
+    from benchmarks.metrics.mmsu import compute_mmsu_metrics
+    from benchmarks.tasks.audio_understanding import build_mmsu_results
+
+    per = build_mmsu_results(results, samples)
+    summ = compute_mmsu_metrics(per)
+    rows = [{"id": p.sample_id, "expected": p.correct_choice, "predicted": p.predicted_choice, "is_correct": p.is_correct,
+             "is_success": p.is_success, "error": p.error, "raw": p.raw_response if p.is_success else None} for p in per]
+    return rows, summ, summ["overall_accuracy"]
+
+
+async def send_all(job: dict, samples, texts) -> list:
     from benchmarks.benchmarker.data import RequestResult
 
-    if job["bench"] == "mmmu":
-        from benchmarks.dataset.mmmu import load_mmmu_samples
-
-        samples = load_mmmu_samples(job.get("max_samples"), repo_id=job.get("repo_id"))
-        texts = [None] * len(samples)
-    else:
-        from benchmarks.dataset.mmsu import load_mmsu_samples
-        from benchmarks.tasks.audio_understanding import DEFAULT_PROMPT, _build_question_text
-
-        samples = load_mmsu_samples(job.get("max_samples"), repo_id=job.get("repo_id"))
-        texts = [_build_question_text(s, DEFAULT_PROMPT) for s in samples]
     url = job["url"].rstrip("/") + "/v1/chat/completions"
     results: list = [None] * len(samples)
     sem = asyncio.Semaphore(int(job["concurrency"]))
@@ -79,11 +158,10 @@ async def run(job: dict) -> dict:
     async def one(i, session):
         s = samples[i]
         r = RequestResult(request_id=s.sample_id)
-        payload = build_payload(job, s, texts[i])
         async with sem:
             t0 = time.perf_counter()
             try:
-                async with session.post(url, json=payload) as resp:
+                async with session.post(url, json=build_payload(job, s, texts[i])) as resp:
                     body = await resp.text()
                     r.latency_s = time.perf_counter() - t0
                     if resp.status != 200:
@@ -93,9 +171,6 @@ async def run(job: dict) -> dict:
                         msg = (obj.get("choices") or [{}])[0].get("message") or {}
                         content = msg.get("content")
                         r.text = content if isinstance(content, str) else ""
-                        usage = obj.get("usage") or {}
-                        r.prompt_tokens = usage.get("prompt_tokens", 0)
-                        r.completion_tokens = usage.get("completion_tokens", 0)
                         r.is_success = bool(r.text)
                         if not r.is_success:
                             r.error = "Empty response"
@@ -103,36 +178,38 @@ async def run(job: dict) -> dict:
                 r.error = f"{type(e).__name__}: {e}"
         results[i] = r
 
-    t0 = time.time()
     async with aiohttp.ClientSession(timeout=timeout) as session:
         await asyncio.gather(*(one(i, session) for i in range(len(samples))))
-    wall = time.time() - t0
-    if job["bench"] == "mmmu":
-        from benchmarks.metrics.mmmu import compute_mmmu_metrics
-        from benchmarks.tasks.visual_understand import build_mmmu_result_records
-
-        per = build_mmmu_result_records(samples, results)
-        summ = compute_mmmu_metrics(per)
-        per_out = [{"id": p["sample_id"], "expected": p["expected"], "predicted": p["predicted"], "is_correct": p["is_correct"],
-                    "is_success": p["is_success"], "error": p["error"], "raw": (r.text or "")[:2000]} for p, r in zip(per, results)]
-        accuracy = summ["accuracy"]
-    else:
-        from benchmarks.metrics.mmsu import compute_mmsu_metrics
-        from benchmarks.tasks.audio_understanding import build_mmsu_results
-
-        per = build_mmsu_results(results, samples)
-        summ = compute_mmsu_metrics(per)
-        per_out = [{"id": p.sample_id, "expected": p.correct_choice, "predicted": p.predicted_choice, "is_correct": p.is_correct,
-                    "is_success": p.is_success, "error": p.error, "raw": p.raw_response[:2000]} for p in per]
-        accuracy = summ["overall_accuracy"]
-    return {"bench": job["bench"], "ids": [s.sample_id for s in samples], "per_sample": per_out, "summary": summ, "accuracy": accuracy,
-            "wall_s": wall, "example_payload_keys": sorted(build_payload(job, samples[0], texts[0]).keys()) if samples else []}
+    return results
 
 
 def main() -> int:
     job = json.loads(Path(sys.argv[1]).read_text())
     sys.path.insert(0, os.getcwd())
-    out = asyncio.run(run(job))
+    from benchmarks.benchmarker.data import RequestResult
+
+    samples, texts = load(job)
+    if job["mode"] == "manifest":
+        out = {"bench": job["bench"], "items": [[s.sample_id, content_sha(job["bench"], s, t)] for s, t in zip(samples, texts)], "consumed": CONSUMED}
+    elif job["mode"] == "rescore":
+        resp = job["responses"]
+        results = []
+        for s in samples:
+            r = RequestResult(request_id=s.sample_id)
+            text = resp.get(s.sample_id)
+            if isinstance(text, str) and text:
+                r.text, r.is_success = text, True
+            else:
+                r.error = "no response"
+            results.append(r)
+        rows, summ, acc = score(job["bench"], samples, results)
+        out = {"bench": job["bench"], "ids": [s.sample_id for s in samples], "per_sample": rows, "summary": summ, "accuracy": acc, "consumed": CONSUMED}
+    else:
+        t0 = time.time()
+        results = asyncio.run(send_all(job, samples, texts))
+        rows, summ, acc = score(job["bench"], samples, results)
+        out = {"bench": job["bench"], "ids": [s.sample_id for s in samples], "per_sample": rows, "summary": summ, "accuracy": acc,
+               "wall_s": time.time() - t0, "consumed": CONSUMED}
     Path(sys.argv[2]).write_text(json.dumps(out))
     return 0
 
