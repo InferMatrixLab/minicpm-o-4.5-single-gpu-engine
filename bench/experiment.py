@@ -29,6 +29,7 @@ class Candidate:
     env: tuple = ()  # sorted (key, value) pairs added to the server environment
     label: str = ""  # human-readable variant name, e.g. "mps-on"
     deploy_files_sha256: tuple = ()  # sha256 of every deploy file the launch reads
+    mps: str = "off"  # declared MPS policy, verified at runtime: "off" | "on"
 
     @classmethod
     def from_spec(cls, d: dict, deploy_files_sha256: tuple = ()) -> "Candidate":
@@ -39,11 +40,14 @@ class Candidate:
             env=tuple(sorted((str(k), str(v)) for k, v in d.get("env", {}).items())),
             label=str(d.get("label", "")),
             deploy_files_sha256=tuple(deploy_files_sha256),
+            mps=str(d.get("mps", "off")),
         )
 
     def identity(self) -> dict:
+        if self.mps not in ("off", "on"):
+            raise ValueError(f"mps policy must be 'off' or 'on', got {self.mps!r}")
         return {"adapter": self.adapter, "config": self.config, "extra": list(self.extra), "env": [list(p) for p in self.env],
-                "deploy_files_sha256": list(self.deploy_files_sha256)}
+                "deploy_files_sha256": list(self.deploy_files_sha256), "mps": self.mps}
 
     @property
     def digest(self) -> str:
@@ -84,7 +88,8 @@ class CellSpec:
 
     @property
     def digest(self) -> str:
-        return digest(self.identity())
+        """Excludes K: a declared K extension stays the same cell."""
+        return digest({k: v for k, v in self.identity().items() if k != "k"})
 
     def to_json(self) -> dict:
         return {**self.identity(), "candidate_id": self.candidate.candidate_id, "digest": self.digest}
@@ -106,3 +111,60 @@ def asdict_candidate(c: Candidate) -> dict:
     d["candidate_id"] = c.candidate_id
     d["digest"] = c.digest
     return d
+
+
+#: Spec fields that a deliberate K extension may change; the base digest excludes them.
+SCHEDULE_FIELDS = ("k", "k_updates")
+
+
+def spec_digest(spec: dict) -> str:
+    return digest(spec)
+
+
+def spec_base_digest(spec: dict) -> str:
+    return digest({k: v for k, v in spec.items() if k not in SCHEDULE_FIELDS})
+
+
+def build_spec(
+    *,
+    kind: str,
+    cell: CellSpec,
+    warmup_ids: list[str],
+    measured_ids: list[str],
+    model: dict,
+    dataset: dict,
+    sampling: dict,
+    adapter_options: dict,
+    fingerprints: dict,
+    hardware: dict,
+    cache_policy: str,
+    strict: bool,
+    save_audio: bool,
+    record_raw: bool,
+) -> dict:
+    """The frozen experiment specification stored with, and checked against, every result."""
+    if kind not in ("performance", "quality"):
+        raise ValueError(f"unknown experiment kind {kind}")
+    return {
+        "kind": kind,
+        "candidate": {**cell.candidate.identity(), "candidate_id": cell.candidate.candidate_id, "digest": cell.candidate.digest,
+                      "label": cell.candidate.label},
+        "concurrency": cell.concurrency,
+        "k": cell.k,
+        "k_updates": [],
+        "id_set": cell.id_set,
+        "warmup_ids": list(warmup_ids),
+        "measured_ids": list(measured_ids),
+        "seed_index": cell.seed_index,
+        "timeout_s": cell.timeout_s,
+        "model": model,
+        "dataset": dataset,
+        "sampling": sampling,
+        "adapter_options": adapter_options,
+        "fingerprints": fingerprints,
+        "hardware": hardware,
+        "cache_policy": cache_policy,
+        "strict": strict,
+        "save_audio": save_audio,
+        "record_raw": record_raw,
+    }

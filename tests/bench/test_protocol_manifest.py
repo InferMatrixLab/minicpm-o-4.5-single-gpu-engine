@@ -247,7 +247,8 @@ class _FakeServer:
         self.startup_s = 1.5
 
     def evidence(self):
-        return {"server_pid": 50000 + _FakeServer.started, "argv": ["fake"], "env": {}, "mps": {"mps_active": False}}
+        return {"server_pid": 50000 + _FakeServer.started, "launch_argv": ["fake"], "launch_env": {}, "mps": {"observed": "off"},
+                "gpu": {"gpu_uuid": "GPU-fake"}}
 
     def __enter__(self):
         _FakeServer.started += 1
@@ -272,13 +273,14 @@ async def test_restart_policy_uses_fresh_server_per_run(tmp_path):
         assert (tmp_path / "run2_warmup" / "summary.json").exists()
         from bench.protocol import RunMeta, cell_compliant
 
-        assert not cell_compliant(results)  # loose geometry and a short timeout are never compliant evidence
-        meta = RunMeta(gpu="L20X", engine="engine", config="c", candidate_id="engine:c:1", config_digest="d", cell_digest="e")
+        assert not cell_compliant(results, expected_k=2)  # loose geometry and a short timeout are never compliant evidence
+        meta = RunMeta(gpu="L20X", engine="engine", config="c", candidate_id="engine:c:1", config_digest="d", cell_digest="e", experiment_base_digest="x")
         _FakeServer.started = 0
         strict = await run_cell(None, TextOnlyEngineAdapter(), _reqs(16, "wu"), _reqs(320, "ev"), concurrency=8, k_measured=2,
                                 out_dir=tmp_path / "strict", cache_policy="restart", server_factory=lambda k: _FakeServer(url), meta=meta,
                                 timeout_s=180.0, save_audio=False, log=lambda s: None)
-        assert cell_compliant(strict)
+        assert cell_compliant(strict, expected_k=2)
+        assert not cell_compliant(strict[:-1], expected_k=2)  # a dropped tail run fails against the declared K
         with pytest.raises(ValueError):
             await run_cell(None, TextOnlyEngineAdapter(), _reqs(2, "wu"), _reqs(4, "ev"), concurrency=1, k_measured=1,
                            out_dir=tmp_path / "z", cache_policy="flush", strict=False, log=lambda s: None)

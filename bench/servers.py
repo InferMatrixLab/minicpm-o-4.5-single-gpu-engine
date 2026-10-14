@@ -58,35 +58,85 @@ def gpu_memory_used_mib(gpu: int) -> float | None:
 RELEVANT_ENV_PREFIXES = ("CUDA_", "HF_", "VLLM", "SGLANG", "OMNI_", "PYTORCH_", "NCCL_", "TORCH")
 
 
-def gpu_compute_apps(gpu: int) -> list[dict]:
+def gpu_processes(gpu: int) -> list[dict] | None:
+    """Processes holding a context on ``gpu`` with their context type ("C", or "M+C" for MPS clients).
+
+    Returns None when the query fails (missing observation, never "no processes").
+    """
+    import xml.etree.ElementTree as ET
+
     try:
-        out = subprocess.run(
-            ["nvidia-smi", "-i", str(gpu), "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=30, check=True,
-        ).stdout
+        out = subprocess.run(["nvidia-smi", "-q", "-x", "-i", str(gpu)], capture_output=True, text=True, timeout=30, check=True).stdout
+        root = ET.fromstring(out)
     except Exception:
-        return []
-    apps = []
-    for line in out.strip().splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 3:
-            apps.append({"pid": int(parts[0]) if parts[0].isdigit() else parts[0], "process_name": parts[1], "used_mib": parts[2]})
-    return apps
+        return None
+    procs = []
+    for p in root.iter("process_info"):
+        pid = (p.findtext("pid") or "").strip()
+        procs.append({"pid": int(pid) if pid.isdigit() else pid, "type": (p.findtext("type") or "").strip(),
+                      "process_name": (p.findtext("process_name") or "").strip(), "used_memory": (p.findtext("used_memory") or "").strip()})
+    return procs
 
 
-def mps_evidence(gpu: int, pgid: int | None) -> dict:
-    """Whether the GPU is served through an MPS server, from the compute apps seen after startup."""
-    apps = gpu_compute_apps(gpu)
-    mps_server = any("nvidia-cuda-mps-server" in a["process_name"] for a in apps)
-    group_pids = set()
-    if pgid is not None:
-        try:
-            out = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True, timeout=10).stdout
-            group_pids = {int(x) for x in out.split()}
-        except Exception:
-            pass
-    direct = [a for a in apps if a["pid"] in group_pids]
-    return {"compute_apps": apps, "mps_server_on_gpu": mps_server, "server_group_direct_contexts": len(direct), "mps_active": mps_server}
+def _ppid_map() -> dict[int, int]:
+    out = {}
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                fields = (d / "stat").read_text().rsplit(")", 1)[1].split()
+                out[int(d.name)] = int(fields[1])
+            except (OSError, IndexError, ValueError):
+                pass
+    return out
+
+
+def descendants(pid: int, ppid: dict[int, int] | None = None) -> set[int]:
+    ppid = ppid if ppid is not None else _ppid_map()
+    children: dict[int, list[int]] = {}
+    for c, p in ppid.items():
+        children.setdefault(p, []).append(c)
+    out, stack = {pid}, [pid]
+    while stack:
+        for c in children.get(stack.pop(), []):
+            if c not in out:
+                out.add(c)
+                stack.append(c)
+    return out
+
+
+def process_info(pid: int) -> dict:
+    """Resolved command line and relevant environment of a running process."""
+    try:
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        env_raw = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return {"pid": pid, "error": "not readable"}
+    env = {}
+    for kv in env_raw:
+        k, _, v = kv.decode(errors="replace").partition("=")
+        if k.startswith(RELEVANT_ENV_PREFIXES):
+            env[k] = v
+    return {"pid": pid, "cmdline": [c.decode(errors="replace") for c in cmd if c], "env": dict(sorted(env.items()))}
+
+
+def classify_mps(server_pids: set[int], gpu_procs: list[dict] | None) -> dict:
+    """Attribute GPU contexts to this server's processes and derive the observed MPS state.
+
+    observed: "on" (every worker context is an MPS client), "off" (every worker
+    context is direct), "mixed", or "unknown" (no observation or no worker on the GPU).
+    MPS servers and other processes on the GPU that are not this server's
+    workers never decide the state.
+    """
+    if gpu_procs is None:
+        return {"observed": "unknown", "reason": "gpu process query failed", "workers": [], "foreign": []}
+    workers = [p for p in gpu_procs if p["pid"] in server_pids]
+    foreign = [p for p in gpu_procs if p["pid"] not in server_pids]
+    if not workers:
+        return {"observed": "unknown", "reason": "no context of this server on the GPU", "workers": [], "foreign": foreign}
+    mps = [w for w in workers if "M" in w["type"]]
+    observed = "on" if len(mps) == len(workers) else ("off" if not mps else "mixed")
+    return {"observed": observed, "workers": workers, "foreign": foreign,
+            "mps_servers_on_gpu": [p for p in gpu_procs if "nvidia-cuda-mps-server" in p["process_name"]]}
 
 
 class Server:
@@ -122,22 +172,29 @@ class Server:
                 if _healthy(self.spec.url + self.spec.health_path):
                     self.startup_s = time.monotonic() - t0
                     return self
-                time.sleep(5)
+                time.sleep(1)
             raise RuntimeError(f"{self.spec.name} not healthy after {self.spec.startup_timeout_s}s; see {self.log_path}")
         except BaseException:
             self.stop()  # never leave stage children behind
             raise
 
     def evidence(self) -> dict:
-        """Launch identity and runtime state of this server, captured after startup."""
+        """Launch inputs and the resolved runtime state of this server, captured after startup."""
+        from bench.fingerprint import gpu_identity
+
+        pids = descendants(self.proc.pid) if self.proc else set()
+        gpu_procs = gpu_processes(self.spec.gpu)
+        on_gpu = {p["pid"] for p in gpu_procs or []}
         return {
             "server_pid": self.proc.pid if self.proc else None,
             "server_pgid": self.pgid,
-            "argv": list(self.spec.cmd),
-            "env": dict(sorted(self._env_overlay.items())),
-            "gpu": self.spec.gpu,
+            "launch_argv": list(self.spec.cmd),
+            "launch_env": dict(sorted(self._env_overlay.items())),
+            "gpu": gpu_identity(self.spec.gpu),
             "startup_s": self.startup_s,
-            "mps": mps_evidence(self.spec.gpu, self.pgid),
+            "process_tree": sorted(pids),
+            "gpu_workers": [process_info(pid) for pid in sorted(pids & on_gpu)],
+            "mps": classify_mps(pids, gpu_procs),
         }
 
     def stop(self, timeout_s: float = 120.0, gpu_free_mib: float = 1024.0) -> None:
@@ -151,8 +208,11 @@ class Server:
                 except ProcessLookupError:
                     break
                 end = time.monotonic() + wait
-                while time.monotonic() < end and self._group_alive(pgid):
-                    time.sleep(1)
+                while time.monotonic() < end:
+                    self.proc.poll()  # reap the leader so a zombie does not keep the group "alive"
+                    if not self._group_alive(pgid):
+                        break
+                    time.sleep(0.5)
                 if not self._group_alive(pgid):
                     break
         try:
@@ -170,13 +230,23 @@ class Server:
 
     @staticmethod
     def _group_alive(pgid: int) -> bool:
+        """True while any non-zombie process of the group exists."""
         try:
             os.killpg(pgid, 0)
-            return True
         except ProcessLookupError:
             return False
         except PermissionError:
             return True
+        for d in Path("/proc").iterdir():
+            if not d.name.isdigit():
+                continue
+            try:
+                fields = (d / "stat").read_text().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            if fields[0] != "Z" and int(fields[2]) == pgid:
+                return True
+        return False
 
     def __enter__(self) -> "Server":
         return self.start()

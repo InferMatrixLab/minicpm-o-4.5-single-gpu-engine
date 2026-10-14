@@ -65,7 +65,7 @@ def per_run_values(run_summaries: list[dict], metric: str) -> np.ndarray:
 #: Workload identity: must agree within a side and between engine and baseline.
 WORKLOAD_FIELDS = ("gpu", "concurrency", "id_set", "ids_sha256", "seed_index", "n_requests", "timeout_s")
 #: Configuration identity: must be constant within a side (one declared configuration).
-CONFIG_FIELDS = ("engine", "config", "candidate_id", "config_digest", "cell_digest")
+CONFIG_FIELDS = ("engine", "config", "candidate_id", "config_digest", "cell_digest", "experiment_base_digest", "mps_policy")
 REQUIRED_TIMEOUT_S = 180.0
 
 
@@ -91,6 +91,11 @@ def _check_run(r: dict, side: str) -> None:
             raise StatisticsInputError(f"{side}: run {lab} has no verified cache flush")
     else:
         raise StatisticsInputError(f"{side}: run {lab} did not start with verified-cold caches")
+    mps = (r.get("runtime_evidence") or {}).get("mps") or {}
+    if mps.get("observed") != r.get("mps_policy"):
+        raise StatisticsInputError(
+            f"{side}: run {lab} declared MPS {r.get('mps_policy')!r} but observed {mps.get('observed', 'nothing')!r}: {mps.get('reason', '')}"
+        )
 
 
 def validate_cell_runs(runs: list[dict], expected_k: int, side: str) -> dict:
@@ -119,19 +124,19 @@ def json_key(v):
     return v if isinstance(v, (str, int, float, type(None))) else str(v)
 
 
-def validate_comparison(new_runs: list[dict], base_runs: list[dict], final: bool) -> None:
+def validate_comparison(new_runs: list[dict], base_runs: list[dict], final: bool, new_k: int, base_k: int) -> None:
     """Final confirmation: predeclared K=10 on both sides.  Development: K=5..10 complete runs.
 
-    Both sides must be complete experiments (run1..runK) on the same workload.
+    ``new_k`` / ``base_k`` are the run counts declared by each side's frozen
+    experiment spec, so a failed tail run cannot be dropped from the list.
     """
-    for side, runs in (("engine", new_runs), ("baseline", base_runs)):
-        k = len(runs)
+    for side, runs, k in (("engine", new_runs, new_k), ("baseline", base_runs, base_k)):
         if final and k != FINAL_K:
-            raise StatisticsInputError(f"{side}: final confirmation requires K={FINAL_K}, got {k}")
+            raise StatisticsInputError(f"{side}: final confirmation requires a declared K={FINAL_K}, got {k}")
         if not final and not (DEV_MIN_K <= k <= FINAL_K):
-            raise StatisticsInputError(f"{side}: development comparisons use {DEV_MIN_K}..{FINAL_K} runs, got {k}")
-    ni = validate_cell_runs(new_runs, len(new_runs), "engine")
-    bi = validate_cell_runs(base_runs, len(base_runs), "baseline")
+            raise StatisticsInputError(f"{side}: development comparisons declare {DEV_MIN_K}..{FINAL_K} runs, got {k}")
+    ni = validate_cell_runs(new_runs, new_k, "engine")
+    bi = validate_cell_runs(base_runs, base_k, "baseline")
     for f in WORKLOAD_FIELDS:
         if ni[f] != bi[f]:
             raise StatisticsInputError(f"engine and baseline differ on {f}: {ni[f]} vs {bi[f]}")
@@ -189,12 +194,14 @@ def estimate(
     metric: str,
     *,
     final: bool,
+    new_k: int,
+    base_k: int,
     replicates: int = BOOTSTRAP_REPLICATES,
     seed: int = 0,
     target: float = TARGET_SPEEDUP,
 ) -> RatioEstimate:
     """Validated estimate: ``final=True`` applies the final-confirmation rules, ``False`` the development rules."""
-    validate_comparison(new_runs, base_runs, final=final)
+    validate_comparison(new_runs, base_runs, final=final, new_k=new_k, base_k=base_k)
     return _estimate_unchecked(new_runs, base_runs, metric, replicates=replicates, seed=seed, target=target)
 
 
@@ -265,9 +272,15 @@ def duration_guard(
     return DurationGuard(corpus, tail, excess, not reasons, reasons)
 
 
-def cell_estimates(new_runs: list[dict], base_runs_by_metric: dict[str, list[dict]], final: bool, seed: int = 0) -> dict[str, RatioEstimate]:
-    """All four headline metrics for one (GPU, C) cell; each metric has its own winning baseline."""
-    return {m: estimate(new_runs, base_runs_by_metric[m], m, seed=seed, final=final) for m in HEADLINE_METRICS}
+def compare_cells(new_cell_dir, base_cell_dir, metric: str, final: bool, seed: int = 0) -> RatioEstimate:
+    """The reporting entry point: verify both cells from their artifacts, then estimate with their declared K."""
+    from bench.verify import verify_cell
+
+    vn, vb = verify_cell(new_cell_dir), verify_cell(base_cell_dir)
+    for side, v in (("engine", vn), ("baseline", vb)):
+        if not v.ok:
+            raise StatisticsInputError(f"{side} cell {v.cell_dir} failed verification: {v.problems[:5]}")
+    return estimate(vn.measured_summaries, vb.measured_summaries, metric, final=final, new_k=vn.spec["k"], base_k=vb.spec["k"], seed=seed)
 
 
 def needs_more_runs(e: RatioEstimate) -> bool:

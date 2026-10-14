@@ -82,6 +82,8 @@ class RunMeta:
     candidate_id: str = ""
     config_digest: str = ""  # candidate digest: adapter, config, args, env, deploy files
     cell_digest: str = ""  # candidate + C + workload + K + timeout
+    experiment_base_digest: str = ""  # frozen experiment spec without its run schedule
+    mps_policy: str = "off"  # declared; checked against runtime evidence
     id_set: str = "eval"
     ids_sha256: str = ""  # of the IDs actually measured in this run
     expected_ids_sha256: str = ""
@@ -103,6 +105,7 @@ class RunResult:
     per_request: list[RequestMetrics]
     traces: list[RequestTrace] = field(repr=False, default_factory=list)
     meta: RunMeta = field(default_factory=RunMeta)
+    artifacts: dict = field(default_factory=dict)
 
     def summary(self) -> dict:
         return {"label": self.label, "concurrency": self.concurrency, "measured": self.measured, **asdict(self.meta), **self.metrics.to_json()}
@@ -115,8 +118,27 @@ def evaluate_run(label: str, concurrency: int, traces: list[RequestTrace], measu
     )
 
 
-def save_run(run: RunResult, out_dir: Path, save_audio: bool = True) -> None:
-    """Raw traces are kept for every run, valid or not."""
+def _sha(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def run_artifact_hashes(out_dir: Path) -> dict:
+    """Content hashes of one run's artifacts; WAVs are covered by a manifest hash."""
+    wav_dir = out_dir / "wav"
+    wavs = sorted(wav_dir.glob("*.wav")) if wav_dir.is_dir() else []
+    manifest = hashlib.sha256("\n".join(f"{p.name} {_sha(p)}" for p in wavs).encode()).hexdigest()
+    return {
+        "summary.json": _sha(out_dir / "summary.json"),
+        "requests.jsonl": _sha(out_dir / "requests.jsonl"),
+        "traces.jsonl": _sha(out_dir / "traces.jsonl"),
+        "wire.jsonl.gz": _sha(out_dir / "wire.jsonl.gz"),
+        "wav_count": len(wavs),
+        "wav_manifest_sha256": manifest,
+    }
+
+
+def save_run(run: RunResult, out_dir: Path, save_audio: bool = True) -> dict:
+    """Raw traces are kept for every run, valid or not.  Returns the artifacts' content hashes."""
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "summary.json").write_text(json.dumps(run.summary(), indent=1))
     with (out_dir / "requests.jsonl").open("w") as f:
@@ -142,6 +164,8 @@ def save_run(run: RunResult, out_dir: Path, save_audio: bool = True) -> None:
             pcm = t.audio.pcm()
             if pcm.size:
                 (wav_dir / f"{t.request_id}.wav").write_bytes(encode_wav_pcm16(pcm, t.audio.sample_rate or 24000))
+    run.artifacts = run_artifact_hashes(out_dir)
+    return run.artifacts
 
 
 @dataclass
@@ -162,8 +186,12 @@ def check_cell_geometry(warmup: list[CanonicalRequest], evaluation: list[Canonic
     eval_ids = [r.request_id for r in evaluation]
     if len(set(eval_ids)) != len(eval_ids):
         raise ValueError("measured IDs repeat within a run")
-    if set(eval_ids) & {r.request_id for r in warmup}:
+    # full-set quality generation measures every row, so its warmup necessarily overlaps;
+    # those cells are quality experiments, never timing evidence
+    if id_set != "full" and set(eval_ids) & {r.request_id for r in warmup}:
         raise ValueError("warmup IDs must be disjoint from evaluation IDs")
+    if id_set == "full" and strict and len(evaluation) != 1088:
+        raise ValueError(f"full-set quality generation needs all 1088 rows, got {len(evaluation)}")
     if k_measured < 1:
         raise ValueError("at least one measured run is required")
     if not strict:
@@ -196,9 +224,14 @@ async def run_cell(
     save_audio: bool = True,
     record_raw: bool = True,
     strict: bool = True,
+    run_indices: list[int] | None = None,
     log: Callable[[str], None] = print,
 ) -> list[RunResult]:
-    """Warmup, discarded run 0, then ``k_measured`` runs.  Every run is saved."""
+    """Warmup, discarded run 0, then ``k_measured`` runs.  Every run is saved.
+
+    ``run_indices`` limits execution to those runs (a declared K extension runs
+    only the new indices; each still gets a fresh server and its own warmup).
+    """
     if cache_policy not in CACHE_POLICIES:
         raise ValueError(f"cache_policy must be one of {CACHE_POLICIES}")
     if cache_policy == "restart" and server_factory is None:
@@ -250,7 +283,12 @@ async def run_cell(
         )
         results.append(run)
 
-    for k in range(k_measured + 1):
+    indices = list(range(k_measured + 1)) if run_indices is None else list(run_indices)
+    if any(i < 0 or i > k_measured for i in indices):
+        raise ValueError(f"run indices {indices} outside run0..run{k_measured}")
+    if run_indices is not None and cache_policy != "restart":
+        raise ValueError("partial run schedules need a fresh server per run")
+    for k in indices:
         if cache_policy == "restart":
             with server_factory(k) as srv:  # type: ignore[misc]
                 ev = srv.evidence() if hasattr(srv, "evidence") else {}
@@ -270,15 +308,15 @@ def cell_valid(results: list[RunResult]) -> bool:
     return bool(runs) and all(r.metrics.valid for r in runs)
 
 
-def cell_compliant(results: list[RunResult]) -> bool:
-    """Valid, strict geometry, and every measured run started with verified-cold caches."""
+def cell_compliant(results: list[RunResult], expected_k: int) -> bool:
+    """In-memory check against the declared K; reported verdicts come from ``bench.verify.verify_cell``."""
     from bench.stats import StatisticsInputError, validate_cell_runs
 
     runs = measured_runs(results)
     if not cell_valid(results):
         return False
     try:
-        validate_cell_runs([r.summary() for r in runs], expected_k=len(runs), side="cell")
+        validate_cell_runs([r.summary() for r in runs], expected_k=expected_k, side="cell")
     except StatisticsInputError:
         return False
     return True

@@ -12,7 +12,8 @@ _PID = [1000]
 def runs(values, metric="throughput_frames_s", prefix="run", side="new", **ident):
     base = {"gpu": "H200", "concurrency": 8, "id_set": "eval", "ids_sha256": "abc", "expected_ids_sha256": "abc", "seed_index": 0,
             "cache_policy": "restart", "timeout_s": 180.0, "strict": True, "n_requests": 320, "engine": side, "config": f"{side}.yaml",
-            "candidate_id": f"{side}:cfg:0123", "config_digest": f"{side}-digest", "cell_digest": f"{side}-cell"}
+            "candidate_id": f"{side}:cfg:0123", "config_digest": f"{side}-digest", "cell_digest": f"{side}-cell",
+            "experiment_base_digest": f"{side}-exp", "mps_policy": "off", "runtime_evidence": {"mps": {"observed": "off"}}}
     base.update(ident)
     out = []
     for i, v in enumerate(values):
@@ -20,6 +21,10 @@ def runs(values, metric="throughput_frames_s", prefix="run", side="new", **ident
         out.append({**base, "label": f"{prefix}{i + 1}", "measured": True, "valid": True, metric: v, "server_startup_s": 300.0,
                     "cache_evidence": {"fresh_server": True, "server_pid": _PID[0]}})
     return out
+
+
+def _k(runs):
+    return max(int(r["label"][3:]) for r in runs)
 
 
 def base_runs(values, metric="throughput_frames_s", **ident):
@@ -191,29 +196,29 @@ def test_baseline_reference_preprocessing_is_documented_not_disqualifying():
 def test_final_confirmation_requires_k10_and_matching_identity():
     new = runs([400.0] * 10)
     base = base_runs([100.0] * 10)
-    e = estimate(new, base, "throughput_frames_s", replicates=500, final=True)
+    e = estimate(new, base, "throughput_frames_s", replicates=500, final=True, new_k=_k(new), base_k=_k(base))
     assert e.verdict == "pass" and e.k_new == 10
     # a one-run, one-request comparison cannot pass final confirmation
     tiny = [{**runs([400.0])[0], "n_requests": 1}]
     with pytest.raises(StatisticsInputError):
-        estimate(tiny, [{**base_runs([100.0])[0], "n_requests": 1}], "throughput_frames_s", final=True)
+        estimate(tiny, [{**base_runs([100.0])[0], "n_requests": 1}], "throughput_frames_s", final=True, new_k=1, base_k=1)
     # omitting one (invalid) run is not a complete experiment
     with pytest.raises(StatisticsInputError):
-        validate_comparison(new[:9], base, final=True)
+        validate_comparison(new[:9], base, final=True, new_k=10, base_k=10)  # the declared K, not the list length
     with pytest.raises(StatisticsInputError):
-        validate_comparison(new, base_runs([100.0] * 10, concurrency=16), final=True)
+        validate_comparison(new, base_runs([100.0] * 10, concurrency=16), final=True, new_k=10, base_k=10)
     with pytest.raises(StatisticsInputError):
-        validate_comparison(new, base_runs([100.0] * 10, cache_policy="none"), final=True)
+        validate_comparison(new, base_runs([100.0] * 10, cache_policy="none"), final=True, new_k=10, base_k=10)
     with pytest.raises(StatisticsInputError):
         per_run_values(runs([float("nan"), 1.0]), "throughput_frames_s")
 
 
 def test_development_k_policy():
     with pytest.raises(StatisticsInputError):
-        estimate(runs([400.0] * 3), base_runs([100.0] * 3), "throughput_frames_s", final=False)
-    wide = estimate(runs([180.0, 230.0, 200.0, 260.0, 170.0]), base_runs([100.0] * 5), "throughput_frames_s", replicates=2000, final=False)
+        estimate(runs([400.0] * 3), base_runs([100.0] * 3), "throughput_frames_s", final=False, new_k=3, base_k=3)
+    wide = estimate(runs([180.0, 230.0, 200.0, 260.0, 170.0]), base_runs([100.0] * 5), "throughput_frames_s", replicates=2000, final=False, new_k=5, base_k=5)
     assert needs_more_runs(wide)
-    tight = estimate(runs([400.0] * 5), base_runs([100.0] * 5), "throughput_frames_s", replicates=500, final=False)
+    tight = estimate(runs([400.0] * 5), base_runs([100.0] * 5), "throughput_frames_s", replicates=500, final=False, new_k=5, base_k=5)
     assert not needs_more_runs(tight)
 
 
@@ -271,44 +276,66 @@ def test_b1_mixed_configuration_rejected():
     for i, r in enumerate(new):
         r["config"] = f"cfg{i}.yaml"
     with pytest.raises(StatisticsInputError):
-        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10)
     new = runs([400.0] * 10)
     new[3]["config_digest"] = "other"
     with pytest.raises(StatisticsInputError):
-        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10)
 
 
 def test_b1_one_request_runs_rejected():
     with pytest.raises(StatisticsInputError):
-        estimate(runs([400.0] * 10, n_requests=1), base_runs([100.0] * 10, n_requests=1), "throughput_frames_s", final=True)
+        estimate(runs([400.0] * 10, n_requests=1), base_runs([100.0] * 10, n_requests=1), "throughput_frames_s", final=True, new_k=10, base_k=10)
     mism = runs([400.0] * 10)
     mism[0]["ids_sha256"] = "zzz"  # measured IDs differ from the declared set
     with pytest.raises(StatisticsInputError):
-        estimate(mism, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+        estimate(mism, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=_k(mism), base_k=_k(base_runs([100.0] * 10)))
     with pytest.raises(StatisticsInputError):
-        estimate(runs([400.0] * 10, timeout_s=30.0), base_runs([100.0] * 10, timeout_s=30.0), "throughput_frames_s", final=True)
+        estimate(runs([400.0] * 10, timeout_s=30.0), base_runs([100.0] * 10, timeout_s=30.0), "throughput_frames_s", final=True, new_k=10, base_k=10)
     with pytest.raises(StatisticsInputError):
-        estimate(runs([400.0] * 10, strict=False), base_runs([100.0] * 10, strict=False), "throughput_frames_s", final=True)
+        estimate(runs([400.0] * 10, strict=False), base_runs([100.0] * 10, strict=False), "throughput_frames_s", final=True, new_k=10, base_k=10)
 
 
 def test_b1_development_run_omission_rejected():
     new = [r for r in runs([400.0] * 6) if r["label"] != "run3"]
     base = [r for r in base_runs([100.0] * 6) if r["label"] != "run3"]
     with pytest.raises(StatisticsInputError):
-        estimate(new, base, "throughput_frames_s", final=False)
+        estimate(new, base, "throughput_frames_s", final=False, new_k=_k(new), base_k=_k(base))
 
 
 def test_b1_false_cache_evidence_rejected():
     new = runs([400.0] * 10)
     new[2]["cache_evidence"] = {"fresh_server": True}  # no launch evidence
     with pytest.raises(StatisticsInputError):
-        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10)
     new = runs([400.0] * 10)
     new[4]["cache_evidence"] = dict(new[3]["cache_evidence"])  # same server process for two runs
     with pytest.raises(StatisticsInputError):
-        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10)
     new = runs([400.0] * 10, cache_policy="flush")
     for r in new:
         r["cache_evidence"] = {"empty": False}
     with pytest.raises(StatisticsInputError):
-        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10)
+
+
+
+def test_b1_tail_run_omission_rejected_against_declared_k():
+    new = runs([400.0] * 6)
+    base = base_runs([100.0] * 6)
+    with pytest.raises(StatisticsInputError):  # run6 failed and was dropped; the spec still declares K=6
+        estimate(new[:-1], base[:-1], "throughput_frames_s", final=False, new_k=6, base_k=6)
+    estimate(new, base, "throughput_frames_s", final=False, new_k=6, base_k=6, replicates=200)
+
+
+def test_mps_policy_must_match_observation():
+    new = runs([400.0] * 10)
+    new[0]["runtime_evidence"] = {"mps": {"observed": "on"}}
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10)
+    new = runs([400.0] * 10)
+    new[1]["runtime_evidence"] = {}
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10)
+    on = runs([400.0] * 10, mps_policy="on", runtime_evidence={"mps": {"observed": "on"}})
+    estimate(on, base_runs([100.0] * 10), "throughput_frames_s", final=True, new_k=10, base_k=10, replicates=200)

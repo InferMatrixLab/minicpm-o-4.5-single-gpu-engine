@@ -141,6 +141,19 @@ class IdSets:
             raise ValueError(f"eval pool too small for C={c}")
         return list(self.eval_pool[:n])
 
+    def full(self) -> list[str]:
+        """Every row, for full-set quality generation (AC-4.4); never a performance ID set."""
+        return list(self.warmup_pool + self.eval_pool + self.tuning_pool)
+
+    def measured(self, id_set: str, c: int) -> list[str]:
+        if id_set == "eval":
+            return self.eval(c)
+        if id_set == "tuning":
+            return self.tuning(c)
+        if id_set == "full":
+            return self.full()
+        raise ValueError(f"unknown id set {id_set}")
+
     def tuning(self, c: int) -> list[str]:
         n = min(len(self.tuning_pool), n_eval(c))
         return list(self.tuning_pool[:n])

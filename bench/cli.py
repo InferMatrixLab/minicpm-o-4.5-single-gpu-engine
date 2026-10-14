@@ -23,12 +23,16 @@ import yaml
 from bench.adapters import get_adapter
 from bench.adapters.vllm_omni import stage_sampling
 from bench.client import make_session, send_request
-from bench.manifest import build_manifest, gpu_info, validate_manifest
+from bench.manifest import build_manifest, validate_manifest
 from bench.metrics import request_metrics
-from bench.experiment import Candidate, CellSpec, asdict_candidate, digest, unique_candidates
-from bench.protocol import RunMeta, cell_compliant, cell_valid, evaluate_run, ids_sha256, measured_runs, plan_sweep, run_cell, save_run
+from bench.experiment import Candidate, CellSpec, asdict_candidate, build_spec, digest, spec_base_digest, spec_digest, unique_candidates
+from bench.fingerprint import env_fingerprint, file_sha256, gpu_identity, repo_fingerprint, tree_sha256
+from bench.protocol import RunMeta, evaluate_run, ids_sha256, plan_sweep, run_cell, save_run
+from bench.verify import verify_cell
 from bench.servers import Server, ServerSpec, sglang_omni_spec, vllm_omni_spec
 from bench.workload import (
+    MODEL_REPO,
+    MODEL_REVISION,
     SEED_TTS_REPO,
     SEED_TTS_REVISION,
     TalkerSampling,
@@ -124,14 +128,51 @@ def make_candidate(d: dict) -> Candidate:
 def make_cell(cand: Candidate, concurrency: int, k: int, id_set: str, seed_index: int, timeout_s: float, gpu: int) -> CellSpec:
     rows = load_seed_tts_rows()
     sets = make_id_sets(rows)
-    ids_eval = sets.tuning(concurrency) if id_set == "tuning" else sets.eval(concurrency)
     workload = {
         "dataset": SEED_TTS_REPO,
         "revision": SEED_TTS_REVISION,
         "warmup_ids_sha256": ids_sha256(sets.warmup(concurrency)),
-        "measured_ids_sha256": ids_sha256(ids_eval),
+        "measured_ids_sha256": ids_sha256(sets.measured(id_set, concurrency)),
     }
     return CellSpec(cand, concurrency, k, id_set, seed_index, timeout_s, gpu, workload)
+
+
+ADAPTER_PYTHON = {"vllm-omni": DEFAULT_PYTHONS["vllm-omni"], "sglang-omni": DEFAULT_PYTHONS["sglang-omni"], "engine": sys.executable}
+SERVE_SCRIPTS = {"vllm-omni": "serve_vllm_omni.sh", "sglang-omni": "serve_sglang_omni.sh", "engine": "serve_engine.sh"}
+
+
+def execution_fingerprints(adapter_name: str) -> dict:
+    """Everything outside the candidate that the measurement depends on."""
+    scripts = ROOT / "scripts"
+    return {
+        "harness_tree_sha256": tree_sha256(ROOT, ("bench", "scripts")),
+        "repos": {"vllm-omni": repo_fingerprint(VLLM_OMNI), "sglang-omni": repo_fingerprint(SGLANG_OMNI)},
+        "envs": {"bench": env_fingerprint(sys.executable)["freeze_sha256"], adapter_name: env_fingerprint(ADAPTER_PYTHON[adapter_name])["freeze_sha256"]},
+        "launch_scripts": {name: file_sha256(scripts / name) for name in ("env.sh", SERVE_SCRIPTS[adapter_name])},
+    }
+
+
+def build_experiment(cell: CellSpec, kind: str, cache_policy: str, strict: bool, save_audio: bool, record_raw: bool, sglang_stream: bool) -> dict:
+    rows = load_seed_tts_rows()
+    sets = make_id_sets(rows)
+    adapter = _adapter(cell.candidate.adapter, sglang_stream)
+    example = canonical_requests(rows, sets.measured(cell.id_set, cell.concurrency)[:1], seed_index=cell.seed_index)[0]
+    return build_spec(
+        kind=kind,
+        cell=cell,
+        warmup_ids=sets.warmup(cell.concurrency),
+        measured_ids=sets.measured(cell.id_set, cell.concurrency),
+        model={"repo": MODEL_REPO, "revision": MODEL_REVISION},
+        dataset={"repo": SEED_TTS_REPO, "revision": SEED_TTS_REVISION, "locale": "en"},
+        sampling=effective_sampling(cell.candidate.adapter, adapter, example) | {"seed_policy": "sha256(row_id) + seed_index"},
+        adapter_options={"name": cell.candidate.adapter, "sglang_stream": bool(sglang_stream), "streaming": bool(adapter.streaming)},
+        fingerprints=execution_fingerprints(cell.candidate.adapter),
+        hardware=gpu_identity(cell.gpu_index),
+        cache_policy=cache_policy,
+        strict=strict,
+        save_audio=save_audio,
+        record_raw=record_raw,
+    )
 
 
 def effective_sampling(adapter_name: str, adapter, example) -> dict:
@@ -174,95 +215,129 @@ async def _smoke(args) -> int:
 
 async def run_one_cell(
     *, cell: CellSpec, out: Path, port: int, url: str | None, cache_policy: str, run_order_seed: int, save_audio: bool, strict: bool,
-    sglang_stream: bool = False,
+    sglang_stream: bool = False, kind: str = "performance", spec: dict | None = None, run_indices: list[int] | None = None,
 ) -> dict:
+    """Run (or extend) one cell.  The frozen experiment spec is written before any run executes."""
     cand = cell.candidate
     rows = load_seed_tts_rows()
     sets = make_id_sets(rows)
-    ids_eval = sets.tuning(cell.concurrency) if cell.id_set == "tuning" else sets.eval(cell.concurrency)
+    ids_eval = sets.measured(cell.id_set, cell.concurrency)
     warm = canonical_requests(rows, sets.warmup(cell.concurrency), seed_index=cell.seed_index)
     evaluation = canonical_requests(rows, ids_eval, seed_index=cell.seed_index)
     adapter = _adapter(cand.adapter, sglang_stream)
     out.mkdir(parents=True, exist_ok=True)
-    hw = gpu_info(cell.gpu_index)
     resolved = resolved_deploy(cand.adapter, cand.config, list(cand.extra), cand.env_dict())
     if deploy_files_sha256(resolved) != cand.deploy_files_sha256:
         raise RuntimeError(f"deploy files changed since candidate {cand.candidate_id} was declared")
+    if spec is None:
+        spec = build_experiment(cell, kind, cache_policy, strict, save_audio, True, sglang_stream)
+    if spec["hardware"].get("gpu_uuid") != gpu_identity(cell.gpu_index).get("gpu_uuid"):
+        raise RuntimeError("GPU differs from the frozen experiment")
+    base_digest = spec_base_digest(spec)
+    prev = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
     manifest = build_manifest(
         repos=DEFAULT_REPOS,
         env_pythons=DEFAULT_PYTHONS,
         out_dir=out,
         gpu_index=cell.gpu_index,
-        deploy={"engine": cand.adapter, "config": cand.config, "resolved": resolved, "candidate": asdict_candidate(cand), "cell": cell.to_json()},
-        sampling={**effective_sampling(cand.adapter, adapter, evaluation[0]), "seed_index": cell.seed_index},
+        deploy={"engine": cand.adapter, "config": cand.config, "resolved": resolved, "candidate": asdict_candidate(cand), "cell": cell.to_json(),
+                "experiment": spec, "experiment_digest": spec_digest(spec)},
+        sampling=spec["sampling"],
         datasets=[{"repo": SEED_TTS_REPO, "revision": SEED_TTS_REVISION, "locale": "en",
                    "ids": {"warmup": [r.request_id for r in warm], cell.id_set: ids_eval}}],
         run_order_seed=run_order_seed,
-        extra={"concurrency": cell.concurrency, "k": cell.k, "id_set": cell.id_set, "timeout_s": cell.timeout_s, "cache_policy": cache_policy,
-               "port": port, "strict": strict},
+        extra={"cache_policy": cache_policy, "port": port},
     )
-    gpu_name = str(hw.get("gpu_sku", "")).replace("NVIDIA ", "")
+    header = {"experiment": spec, "experiment_digest": spec_digest(spec), "experiment_base_digest": base_digest, "manifest": manifest}
+    (out / "experiment.json").write_text(json.dumps(header, indent=1))  # frozen before execution
+    gpu_name = spec["hardware"].get("gpu_sku", "")
     meta = RunMeta(gpu=gpu_name, engine=cand.adapter, config=cand.config, candidate_id=cand.candidate_id, config_digest=cand.digest,
-                   cell_digest=cell.digest, id_set=cell.id_set, seed_index=cell.seed_index)
+                   cell_digest=cell.digest, experiment_base_digest=base_digest, mps_policy=cand.mps, id_set=cell.id_set, seed_index=cell.seed_index)
     factory = None
     if cache_policy == "restart":
-        spec = server_spec(cand, port, cell.gpu_index)
-        factory = lambda i: Server(spec, out / f"server_run{i}.log")  # noqa: E731
+        sspec = server_spec(cand, port, cell.gpu_index)
+        factory = lambda i: Server(sspec, out / f"server_run{i}.log")  # noqa: E731
     t0 = time.time()
-    results = await run_cell(url, adapter, warm, evaluation, cell.concurrency, cell.k, out, timeout_s=cell.timeout_s, cache_policy=cache_policy,
-                             server_factory=factory, meta=meta, save_audio=save_audio, strict=strict)
-    errs = validate_manifest(manifest)
-    result = {
-        "cell_spec": cell.to_json(),
-        "manifest": manifest,
-        "manifest_errors": errs,
-        "cell_valid": cell_valid(results),
-        "cell_compliant": cell_compliant(results) and not errs,
-        "runs": [r.summary() for r in results],
-        "measured_runs": [r.summary() for r in measured_runs(results)],
-        "wall_s": time.time() - t0,
-    }
+    results = await run_cell(url, adapter, warm, evaluation, cell.concurrency, spec["k"], out, timeout_s=cell.timeout_s, cache_policy=cache_policy,
+                             server_factory=factory, meta=meta, save_audio=save_audio, strict=strict, run_indices=run_indices)
+    runs = {r["label"]: r for r in (prev or {}).get("runs", [])} if run_indices is not None else {}
+    artifacts = dict((prev or {}).get("artifacts", {})) if run_indices is not None else {}
+    for r in results:
+        runs[r.label] = r.summary()
+        artifacts[r.label] = r.artifacts
+    ordered = [runs[f"run{i}"] for i in range(spec["k"] + 1) if f"run{i}" in runs]
+    result = {**header, "runs": ordered, "measured_runs": [r for r in ordered if r["label"] != "run0"], "artifacts": artifacts,
+              "wall_s": time.time() - t0}
+    (out / "result.json").write_text(json.dumps(result, indent=1))
+    ver = verify_cell(out)  # compliance is derived from the artifacts, never stored as a verdict to trust
+    result["verification"] = {"ok": ver.ok, "problems": ver.problems}
+    result["cell_valid"] = all(r["valid"] for r in result["measured_runs"]) and bool(result["measured_runs"])
+    result["cell_compliant"] = ver.ok
+    result["manifest_errors"] = validate_manifest(manifest)
     (out / "result.json").write_text(json.dumps(result, indent=1))
     return result
 
 
 async def _cell(args) -> int:
     url = None if args.cache_policy == "restart" else (args.url or f"http://127.0.0.1:{args.port}")
-    cand = make_candidate({"adapter": args.adapter, "config": args.config, "extra": args.extra or [], "label": args.label,
+    cand = make_candidate({"adapter": args.adapter, "config": args.config, "extra": args.extra or [], "label": args.label, "mps": args.mps,
                            "env": dict(kv.split("=", 1) for kv in args.env)})
     cell = make_cell(cand, args.concurrency, args.k, args.id_set, args.seed_index, args.timeout, args.gpu)
-    res = await run_one_cell(cell=cell, out=Path(args.out), port=args.port, url=url, cache_policy=args.cache_policy,
+    res = await run_one_cell(cell=cell, out=Path(args.out), port=args.port, url=url, cache_policy=args.cache_policy, kind=args.kind,
                              run_order_seed=args.run_order_seed, save_audio=not args.no_audio, strict=not args.loose, sglang_stream=args.sglang_stream)
-    print(json.dumps({k: res[k] for k in ("cell_valid", "cell_compliant", "manifest_errors")} | {"out": args.out}))
+    print(json.dumps({k: res[k] for k in ("cell_valid", "cell_compliant", "manifest_errors")} | {"problems": res["verification"]["problems"][:5],
+                                                                                                  "out": args.out}))
     return 0 if res["cell_compliant"] else 1
+
+
+async def _extend(args) -> int:
+    """Development K extension: record the new K in the frozen spec first, then run only the new runs."""
+    out = Path(args.cell)
+    res = json.loads((out / "result.json").read_text())
+    spec = res["experiment"]
+    k0 = int(spec["k"])
+    if args.k <= k0:
+        raise SystemExit(f"new K {args.k} must exceed the declared K {k0}")
+    v = verify_cell(out)
+    if not v.ok:
+        raise SystemExit(f"cannot extend an unverified cell: {v.problems[:5]}")
+    spec = json.loads(json.dumps(spec))
+    spec["k_updates"].append({"from": k0, "to": args.k, "reason": args.reason, "unix": time.time()})
+    spec["k"] = args.k
+    c = spec["candidate"]
+    cand = Candidate.from_spec({"adapter": c["adapter"], "config": c["config"], "extra": c["extra"], "env": dict(map(tuple, c["env"])),
+                                "label": c["label"], "mps": c["mps"]}, tuple(c["deploy_files_sha256"]))
+    cell = make_cell(cand, spec["concurrency"], args.k, spec["id_set"], spec["seed_index"], spec["timeout_s"], spec["hardware"]["gpu_index"])
+    if spec_base_digest(build_experiment(cell, spec["kind"], spec["cache_policy"], spec["strict"], spec["save_audio"], spec["record_raw"],
+                                         spec["adapter_options"]["sglang_stream"])) != spec_base_digest(spec):
+        raise SystemExit("current execution fingerprints differ from the frozen experiment; start a new experiment instead")
+    res2 = await run_one_cell(cell=cell, out=out, port=args.port, url=None, cache_policy=spec["cache_policy"], run_order_seed=0,
+                              save_audio=spec["save_audio"], strict=spec["strict"], sglang_stream=spec["adapter_options"]["sglang_stream"],
+                              kind=spec["kind"], spec=spec, run_indices=list(range(k0 + 1, args.k + 1)))
+    print(json.dumps({"cell_compliant": res2["cell_compliant"], "k": args.k, "problems": res2["verification"]["problems"][:5]}))
+    return 0 if res2["cell_compliant"] else 1
 
 
 class SweepError(RuntimeError):
     pass
 
 
-def _cell_artifacts_complete(cell_dir: Path, k: int) -> bool:
-    return all((cell_dir / f"run{i}" / "summary.json").exists() and (cell_dir / f"run{i}" / "traces.jsonl").exists() for i in range(k + 1))
-
-
-def resume_state(cell_dir: Path, cell: CellSpec) -> str:
-    """'new' (no result), 'reuse' (matching, compliant, complete) or 'retry' (matching but not compliant).
+def resume_state(cell_dir: Path, current_spec: dict) -> str:
+    """'new', 'reuse' (verified against the current experiment) or 'retry' (same experiment, not compliant).
 
     Raises if the directory holds a different experiment.
     """
     rp = cell_dir / "result.json"
     if not rp.exists():
-        if cell_dir.exists() and any(cell_dir.iterdir()):
-            return "retry"
-        return "new"
-    res = json.loads(rp.read_text())
-    got = (res.get("cell_spec") or {}).get("digest")
-    if got != cell.digest:
-        raise SweepError(f"{cell_dir} holds a different experiment (digest {got} != {cell.digest}); refusing to reuse or overwrite it")
-    m = res.get("manifest") or {}
-    if res.get("cell_compliant") and not validate_manifest(m) and _cell_artifacts_complete(cell_dir, cell.k):
-        return "reuse"
-    return "retry"
+        return "retry" if cell_dir.exists() and any(cell_dir.iterdir()) else "new"
+    try:
+        res = json.loads(rp.read_text())
+    except json.JSONDecodeError:
+        return "retry"
+    stored = res.get("experiment") or {}
+    if not stored or spec_base_digest(stored) != spec_base_digest(current_spec):
+        raise SweepError(f"{cell_dir} holds a different experiment than the current spec and fingerprints; refusing to reuse or overwrite it")
+    return "reuse" if verify_cell(cell_dir, current_spec=current_spec).ok else "retry"
 
 
 def _set_aside(cell_dir: Path) -> Path:
@@ -283,16 +358,17 @@ async def _sweep(args) -> int:
     spec = json.loads(Path(args.spec).read_text())
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    spec_digest = digest(spec)
+    spec_d = digest(spec)
     rec_path = out / "sweep.json"
     if rec_path.exists():
         old = json.loads(rec_path.read_text())
-        if old.get("spec_digest") != spec_digest:
+        if old.get("spec_digest") != spec_d:
             raise SweepError(f"{out} belongs to a different sweep spec (digest {old.get('spec_digest')}); use a new output directory")
         record = old
     else:
-        record = {"spec": spec, "spec_digest": spec_digest, "cells": {}, "attempts": []}
+        record = {"spec": spec, "spec_digest": spec_d, "cells": {}, "attempts": []}
     seed = int(spec["run_order_seed"])
+    kind = spec.get("kind", "performance")
     cands = unique_candidates([make_candidate(c) for c in spec["configs"]])
     cells = [make_cell(c, conc, int(spec["k"]), spec.get("id_set", "eval"), int(spec.get("seed_index", 0)), float(spec.get("timeout_s", 180.0)),
                        int(spec["gpu"])) for c in cands for conc in spec["concurrencies"]]
@@ -303,19 +379,21 @@ async def _sweep(args) -> int:
     for i, cell in enumerate(order):
         safe = cell.candidate.candidate_id.replace(":", "_").replace("/", "_")
         cell_dir = out / f"{i:02d}_{safe}_c{cell.concurrency}"
-        state = resume_state(cell_dir, cell)
+        current = build_experiment(cell, kind, "restart", True, bool(spec.get("save_audio", True)), True, False)
+        state = resume_state(cell_dir, current)
         if state == "retry":
             record["attempts"].append({"cell": cell.digest, "moved_to": str(_set_aside(cell_dir))})
         if state == "reuse":
             res = json.loads((cell_dir / "result.json").read_text())
         else:
             res = await run_one_cell(cell=cell, out=cell_dir, port=int(spec.get("port", 18100)), url=None, cache_policy="restart",
-                                     run_order_seed=seed, save_audio=bool(spec.get("save_audio", True)), strict=True)
+                                     run_order_seed=seed, save_audio=bool(spec.get("save_audio", True)), strict=True, kind=kind, spec=current)
+        compliant = verify_cell(cell_dir, current_spec=current).ok
         record["cells"][cell.digest] = {"index": i, "candidate_id": cell.candidate.candidate_id, "concurrency": cell.concurrency,
-                                        "dir": str(cell_dir), "reused": state == "reuse", "cell_valid": res["cell_valid"],
-                                        "cell_compliant": res["cell_compliant"], "manifest_errors": res["manifest_errors"]}
+                                        "dir": str(cell_dir), "reused": state == "reuse", "cell_compliant": compliant,
+                                        "manifest_errors": res.get("manifest_errors", [])}
         rec_path.write_text(json.dumps(record, indent=1))
-        if not res["cell_compliant"] or res["manifest_errors"]:
+        if not compliant:
             rc = 1
     return rc
 
@@ -339,7 +417,9 @@ def main(argv=None) -> int:
     cp.add_argument("--cache-policy", choices=["restart", "flush", "none"], default="restart")
     cp.add_argument("--concurrency", type=int, required=True)
     cp.add_argument("--k", type=int, default=5)
-    cp.add_argument("--id-set", choices=["eval", "tuning"], default="eval")
+    cp.add_argument("--id-set", choices=["eval", "tuning", "full"], default="eval")
+    cp.add_argument("--kind", choices=["performance", "quality"], default="performance")
+    cp.add_argument("--mps", choices=["off", "on"], default="off", help="declared MPS policy (verified at runtime)")
     cp.add_argument("--seed-index", type=int, default=0)
     cp.add_argument("--run-order-seed", type=int, default=0)
     cp.add_argument("--timeout", type=float, default=180.0)
@@ -350,6 +430,11 @@ def main(argv=None) -> int:
     cp.add_argument("--label", default="", help="variant label, e.g. mps-on")
     cp.add_argument("--env", action="append", default=[], help="KEY=VALUE added to the server environment")
     cp.add_argument("extra", nargs="*", help="extra server args after --")
+    ex = sub.add_parser("extend", help="declared development K extension of a verified cell")
+    ex.add_argument("--cell", required=True)
+    ex.add_argument("--k", type=int, required=True)
+    ex.add_argument("--reason", required=True)
+    ex.add_argument("--port", type=int, default=18100)
     sw = sub.add_parser("sweep")
     sw.add_argument("--spec", required=True)
     sw.add_argument("--out", required=True)
@@ -362,6 +447,8 @@ def main(argv=None) -> int:
         return asyncio.run(_cell(args))
     if args.cmd == "sweep":
         return asyncio.run(_sweep(args))
+    if args.cmd == "extend":
+        return asyncio.run(_extend(args))
     data = json.loads(Path(args.path).read_text())
     errs = validate_manifest(data.get("manifest", data))
     print(json.dumps({"errors": errs}))
