@@ -1,0 +1,3 @@
+.humanize/
+__pycache__/
+*.pyc
