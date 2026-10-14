@@ -34,7 +34,7 @@ from evals.speech.gates import QRef, comparative_gates, freeze_qref  # noqa: E40
 from evals.speech.verify_report import ReportError, verify_report  # noqa: E402
 
 REQUIRED_SEEDS = 3
-DECISIVE = ("candidate_digest", "gpu_sku", "gpu_uuid", "evaluator_digest", "floors", "effective_inputs_eligible", "class_r", "qualified")
+DECISIVE = ("candidate_digest", "gpu_sku", "gpu_driver", "evaluator_digest", "floors", "effective_inputs_eligible", "class_r", "qualified")
 
 
 class QRefError(ValueError):
@@ -75,7 +75,8 @@ def qualify(quality_path: str, effective_dir: str, check_sources: bool = True) -
         "candidate_id": cand["candidate_id"],
         "candidate_digest": cand["digest"],
         "gpu_sku": gen["gpu_sku"],
-        "gpu_uuid": gen["gpu_uuid"],
+        "gpu_driver": gen["gpu_driver"],
+        "gpu_uuids": {s: v.get("gpu_uuid") for s, v in vr.report["seeds"].items()},
         "concurrency": gen["concurrency"],
         "evaluator_digest": vr.report["evaluator"]["digest"],
         "floors": floors,
@@ -123,7 +124,7 @@ def freeze(scope: str, gpu: str, refs: list[tuple[str, str]], out: Path, check_s
         _check_scope(vr, scope)
         qual = verify_qualification(qualpath, check_sources)
         gen = vr.report["generation"]
-        for k, w in (("candidate_digest", gen["candidate"]["digest"]), ("gpu_sku", gen["gpu_sku"]), ("gpu_uuid", gen["gpu_uuid"]),
+        for k, w in (("candidate_digest", gen["candidate"]["digest"]), ("gpu_sku", gen["gpu_sku"]), ("gpu_driver", gen["gpu_driver"]),
                      ("evaluator_digest", vr.report["evaluator"]["digest"])):
             if qual[k] != w:
                 raise QRefError(f"{qualpath}: qualification {k}={qual[k]!r} does not match the reference ({w!r})")

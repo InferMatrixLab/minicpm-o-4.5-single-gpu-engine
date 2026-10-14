@@ -96,11 +96,14 @@ def verify_report(path: str | Path, check_sources: bool = True) -> VerifiedRepor
             res = json.loads((Path(src["cell"]) / "result.json").read_text())
             if res.get("experiment_digest") != src.get("experiment_digest") or res["artifacts"].get(src.get("run")) != src.get("artifacts"):
                 problems.append(f"seed {s}: source binding (digest/artifacts) changed since scoring")
+            if src.get("gpu_uuid") != spec["hardware"].get("gpu_uuid"):
+                problems.append(f"seed {s}: recorded device {src.get('gpu_uuid')} is not the source cell's ({spec['hardware'].get('gpu_uuid')})")
             if int(spec["seed_index"]) != s:
                 problems.append(f"seed {s}: source cell declares seed {spec['seed_index']}")
             if sorted(by_seed[s]) != sorted(spec["measured_ids"]):
                 problems.append(f"seed {s}: sidecar rows differ from the source cell's declared IDs")
-            want = {"candidate_digest": spec["candidate"]["digest"], "gpu_sku": spec["hardware"].get("gpu_sku"), "gpu_uuid": spec["hardware"].get("gpu_uuid"),
+            want = {"candidate_digest": spec["candidate"]["digest"], "gpu_sku": spec["hardware"].get("gpu_sku"), "gpu_driver": spec["hardware"].get("driver"),
+                    "gpu_memory_mib": spec["hardware"].get("memory_mib"),
                     "concurrency": spec["concurrency"], "id_set": spec["id_set"], "dataset": spec["dataset"], "model": spec["model"]}
             for k, w in want.items():
                 if gen.get(k) != w:
@@ -128,7 +131,7 @@ def verify_report(path: str | Path, check_sources: bool = True) -> VerifiedRepor
                     problems.append(f"row {r.row_id} uses D_ref {r.d_ref_s} not in the verified reference")
                     break
     summary = summarize(rows) if rows else {}
-    identity = {"gpu_sku": gen.get("gpu_sku"), "concurrency": gen.get("concurrency"), "id_set": gen.get("id_set"),
+    identity = {"gpu_sku": gen.get("gpu_sku"), "gpu_driver": gen.get("gpu_driver"), "concurrency": gen.get("concurrency"), "id_set": gen.get("id_set"),
                 "measured_ids_sha256": gen.get("measured_ids_sha256"), "dataset": gen.get("dataset"), "model": gen.get("model"),
                 "seeds": seeds, "rows_per_seed": {str(s): len(v) for s, v in by_seed.items()}, "evaluator_digest": (rep.get("evaluator") or {}).get("digest"),
                 "scope": rep.get("scope")}

@@ -45,9 +45,9 @@ def report(tmp_path, name, *, seeds=(0, 1, 2), ids=None, id_set="tuning", scope=
     rep = {
         "scope": scope,
         "generation": {"candidate_id": cand["candidate_id"], "candidate_digest": cand["digest"], "candidate": cand, "gpu_sku": gpu,
-                       "gpu_uuid": "GPU-x", "concurrency": c, "id_set": id_set, "measured_ids_sha256": "ids", "dataset": {"repo": "d"},
+                       "gpu_driver": "570", "concurrency": c, "id_set": id_set, "measured_ids_sha256": "ids", "dataset": {"repo": "d"},
                        "model": {"revision": "m"}},
-        "seeds": {str(s): {"cell": f"c{s}"} for s in seeds},
+        "seeds": {str(s): {"cell": f"c{s}", "gpu_uuid": f"GPU-{s}"} for s in seeds},
         "rows_per_seed": claim or {str(s): len(ids) for s in seeds},
         "rows_sha256": hashlib.sha256("\n".join(sorted(f"{s}:{r}" for s in seeds for r in ids)).encode()).hexdigest(),
         "evaluator": evaluator or EV,
@@ -101,14 +101,23 @@ REAL = ROOT / "results" / "quality_v2" / "sglang_speech_c8_tuning" / "speech_qua
 
 @pytest.mark.skipif(not REAL.exists(), reason="real development report not available")
 @pytest.mark.parametrize("mutate", [lambda g: g["model"].update(revision="foreign"), lambda g: g["dataset"].update(revision="foreign"),
-                                    lambda g: g.update(concurrency=32), lambda g: g.update(gpu_sku="H200")])
+                                    lambda g: g.update(concurrency=32), lambda g: g.update(gpu_sku="H200"), lambda g: g.update(gpu_driver="0"),
+                                    lambda g: g["seeds"]["1"].update(gpu_uuid="GPU-foreign")])
 def test_real_report_source_binding(tmp_path, mutate):
-    assert verify_report(REAL).ok
+    from evals.speech.suite import collect
+
     dst = tmp_path / "rep.json"
-    shutil.copy(REAL, dst)
     shutil.copy(REAL.with_suffix(".rows.jsonl"), dst.with_suffix(".rows.jsonl"))
-    r = json.loads(dst.read_text())
-    mutate(r["generation"])
+    r = json.loads(REAL.read_text())
+    # rebind the round-2 report to the current generation identity (hardware class + per-seed device), from its own source cells
+    col = collect([v["cell"] for _, v in sorted(r["seeds"].items())])
+    r["generation"], r["seeds"] = col.generation, col.seeds
+    dst.write_text(json.dumps(r))
+    assert verify_report(dst).ok, verify_report(dst).problems[:3]
+    g = {**r["generation"], "seeds": r["seeds"]}
+    mutate(g)
+    r["seeds"] = g.pop("seeds")
+    r["generation"] = g
     dst.write_text(json.dumps(r))
     assert not verify_report(dst).ok
 

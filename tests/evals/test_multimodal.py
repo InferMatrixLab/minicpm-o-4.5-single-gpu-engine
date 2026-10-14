@@ -39,7 +39,7 @@ def env(tmp_path, monkeypatch):
 def make_report(d, *, acc=0.9, scope="development", subset="full", benches=mm.BENCHES, mps="off", observed="off", digest="H", n=None):
     d.mkdir(parents=True, exist_ok=True)
     rep = {"scope": scope, "subset": subset, "concurrency": 16, "candidate": {"digest": digest, "candidate_id": f"c:{digest}", "mps": mps},
-           "gpu": {"gpu_sku": "L20X", "gpu_uuid": "GPU-1"}, "evaluator": {"digest": "E"}, "benches": {},
+           "gpu": {"gpu_sku": "L20X", "gpu_uuid": "GPU-1", "driver": "570"}, "evaluator": {"digest": "E"}, "benches": {},
            "server_evidence": {"mps": {"observed": observed}, "gpu": {"gpu_uuid": "GPU-1"}}}
     for b in benches:
         k = n if n is not None else BENCH_N[b]
@@ -83,7 +83,7 @@ def test_subset_and_empty_reports_are_not_complete(env):
 
 
 def _qual(env, monkeypatch, digest="H", qualified=True):
-    rec = {"qualified": qualified, "candidate_digest": digest, "gpu_uuid": "GPU-1"}
+    rec = {"qualified": qualified, "candidate_digest": digest, "gpu_sku": "L20X", "gpu_driver": "570"}
     import evals.speech.qref as sq
 
     monkeypatch.setattr(sq, "verify_qualification", lambda p, check_sources=True: rec)

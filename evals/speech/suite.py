@@ -99,7 +99,10 @@ def collect(cells: list[Path], run_label: str | None = None) -> Collection:
             "candidate_digest": spec["candidate"]["digest"],
             "candidate": dict(spec["candidate"]),  # complete resolved launch identity (config, args, env, deploy hashes, MPS)
             "gpu_sku": spec["hardware"].get("gpu_sku"),
-            "gpu_uuid": spec["hardware"].get("gpu_uuid"),
+            # the hardware class (SKU, driver, memory) must agree; seeds may run on different devices of that class,
+            # each seed's own device UUID is bound below
+            "gpu_driver": spec["hardware"].get("driver"),
+            "gpu_memory_mib": spec["hardware"].get("memory_mib"),
             "concurrency": spec["concurrency"],
             "id_set": spec["id_set"],
             "measured_ids_sha256": hashlib.sha256("\n".join(spec["measured_ids"]).encode()).hexdigest(),
@@ -135,7 +138,8 @@ def collect(cells: list[Path], run_label: str | None = None) -> Collection:
             row = meta[rid]
             rows.append(GenRow(f"{seed}:{rid}", rid, seed, row.target_text, str(Path(row.ref_wav_path).resolve()), str(wav), t["text"], r["duration_s"]))
         seeds[seed] = {"cell": str(cell), "run": label, "experiment_digest": res["experiment_digest"],
-                       "artifacts": res["artifacts"][label], "rows": len(spec["measured_ids"])}
+                       "artifacts": res["artifacts"][label], "rows": len(spec["measured_ids"]),
+                       "gpu_uuid": spec["hardware"].get("gpu_uuid")}
     if gen is None:
         raise CoverageError("no source cells")
     return Collection(rows=rows, generation=gen, seeds={str(s): seeds[s] for s in sorted(seeds)})

@@ -72,3 +72,26 @@ def test_seed_metadata_tamper_rejected(two_seeds):
     (a / "result.json").write_text(json.dumps(r))
     with pytest.raises(CoverageError):
         collect([a, b])
+
+
+def _on_device(monkeypatch, uuid, driver="570.133.20"):
+    import bench.cli as cli
+    import bench.fingerprint as fp
+
+    dev = {"gpu_index": 1, "gpu_sku": "L20X", "gpu_uuid": uuid, "driver": driver, "memory_mib": "143771"}
+    for mod in (cli, fp):
+        monkeypatch.setattr(mod, "gpu_identity", lambda index, d=dev: dict(d))
+
+
+def test_seeds_on_devices_of_one_hardware_class(tmp_path, fake_runtime, monkeypatch):  # noqa: F811
+    _on_device(monkeypatch, "GPU-a")
+    _, a, _ = _cell(tmp_path, seed=0)
+    _on_device(monkeypatch, "GPU-b")
+    _, b, _ = _cell(tmp_path, seed=1)
+    col = collect([a, b])
+    assert {s: v["gpu_uuid"] for s, v in col.seeds.items()} == {"0": "GPU-a", "1": "GPU-b"}
+    assert col.generation["gpu_driver"] == "570.133.20" and "gpu_uuid" not in col.generation
+    _on_device(monkeypatch, "GPU-c", driver="580.0")
+    _, c, _ = _cell(tmp_path / "drv", seed=2)
+    with pytest.raises(CoverageError):  # a different driver is a different hardware class
+        collect([a, b, c])

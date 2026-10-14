@@ -277,8 +277,8 @@ def cmd_freeze(a) -> int:
             qual = verify_qualification(qual_path)
         except QRefError as e:
             raise SystemExit(str(e)) from e
-        if not qual["qualified"] or qual["candidate_digest"] != rep["candidate"]["digest"] or qual["gpu_uuid"] != rep["gpu"].get("gpu_uuid"):
-            raise SystemExit(f"{rdir}: not a qualified baseline on this GPU")
+        if not qual["qualified"] or qual["candidate_digest"] != rep["candidate"]["digest"] or (qual["gpu_sku"], qual["gpu_driver"]) != (rep["gpu"].get("gpu_sku"), rep["gpu"].get("driver")):
+            raise SystemExit(f"{rdir}: not a qualified baseline on this GPU class")
         inputs[rep["candidate"]["candidate_id"]] = {"report": str(Path(rdir) / "report.json"), "report_sha256": _sha(Path(rdir) / "report.json"),
                                                     "qualification": qual_path, "qualification_sha256": _sha(qual_path)}
         for bench, d in derived.items():
