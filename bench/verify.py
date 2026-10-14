@@ -11,6 +11,7 @@ spec declares.  ``ok`` is the only compliance verdict anything should trust.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -130,6 +131,64 @@ def _verify_run(run_dir: Path, label: str, spec: dict, recorded: dict, artifacts
     return summary
 
 
+def reconcile_manifest(m: dict, spec: dict) -> list[str]:
+    """Every identity the manifest duplicates must agree with the authoritative spec; digests are recomputed."""
+    from bench.experiment import Candidate, CellSpec, digest
+
+    out = []
+    d = m.get("deploy") or {}
+    if d.get("experiment") != spec or d.get("experiment_digest") != spec_digest(spec):
+        out.append("deploy.experiment differs from the declared spec")
+    c = spec["candidate"]
+    ident = {k: c[k] for k in ("adapter", "config", "extra", "env", "deploy_files_sha256", "mps")}
+    if digest(ident) != c.get("digest"):
+        out.append("candidate digest does not match the candidate identity")
+    mc = d.get("candidate") or {}
+    for k in ("adapter", "config", "mps", "candidate_id", "digest"):
+        want = c[k] if k in c else None
+        got = mc.get(k)
+        if k in ("extra",) or got != want:
+            out.append(f"deploy.candidate.{k}={got!r} != spec {want!r}")
+    if [list(x) for x in mc.get("env", [])] != [list(x) for x in c["env"]] or list(mc.get("extra", [])) != list(c["extra"]):
+        out.append("deploy.candidate launch arguments/environment differ from the spec")
+    cand = Candidate(adapter=c["adapter"], config=c["config"], extra=tuple(c["extra"]), env=tuple(tuple(x) for x in c["env"]), label=c.get("label", ""),
+                     deploy_files_sha256=tuple(c["deploy_files_sha256"]), mps=c["mps"])
+    from bench.protocol import ids_sha256 as _ids
+
+    workload = {"dataset": spec["dataset"]["repo"], "revision": spec["dataset"]["revision"], "warmup_ids_sha256": _ids(spec["warmup_ids"]),
+                "measured_ids_sha256": _ids(spec["measured_ids"])}
+    cell = CellSpec(cand, spec["concurrency"], spec["k"], spec["id_set"], spec["seed_index"], spec["timeout_s"], spec["hardware"]["gpu_index"], workload)
+    mcell = d.get("cell") or {}
+    if mcell.get("digest") != cell.digest:
+        out.append("deploy.cell digest does not match the cell recomputed from the spec")
+    for k in ("concurrency", "id_set", "seed_index", "timeout_s", "gpu_index"):
+        if mcell.get(k) != getattr(cell, k):
+            out.append(f"deploy.cell.{k}={mcell.get(k)!r} != spec {getattr(cell, k)!r}")
+    if (m.get("model") or {}).get("revision") != spec["model"]["revision"]:
+        out.append("manifest model revision differs from the spec")
+    ds = m.get("datasets") or [{}]
+    if ds[0].get("repo") != spec["dataset"]["repo"] or ds[0].get("revision") != spec["dataset"]["revision"]:
+        out.append("manifest dataset differs from the spec")
+    if list((ds[0].get("ids") or {}).get(spec["id_set"], [])) != spec["measured_ids"]:
+        out.append("manifest measured ID list differs from the spec")
+    if m.get("sampling") != spec["sampling"]:
+        out.append("manifest sampling differs from the spec")
+    hw = m.get("hardware") or {}
+    if hw.get("gpu_index") != spec["hardware"].get("gpu_index") or (hw.get("gpu_sku") or "").replace("NVIDIA ", "") != spec["hardware"].get("gpu_sku"):
+        out.append("manifest hardware differs from the spec")
+    for name, lock in (m.get("env_lock") or {}).items():
+        want = spec["fingerprints"]["envs"].get(name)
+        if want is None:
+            continue
+        try:
+            body = Path(lock["path"]).read_bytes()
+        except OSError:
+            continue  # reported by validate_manifest
+        if hashlib.sha256(body).hexdigest() != want:
+            out.append(f"environment {name} at measurement time differs from the spec fingerprint")
+    return out
+
+
 def verify_cell(cell_dir: str | Path, current_spec: dict | None = None) -> CellVerification:
     cell_dir = Path(cell_dir)
     v = CellVerification(cell_dir=cell_dir, ok=False)
@@ -138,19 +197,25 @@ def verify_cell(cell_dir: str | Path, current_spec: dict | None = None) -> CellV
     except (OSError, json.JSONDecodeError) as e:
         v.problems.append(f"result.json unreadable: {e}")
         return v
-    spec = res.get("experiment") or {}
+    try:
+        declared = json.loads((cell_dir / "experiment.json").read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        v.problems.append(f"experiment.json (the authoritative declaration) unreadable: {e}")
+        return v
+    spec = declared.get("experiment") or {}
     v.spec = spec
     if not spec:
-        v.problems.append("result has no experiment spec")
+        v.problems.append("declaration has no experiment spec")
         return v
-    if spec_digest(spec) != res.get("experiment_digest") or spec_base_digest(spec) != res.get("experiment_base_digest"):
-        v.problems.append("stored experiment digests do not match the stored spec")
+    if spec_digest(spec) != declared.get("experiment_digest") or spec_base_digest(spec) != declared.get("experiment_base_digest"):
+        v.problems.append("declared experiment digests do not match the declared spec")
+    if res.get("experiment") != spec or res.get("experiment_digest") != declared.get("experiment_digest"):
+        v.problems.append("result is stale relative to the declared experiment (an interrupted or unrecorded schedule change)")
     if current_spec is not None and spec_base_digest(current_spec) != spec_base_digest(spec):
         v.problems.append("current execution fingerprints/spec differ from the frozen experiment")
     m = res.get("manifest") or {}
     v.problems += [f"manifest: {e}" for e in validate_manifest(m)]
-    if (m.get("deploy") or {}).get("experiment") != spec:
-        v.problems.append("manifest experiment spec differs from result spec")
+    v.problems += [f"manifest: {e}" for e in reconcile_manifest(m, spec)]
     k = int(spec.get("k", -1))
     runs = {r.get("label"): r for r in res.get("runs", [])}
     want = [f"run{i}" for i in range(k + 1)]

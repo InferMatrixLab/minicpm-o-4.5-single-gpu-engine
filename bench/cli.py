@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import hashlib
 import json
 import sys
@@ -68,7 +69,7 @@ def resolve_vllm_deploy(config: str) -> dict:
         text = path.read_text()
         chain.append({"file": str(path), "sha256": _sha(text), "text": text})
         base = (yaml.safe_load(text) or {}).get("base_config")
-        path = (deploy_dir / base) if base else None
+        path = (path.parent / base) if base else None  # vllm-omni resolves base_config relative to the overlay
     return {"engine": "vllm-omni", "config": config, "chain": chain}
 
 
@@ -216,6 +217,7 @@ async def _smoke(args) -> int:
 async def run_one_cell(
     *, cell: CellSpec, out: Path, port: int, url: str | None, cache_policy: str, run_order_seed: int, save_audio: bool, strict: bool,
     sglang_stream: bool = False, kind: str = "performance", spec: dict | None = None, run_indices: list[int] | None = None,
+    recovery: list[dict] | None = None,
 ) -> dict:
     """Run (or extend) one cell.  The frozen experiment spec is written before any run executes."""
     cand = cell.candidate
@@ -249,7 +251,8 @@ async def run_one_cell(
         extra={"cache_policy": cache_policy, "port": port},
     )
     header = {"experiment": spec, "experiment_digest": spec_digest(spec), "experiment_base_digest": base_digest, "manifest": manifest}
-    (out / "experiment.json").write_text(json.dumps(header, indent=1))  # frozen before execution
+    prev_decl = json.loads((out / "experiment.json").read_text()) if (out / "experiment.json").exists() else {}
+    declare(out, {**header, "recoveries": prev_decl.get("recoveries", []) + list(recovery or [])})  # frozen before execution
     gpu_name = spec["hardware"].get("gpu_sku", "")
     meta = RunMeta(gpu=gpu_name, engine=cand.adapter, config=cand.config, candidate_id=cand.candidate_id, config_digest=cand.digest,
                    cell_digest=cell.digest, experiment_base_digest=base_digest, mps_policy=cand.mps, id_set=cell.id_set, seed_index=cell.seed_index)
@@ -290,20 +293,49 @@ async def _cell(args) -> int:
     return 0 if res["cell_compliant"] else 1
 
 
+def declare(out: Path, header: dict) -> None:
+    """Atomically publish the authoritative experiment declaration."""
+    tmp = out / ".experiment.json.tmp"
+    tmp.write_text(json.dumps(header, indent=1))
+    os.replace(tmp, out / "experiment.json")
+
+
 async def _extend(args) -> int:
-    """Development K extension: record the new K in the frozen spec first, then run only the new runs."""
+    """Development K extension: publish the new K in the declaration first, then run only the new runs.
+
+    A declared extension that did not finish leaves the cell unverifiable; it is
+    completed only by an explicit ``--recover``, which re-runs the missing runs
+    (setting aside any partial run directories) and records the recovery.
+    """
     out = Path(args.cell)
     res = json.loads((out / "result.json").read_text())
-    spec = res["experiment"]
-    k0 = int(spec["k"])
-    if args.k <= k0:
-        raise SystemExit(f"new K {args.k} must exceed the declared K {k0}")
-    v = verify_cell(out)
-    if not v.ok:
-        raise SystemExit(f"cannot extend an unverified cell: {v.problems[:5]}")
-    spec = json.loads(json.dumps(spec))
-    spec["k_updates"].append({"from": k0, "to": args.k, "reason": args.reason, "unix": time.time()})
-    spec["k"] = args.k
+    decl = json.loads((out / "experiment.json").read_text())
+    recovery = None
+    if decl["experiment"] != res.get("experiment"):
+        if not args.recover:
+            raise SystemExit("cell has an unfinished declared extension; complete it with --recover")
+        spec = decl["experiment"]
+        done = {r["label"] for r in res.get("runs", [])}
+        missing = [i for i in range(int(spec["k"]) + 1) if f"run{i}" not in done]
+        for i in missing:
+            if (out / f"run{i}").exists():
+                _set_aside(out / f"run{i}")
+        k0 = min(missing) - 1
+        args.k = int(spec["k"])
+        recovery = [{"recovered_runs": [f"run{i}" for i in missing], "unix": time.time()}]
+    else:
+        spec = res["experiment"]
+        k0 = int(spec["k"])
+        if args.k <= k0:
+            raise SystemExit(f"new K {args.k} must exceed the declared K {k0}")
+        v = verify_cell(out)
+        if not v.ok:
+            raise SystemExit(f"cannot extend an unverified cell: {v.problems[:5]}")
+        if args.k > 10:
+            raise SystemExit("development extensions stop at K=10")
+        spec = json.loads(json.dumps(spec))
+        spec["k_updates"].append({"from": k0, "to": args.k, "reason": args.reason, "unix": time.time()})
+        spec["k"] = args.k
     c = spec["candidate"]
     cand = Candidate.from_spec({"adapter": c["adapter"], "config": c["config"], "extra": c["extra"], "env": dict(map(tuple, c["env"])),
                                 "label": c["label"], "mps": c["mps"]}, tuple(c["deploy_files_sha256"]))
@@ -313,7 +345,7 @@ async def _extend(args) -> int:
         raise SystemExit("current execution fingerprints differ from the frozen experiment; start a new experiment instead")
     res2 = await run_one_cell(cell=cell, out=out, port=args.port, url=None, cache_policy=spec["cache_policy"], run_order_seed=0,
                               save_audio=spec["save_audio"], strict=spec["strict"], sglang_stream=spec["adapter_options"]["sglang_stream"],
-                              kind=spec["kind"], spec=spec, run_indices=list(range(k0 + 1, args.k + 1)))
+                              kind=spec["kind"], spec=spec, run_indices=list(range(k0 + 1, args.k + 1)), recovery=recovery)
     print(json.dumps({"cell_compliant": res2["cell_compliant"], "k": args.k, "problems": res2["verification"]["problems"][:5]}))
     return 0 if res2["cell_compliant"] else 1
 
@@ -435,6 +467,7 @@ def main(argv=None) -> int:
     ex.add_argument("--k", type=int, required=True)
     ex.add_argument("--reason", required=True)
     ex.add_argument("--port", type=int, default=18100)
+    ex.add_argument("--recover", action="store_true", help="complete an interrupted declared extension")
     sw = sub.add_parser("sweep")
     sw.add_argument("--spec", required=True)
     sw.add_argument("--out", required=True)

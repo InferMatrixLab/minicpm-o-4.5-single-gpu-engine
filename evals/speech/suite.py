@@ -97,7 +97,7 @@ def collect(cells: list[Path], run_label: str | None = None) -> Collection:
         ident = {
             "candidate_id": spec["candidate"]["candidate_id"],
             "candidate_digest": spec["candidate"]["digest"],
-            "candidate": {k: spec["candidate"][k] for k in ("adapter", "config", "mps", "label")},
+            "candidate": dict(spec["candidate"]),  # complete resolved launch identity (config, args, env, deploy hashes, MPS)
             "gpu_sku": spec["hardware"].get("gpu_sku"),
             "gpu_uuid": spec["hardware"].get("gpu_uuid"),
             "concurrency": spec["concurrency"],

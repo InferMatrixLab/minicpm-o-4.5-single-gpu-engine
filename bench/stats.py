@@ -280,6 +280,10 @@ def compare_cells(new_cell_dir, base_cell_dir, metric: str, final: bool, seed: i
     for side, v in (("engine", vn), ("baseline", vb)):
         if not v.ok:
             raise StatisticsInputError(f"{side} cell {v.cell_dir} failed verification: {v.problems[:5]}")
+        if v.spec.get("kind") != "performance" or v.spec.get("id_set") != "eval":
+            raise StatisticsInputError(f"{side} cell {v.cell_dir} is a {v.spec.get('kind')}/{v.spec.get('id_set')} experiment, not a performance evaluation")
+        if final and (v.spec.get("k_updates") or int(v.spec.get("k", 0)) != FINAL_K):
+            raise StatisticsInputError(f"{side} cell {v.cell_dir}: final confirmation needs a predeclared fixed K={FINAL_K} without extensions")
     return estimate(vn.measured_summaries, vb.measured_summaries, metric, final=final, new_k=vn.spec["k"], base_k=vb.spec["k"], seed=seed)
 
 

@@ -179,3 +179,69 @@ def test_declared_mps_must_match_observation(tmp_path, monkeypatch):
     _, out, res = _cell(tmp_path, k=1, mps="on")  # fake server holds a direct context: observed "off"
     assert not res["cell_compliant"]
     assert any("MPS" in p for p in res["verification"]["problems"])
+
+
+def _interrupt_after(monkeypatch, n_runs):
+    """Make run_cell execute ``n_runs`` new runs, then die as if the process were killed."""
+    real = cli.run_cell
+
+    async def dying(*a, run_indices=None, **kw):
+        if n_runs:
+            await real(*a, run_indices=run_indices[:n_runs], **kw)
+        raise RuntimeError("simulated crash during extension")
+
+    monkeypatch.setattr(cli, "run_cell", dying)
+    return real
+
+
+@pytest.mark.parametrize("completed_new_runs", [0, 1])
+def test_interrupted_extension_is_never_reused_at_old_k(tmp_path, monkeypatch, completed_new_runs):
+    cell, out, _ = _cell(tmp_path, k=1)
+    real = _interrupt_after(monkeypatch, completed_new_runs)
+    args = type("A", (), {"cell": str(out), "k": 3, "reason": "interval rule", "port": _free_port(), "recover": False})()
+    with pytest.raises(RuntimeError):
+        asyncio.run(cli._extend(args))
+    decl = json.loads((out / "experiment.json").read_text())
+    assert decl["experiment"]["k"] == 3
+    assert not verify_cell(out).ok  # the stale K=1 result no longer verifies
+    current = json.loads(json.dumps(decl["experiment"]))
+    assert cli.resume_state(out, current) == "retry"
+    with pytest.raises(SystemExit):  # completing it needs an explicit recovery
+        asyncio.run(cli._extend(args))
+    monkeypatch.setattr(cli, "run_cell", real)
+    args.recover = True
+    assert asyncio.run(cli._extend(args)) == 0
+    v = verify_cell(out)
+    assert v.ok and v.spec["k"] == 3
+    rec = json.loads((out / "experiment.json").read_text())["recoveries"]
+    assert rec and rec[0]["recovered_runs"][-1] == "run3"
+
+
+def test_manifest_identity_mutations_fail(tmp_path):
+    _, out, _ = _cell(tmp_path, k=1)
+    path = out / "result.json"
+    orig = path.read_text()
+    for mutate in (lambda m: m["deploy"]["cell"].update(concurrency=32),
+                   lambda m: m["deploy"]["candidate"].update(config="foreign.yaml"),
+                   lambda m: m["datasets"][0].update(revision="FOREIGN"),
+                   lambda m: m["sampling"].update(seed_policy="other"),
+                   lambda m: m["model"].update(revision="main")):
+        r = json.loads(orig)
+        mutate(r["manifest"])
+        path.write_text(json.dumps(r))
+        assert not verify_cell(out).ok
+    path.write_text(orig)
+    assert verify_cell(out).ok
+
+
+def test_quality_cells_rejected_from_performance_comparisons(tmp_path):
+    from bench.stats import StatisticsInputError, compare_cells
+
+    cand = Candidate.from_spec({"adapter": "engine", "config": "fake"}, ("fake",))
+    cell = cli.make_cell(cand, 1, 1, "tuning", 0, 180.0, GPU)
+    out = tmp_path / "q"
+    asyncio.run(cli.run_one_cell(cell=cell, out=out, port=_free_port(), url=None, cache_policy="restart", run_order_seed=0, save_audio=False,
+                                 strict=True, kind="quality"))
+    assert verify_cell(out).ok
+    with pytest.raises(StatisticsInputError, match="not a performance evaluation"):
+        compare_cells(out, out, "throughput_frames_s", final=False)
