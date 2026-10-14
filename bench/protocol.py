@@ -79,11 +79,18 @@ class RunMeta:
     gpu: str = ""
     engine: str = ""
     config: str = ""
+    candidate_id: str = ""
+    config_digest: str = ""  # candidate digest: adapter, config, args, env, deploy files
+    cell_digest: str = ""  # candidate + C + workload + K + timeout
     id_set: str = "eval"
-    ids_sha256: str = ""
+    ids_sha256: str = ""  # of the IDs actually measured in this run
+    expected_ids_sha256: str = ""
     seed_index: int = 0
+    timeout_s: float = 0.0
+    strict: bool = False  # mandatory geometry was enforced
     cache_policy: str = "none"
     cache_evidence: dict = field(default_factory=dict)
+    runtime_evidence: dict = field(default_factory=dict)  # launch argv/env and per-run MPS evidence
     server_startup_s: float | None = None
 
 
@@ -144,7 +151,7 @@ class CellPlan:
     concurrency: int
 
 
-def plan_sweep(cells: list[CellPlan], seed: int) -> list[CellPlan]:
+def plan_sweep(cells: list, seed: int) -> list:
     """Randomized run order; the seed and the executed order go into the sweep record."""
     order = list(cells)
     random.Random(seed).shuffle(order)
@@ -202,11 +209,13 @@ async def run_cell(
         raise ValueError("base_url is required unless servers are restarted per run")
     check_cell_geometry(warmup, evaluation, concurrency, k_measured, (meta.id_set if meta else "eval"), strict)
     base_meta = meta or RunMeta()
-    base_meta.ids_sha256 = ids_sha256([r.request_id for r in evaluation])
+    base_meta.expected_ids_sha256 = ids_sha256([r.request_id for r in evaluation])
     base_meta.cache_policy = cache_policy
+    base_meta.timeout_s = timeout_s
+    base_meta.strict = strict
     results: list[RunResult] = []
 
-    async def one_run(k: int, url: str, startup_s: float | None, do_warmup: bool) -> None:
+    async def one_run(k: int, url: str, startup_s: float | None, do_warmup: bool, server_evidence: dict | None = None) -> None:
         async with make_session(connections=max(64, 4 * concurrency)) as session:
             if do_warmup:
                 t0 = time.perf_counter()
@@ -220,9 +229,17 @@ async def run_cell(
                 if not evidence.get("empty", False):
                     raise RuntimeError(f"cache flush before run{k} not verified: {evidence}")
             elif cache_policy == "restart":
-                evidence = {"fresh_server": True}
-            run_meta = RunMeta(**{**asdict(base_meta), "cache_evidence": evidence, "server_startup_s": startup_s})
+                evidence = {"fresh_server": True, **(server_evidence or {})}
             trs = await closed_loop(session, url, adapter, evaluation, concurrency, timeout_s, record_raw=record_raw)
+            run_meta = RunMeta(
+                **{
+                    **asdict(base_meta),
+                    "ids_sha256": ids_sha256([t.request_id for t in trs]),
+                    "cache_evidence": evidence,
+                    "runtime_evidence": dict(server_evidence or {}),
+                    "server_startup_s": startup_s,
+                }
+            )
         run = evaluate_run(f"run{k}", concurrency, trs, measured=k > 0, meta=run_meta)
         save_run(run, out_dir / f"run{k}", save_audio=save_audio)
         m = run.metrics
@@ -236,7 +253,8 @@ async def run_cell(
     for k in range(k_measured + 1):
         if cache_policy == "restart":
             with server_factory(k) as srv:  # type: ignore[misc]
-                await one_run(k, srv.url, getattr(srv, "startup_s", None), do_warmup=True)
+                ev = srv.evidence() if hasattr(srv, "evidence") else {}
+                await one_run(k, srv.url, getattr(srv, "startup_s", None), do_warmup=True, server_evidence=ev)
         else:
             await one_run(k, base_url, None, do_warmup=(k == 0))  # type: ignore[arg-type]
     return results
@@ -253,5 +271,14 @@ def cell_valid(results: list[RunResult]) -> bool:
 
 
 def cell_compliant(results: list[RunResult]) -> bool:
-    """Valid, and every measured run started with verified-cold caches."""
-    return cell_valid(results) and all(r.meta.cache_policy in ("restart", "flush") for r in measured_runs(results))
+    """Valid, strict geometry, and every measured run started with verified-cold caches."""
+    from bench.stats import StatisticsInputError, validate_cell_runs
+
+    runs = measured_runs(results)
+    if not cell_valid(results):
+        return False
+    try:
+        validate_cell_runs([r.summary() for r in runs], expected_k=len(runs), side="cell")
+    except StatisticsInputError:
+        return False
+    return True

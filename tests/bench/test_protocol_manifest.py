@@ -148,6 +148,38 @@ def test_seed_tts_id_sets_disjoint():
         assert len(set(sets.eval(c))) == len(sets.eval(c))
 
 
+def _manifest(tmp_path):
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    return build_manifest(
+        repos={"qwen3_omni": root},
+        env_pythons={"bench": sys.executable},
+        out_dir=tmp_path,
+        gpu_index=1,
+        deploy={"engine": "fake", "config": "x", "resolved": {"k": 1}, "candidate": {"candidate_id": "fake:x:1", "digest": "d"},
+                "cell": {"digest": "c"}},
+        sampling={"talker": {"temperature": 0.8}},
+        datasets=[{"repo": "zhaochenyang20/seed-tts-eval", "revision": "8f5e1aa", "ids": {"eval": ["a"]}}],
+        run_order_seed=7,
+    )
+
+
+def test_manifest_lock_hash_matches_file_bytes(tmp_path):
+    import hashlib
+    from pathlib import Path
+
+    m = _manifest(tmp_path)
+    lock = m["env_lock"]["bench"]
+    assert hashlib.sha256(Path(lock["path"]).read_bytes()).hexdigest() == lock["sha256"]
+    Path(lock["path"]).write_text("tampered\n")
+    assert any("hash does not match" in e for e in validate_manifest(m))
+    m2 = _manifest(tmp_path / "b")
+    del m2["deploy"]["candidate"]
+    assert any("candidate identity" in e for e in validate_manifest(m2))
+
+
 def test_manifest_validation(tmp_path):
     import sys
     from pathlib import Path
@@ -158,7 +190,8 @@ def test_manifest_validation(tmp_path):
         env_pythons={"bench": sys.executable},
         out_dir=tmp_path,
         gpu_index=1,
-        deploy={"engine": "fake", "config": "x", "resolved": {"k": 1}},
+        deploy={"engine": "fake", "config": "x", "resolved": {"k": 1}, "candidate": {"candidate_id": "fake:x:1", "digest": "d"},
+                "cell": {"digest": "c"}},
         sampling={"talker": {"temperature": 0.8}},
         datasets=[{"repo": "zhaochenyang20/seed-tts-eval", "revision": "8f5e1aa", "ids": {"eval": ["a"]}}],
         run_order_seed=7,
@@ -211,7 +244,10 @@ class _FakeServer:
 
     def __init__(self, url):
         self.url = url
-        self.startup_s = 0.0
+        self.startup_s = 1.5
+
+    def evidence(self):
+        return {"server_pid": 50000 + _FakeServer.started, "argv": ["fake"], "env": {}, "mps": {"mps_active": False}}
 
     def __enter__(self):
         _FakeServer.started += 1
@@ -231,11 +267,18 @@ async def test_restart_policy_uses_fresh_server_per_run(tmp_path):
                                  out_dir=tmp_path, cache_policy="restart", server_factory=lambda k: _FakeServer(url), strict=False,
                                  log=lambda s: None)
         assert _FakeServer.started == 3  # run0 + 2 measured runs
-        assert all(r.meta.cache_policy == "restart" and r.meta.cache_evidence == {"fresh_server": True} for r in results)
+        assert all(r.meta.cache_policy == "restart" and r.meta.cache_evidence["fresh_server"] for r in results)
+        assert len({r.meta.cache_evidence["server_pid"] for r in results}) == 3
         assert (tmp_path / "run2_warmup" / "summary.json").exists()
-        from bench.protocol import cell_compliant
+        from bench.protocol import RunMeta, cell_compliant
 
-        assert cell_compliant(results)
+        assert not cell_compliant(results)  # loose geometry and a short timeout are never compliant evidence
+        meta = RunMeta(gpu="L20X", engine="engine", config="c", candidate_id="engine:c:1", config_digest="d", cell_digest="e")
+        _FakeServer.started = 0
+        strict = await run_cell(None, TextOnlyEngineAdapter(), _reqs(16, "wu"), _reqs(320, "ev"), concurrency=8, k_measured=2,
+                                out_dir=tmp_path / "strict", cache_policy="restart", server_factory=lambda k: _FakeServer(url), meta=meta,
+                                timeout_s=180.0, save_audio=False, log=lambda s: None)
+        assert cell_compliant(strict)
         with pytest.raises(ValueError):
             await run_cell(None, TextOnlyEngineAdapter(), _reqs(2, "wu"), _reqs(4, "ev"), concurrency=1, k_measured=1,
                            out_dir=tmp_path / "z", cache_policy="flush", strict=False, log=lambda s: None)

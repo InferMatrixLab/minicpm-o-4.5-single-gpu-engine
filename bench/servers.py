@@ -55,12 +55,48 @@ def gpu_memory_used_mib(gpu: int) -> float | None:
         return None
 
 
+RELEVANT_ENV_PREFIXES = ("CUDA_", "HF_", "VLLM", "SGLANG", "OMNI_", "PYTORCH_", "NCCL_", "TORCH")
+
+
+def gpu_compute_apps(gpu: int) -> list[dict]:
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "-i", str(gpu), "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=30, check=True,
+        ).stdout
+    except Exception:
+        return []
+    apps = []
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3:
+            apps.append({"pid": int(parts[0]) if parts[0].isdigit() else parts[0], "process_name": parts[1], "used_mib": parts[2]})
+    return apps
+
+
+def mps_evidence(gpu: int, pgid: int | None) -> dict:
+    """Whether the GPU is served through an MPS server, from the compute apps seen after startup."""
+    apps = gpu_compute_apps(gpu)
+    mps_server = any("nvidia-cuda-mps-server" in a["process_name"] for a in apps)
+    group_pids = set()
+    if pgid is not None:
+        try:
+            out = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True, timeout=10).stdout
+            group_pids = {int(x) for x in out.split()}
+        except Exception:
+            pass
+    direct = [a for a in apps if a["pid"] in group_pids]
+    return {"compute_apps": apps, "mps_server_on_gpu": mps_server, "server_group_direct_contexts": len(direct), "mps_active": mps_server}
+
+
 class Server:
     def __init__(self, spec: ServerSpec, log_path: Path) -> None:
         self.spec = spec
         self.log_path = log_path
         self.proc: subprocess.Popen | None = None
+        self.pgid: int | None = None
         self.startup_s: float | None = None
+        self._env_overlay: dict = {}
 
     @property
     def url(self) -> str:
@@ -75,25 +111,39 @@ class Server:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         log = self.log_path.open("ab")
         t0 = time.monotonic()
+        self._env_overlay = {k: v for k, v in env.items() if k.startswith(RELEVANT_ENV_PREFIXES)}
         self.proc = subprocess.Popen(self.spec.cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, cwd=str(ROOT))
+        self.pgid = self.proc.pid  # start_new_session: the leader's pid is the group id
         deadline = t0 + self.spec.startup_timeout_s
-        while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise RuntimeError(f"{self.spec.name} exited with {self.proc.returncode} during startup; see {self.log_path}")
-            if _healthy(self.spec.url + self.spec.health_path):
-                self.startup_s = time.monotonic() - t0
-                return self
-            time.sleep(5)
-        self.stop()
-        raise RuntimeError(f"{self.spec.name} not healthy after {self.spec.startup_timeout_s}s; see {self.log_path}")
+        try:
+            while time.monotonic() < deadline:
+                if self.proc.poll() is not None:
+                    raise RuntimeError(f"{self.spec.name} exited with {self.proc.returncode} during startup; see {self.log_path}")
+                if _healthy(self.spec.url + self.spec.health_path):
+                    self.startup_s = time.monotonic() - t0
+                    return self
+                time.sleep(5)
+            raise RuntimeError(f"{self.spec.name} not healthy after {self.spec.startup_timeout_s}s; see {self.log_path}")
+        except BaseException:
+            self.stop()  # never leave stage children behind
+            raise
+
+    def evidence(self) -> dict:
+        """Launch identity and runtime state of this server, captured after startup."""
+        return {
+            "server_pid": self.proc.pid if self.proc else None,
+            "server_pgid": self.pgid,
+            "argv": list(self.spec.cmd),
+            "env": dict(sorted(self._env_overlay.items())),
+            "gpu": self.spec.gpu,
+            "startup_s": self.startup_s,
+            "mps": mps_evidence(self.spec.gpu, self.pgid),
+        }
 
     def stop(self, timeout_s: float = 120.0, gpu_free_mib: float = 1024.0) -> None:
         if self.proc is None:
             return
-        try:
-            pgid = os.getpgid(self.proc.pid)
-        except ProcessLookupError:
-            pgid = None
+        pgid = self.pgid
         if pgid is not None:
             for sig, wait in ((signal.SIGTERM, timeout_s), (signal.SIGKILL, 30.0)):
                 try:
@@ -105,6 +155,10 @@ class Server:
                     time.sleep(1)
                 if not self._group_alive(pgid):
                     break
+        try:
+            self.proc.wait(timeout=10)  # reap the leader
+        except Exception:
+            pass
         self.proc = None
         end = time.monotonic() + 300
         while time.monotonic() < end:

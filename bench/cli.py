@@ -25,7 +25,8 @@ from bench.adapters.vllm_omni import stage_sampling
 from bench.client import make_session, send_request
 from bench.manifest import build_manifest, gpu_info, validate_manifest
 from bench.metrics import request_metrics
-from bench.protocol import CellPlan, RunMeta, cell_compliant, cell_valid, evaluate_run, measured_runs, plan_sweep, run_cell, save_run
+from bench.experiment import Candidate, CellSpec, asdict_candidate, digest, unique_candidates
+from bench.protocol import RunMeta, cell_compliant, cell_valid, evaluate_run, ids_sha256, measured_runs, plan_sweep, run_cell, save_run
 from bench.servers import Server, ServerSpec, sglang_omni_spec, vllm_omni_spec
 from bench.workload import (
     SEED_TTS_REPO,
@@ -80,22 +81,57 @@ def resolve_sglang_deploy(extra: list[str]) -> dict:
     }
 
 
-def server_spec(adapter: str, config: str, port: int, gpu: int, extra: list[str]) -> ServerSpec:
-    if adapter == "vllm-omni":
-        return vllm_omni_spec(config, port, gpu, extra)
-    if adapter == "sglang-omni":
-        return sglang_omni_spec(port, gpu, extra)
-    if adapter == "engine":
-        return ServerSpec(name="engine", cmd=["bash", str(ROOT / "scripts" / "serve_engine.sh"), config, str(port), *extra], port=port, gpu=gpu)
-    raise ValueError(adapter)
+def server_spec(cand: Candidate, port: int, gpu: int) -> ServerSpec:
+    extra = list(cand.extra)
+    if cand.adapter == "vllm-omni":
+        spec = vllm_omni_spec(cand.config, port, gpu, extra)
+    elif cand.adapter == "sglang-omni":
+        spec = sglang_omni_spec(port, gpu, extra)
+    elif cand.adapter == "engine":
+        spec = ServerSpec(name="engine", cmd=["bash", str(ROOT / "scripts" / "serve_engine.sh"), cand.config, str(port), *extra], port=port, gpu=gpu)
+    else:
+        raise ValueError(cand.adapter)
+    spec.env.update(cand.env_dict())
+    spec.name = cand.candidate_id
+    return spec
 
 
-def resolved_deploy(adapter: str, config: str, extra: list[str]) -> dict:
+def resolved_deploy(adapter: str, config: str, extra: list[str], env: dict) -> dict:
     if adapter == "vllm-omni":
-        return resolve_vllm_deploy(config)
-    if adapter == "sglang-omni":
-        return resolve_sglang_deploy(extra)
-    return {"engine": adapter, "config": config, "extra_args": extra}
+        d = resolve_vllm_deploy(config)
+    elif adapter == "sglang-omni":
+        d = resolve_sglang_deploy(extra)
+    else:
+        script = ROOT / "scripts" / "serve_engine.sh"
+        d = {"engine": adapter, "config": config, "serve_script_sha256": _sha(script.read_text()) if script.exists() else None}
+    d["extra_args"] = list(extra)
+    d["env_overlay"] = dict(env)
+    return d
+
+
+def deploy_files_sha256(resolved: dict) -> tuple:
+    if "chain" in resolved:
+        return tuple(c["sha256"] for c in resolved["chain"])
+    return tuple(v for k, v in sorted(resolved.items()) if k.endswith("sha256") and v)
+
+
+def make_candidate(d: dict) -> Candidate:
+    base = Candidate.from_spec(d)
+    resolved = resolved_deploy(base.adapter, base.config, list(base.extra), base.env_dict())
+    return Candidate.from_spec(d, deploy_files_sha256(resolved))
+
+
+def make_cell(cand: Candidate, concurrency: int, k: int, id_set: str, seed_index: int, timeout_s: float, gpu: int) -> CellSpec:
+    rows = load_seed_tts_rows()
+    sets = make_id_sets(rows)
+    ids_eval = sets.tuning(concurrency) if id_set == "tuning" else sets.eval(concurrency)
+    workload = {
+        "dataset": SEED_TTS_REPO,
+        "revision": SEED_TTS_REVISION,
+        "warmup_ids_sha256": ids_sha256(sets.warmup(concurrency)),
+        "measured_ids_sha256": ids_sha256(ids_eval),
+    }
+    return CellSpec(cand, concurrency, k, id_set, seed_index, timeout_s, gpu, workload)
 
 
 def effective_sampling(adapter_name: str, adapter, example) -> dict:
@@ -137,39 +173,47 @@ async def _smoke(args) -> int:
 
 
 async def run_one_cell(
-    *, adapter_name: str, config: str, concurrency: int, k: int, out: Path, gpu: int, port: int, url: str | None, cache_policy: str,
-    id_set: str, seed_index: int, run_order_seed: int, timeout: float, extra: list[str], save_audio: bool, strict: bool, sglang_stream: bool = False,
+    *, cell: CellSpec, out: Path, port: int, url: str | None, cache_policy: str, run_order_seed: int, save_audio: bool, strict: bool,
+    sglang_stream: bool = False,
 ) -> dict:
+    cand = cell.candidate
     rows = load_seed_tts_rows()
     sets = make_id_sets(rows)
-    ids_eval = sets.tuning(concurrency) if id_set == "tuning" else sets.eval(concurrency)
-    warm = canonical_requests(rows, sets.warmup(concurrency), seed_index=seed_index)
-    evaluation = canonical_requests(rows, ids_eval, seed_index=seed_index)
-    adapter = _adapter(adapter_name, sglang_stream)
+    ids_eval = sets.tuning(cell.concurrency) if cell.id_set == "tuning" else sets.eval(cell.concurrency)
+    warm = canonical_requests(rows, sets.warmup(cell.concurrency), seed_index=cell.seed_index)
+    evaluation = canonical_requests(rows, ids_eval, seed_index=cell.seed_index)
+    adapter = _adapter(cand.adapter, sglang_stream)
     out.mkdir(parents=True, exist_ok=True)
-    hw = gpu_info(gpu)
+    hw = gpu_info(cell.gpu_index)
+    resolved = resolved_deploy(cand.adapter, cand.config, list(cand.extra), cand.env_dict())
+    if deploy_files_sha256(resolved) != cand.deploy_files_sha256:
+        raise RuntimeError(f"deploy files changed since candidate {cand.candidate_id} was declared")
     manifest = build_manifest(
         repos=DEFAULT_REPOS,
         env_pythons=DEFAULT_PYTHONS,
         out_dir=out,
-        gpu_index=gpu,
-        deploy={"engine": adapter_name, "config": config, "resolved": resolved_deploy(adapter_name, config, extra)},
-        sampling={**effective_sampling(adapter_name, adapter, evaluation[0]), "seed_index": seed_index},
-        datasets=[{"repo": SEED_TTS_REPO, "revision": SEED_TTS_REVISION, "locale": "en", "ids": {"warmup": [r.request_id for r in warm], id_set: ids_eval}}],
+        gpu_index=cell.gpu_index,
+        deploy={"engine": cand.adapter, "config": cand.config, "resolved": resolved, "candidate": asdict_candidate(cand), "cell": cell.to_json()},
+        sampling={**effective_sampling(cand.adapter, adapter, evaluation[0]), "seed_index": cell.seed_index},
+        datasets=[{"repo": SEED_TTS_REPO, "revision": SEED_TTS_REVISION, "locale": "en",
+                   "ids": {"warmup": [r.request_id for r in warm], cell.id_set: ids_eval}}],
         run_order_seed=run_order_seed,
-        extra={"concurrency": concurrency, "k": k, "id_set": id_set, "timeout_s": timeout, "cache_policy": cache_policy, "port": port},
+        extra={"concurrency": cell.concurrency, "k": cell.k, "id_set": cell.id_set, "timeout_s": cell.timeout_s, "cache_policy": cache_policy,
+               "port": port, "strict": strict},
     )
     gpu_name = str(hw.get("gpu_sku", "")).replace("NVIDIA ", "")
-    meta = RunMeta(gpu=gpu_name, engine=adapter_name, config=config, id_set=id_set, seed_index=seed_index)
+    meta = RunMeta(gpu=gpu_name, engine=cand.adapter, config=cand.config, candidate_id=cand.candidate_id, config_digest=cand.digest,
+                   cell_digest=cell.digest, id_set=cell.id_set, seed_index=cell.seed_index)
     factory = None
     if cache_policy == "restart":
-        spec = server_spec(adapter_name, config, port, gpu, extra)
+        spec = server_spec(cand, port, cell.gpu_index)
         factory = lambda i: Server(spec, out / f"server_run{i}.log")  # noqa: E731
     t0 = time.time()
-    results = await run_cell(url, adapter, warm, evaluation, concurrency, k, out, timeout_s=timeout, cache_policy=cache_policy,
+    results = await run_cell(url, adapter, warm, evaluation, cell.concurrency, cell.k, out, timeout_s=cell.timeout_s, cache_policy=cache_policy,
                              server_factory=factory, meta=meta, save_audio=save_audio, strict=strict)
     errs = validate_manifest(manifest)
     result = {
+        "cell_spec": cell.to_json(),
         "manifest": manifest,
         "manifest_errors": errs,
         "cell_valid": cell_valid(results),
@@ -184,41 +228,95 @@ async def run_one_cell(
 
 async def _cell(args) -> int:
     url = None if args.cache_policy == "restart" else (args.url or f"http://127.0.0.1:{args.port}")
-    res = await run_one_cell(
-        adapter_name=args.adapter, config=args.config, concurrency=args.concurrency, k=args.k, out=Path(args.out), gpu=args.gpu, port=args.port,
-        url=url, cache_policy=args.cache_policy, id_set=args.id_set, seed_index=args.seed_index, run_order_seed=args.run_order_seed,
-        timeout=args.timeout, extra=args.extra or [], save_audio=not args.no_audio, strict=not args.loose, sglang_stream=args.sglang_stream,
-    )
+    cand = make_candidate({"adapter": args.adapter, "config": args.config, "extra": args.extra or [], "label": args.label,
+                           "env": dict(kv.split("=", 1) for kv in args.env)})
+    cell = make_cell(cand, args.concurrency, args.k, args.id_set, args.seed_index, args.timeout, args.gpu)
+    res = await run_one_cell(cell=cell, out=Path(args.out), port=args.port, url=url, cache_policy=args.cache_policy,
+                             run_order_seed=args.run_order_seed, save_audio=not args.no_audio, strict=not args.loose, sglang_stream=args.sglang_stream)
     print(json.dumps({k: res[k] for k in ("cell_valid", "cell_compliant", "manifest_errors")} | {"out": args.out}))
-    return 0 if res["cell_valid"] and not res["manifest_errors"] else 1
+    return 0 if res["cell_compliant"] else 1
+
+
+class SweepError(RuntimeError):
+    pass
+
+
+def _cell_artifacts_complete(cell_dir: Path, k: int) -> bool:
+    return all((cell_dir / f"run{i}" / "summary.json").exists() and (cell_dir / f"run{i}" / "traces.jsonl").exists() for i in range(k + 1))
+
+
+def resume_state(cell_dir: Path, cell: CellSpec) -> str:
+    """'new' (no result), 'reuse' (matching, compliant, complete) or 'retry' (matching but not compliant).
+
+    Raises if the directory holds a different experiment.
+    """
+    rp = cell_dir / "result.json"
+    if not rp.exists():
+        if cell_dir.exists() and any(cell_dir.iterdir()):
+            return "retry"
+        return "new"
+    res = json.loads(rp.read_text())
+    got = (res.get("cell_spec") or {}).get("digest")
+    if got != cell.digest:
+        raise SweepError(f"{cell_dir} holds a different experiment (digest {got} != {cell.digest}); refusing to reuse or overwrite it")
+    m = res.get("manifest") or {}
+    if res.get("cell_compliant") and not validate_manifest(m) and _cell_artifacts_complete(cell_dir, cell.k):
+        return "reuse"
+    return "retry"
+
+
+def _set_aside(cell_dir: Path) -> Path:
+    """Keep a failed or incomplete attempt for the audit record."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = cell_dir.parent / "attempts" / f"{cell_dir.name}.{stamp}"
+    n = 1
+    while dest.exists():
+        dest = cell_dir.parent / "attempts" / f"{cell_dir.name}.{stamp}.{n}"
+        n += 1
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cell_dir.rename(dest)
+    return dest
 
 
 async def _sweep(args) -> int:
-    """Execute every (engine, config, C) cell of a spec in a seeded random order, a fresh server per run."""
+    """Execute every (candidate, C) cell of a spec in a seeded random order, a fresh server per run."""
     spec = json.loads(Path(args.spec).read_text())
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    spec_digest = digest(spec)
+    rec_path = out / "sweep.json"
+    if rec_path.exists():
+        old = json.loads(rec_path.read_text())
+        if old.get("spec_digest") != spec_digest:
+            raise SweepError(f"{out} belongs to a different sweep spec (digest {old.get('spec_digest')}); use a new output directory")
+        record = old
+    else:
+        record = {"spec": spec, "spec_digest": spec_digest, "cells": {}, "attempts": []}
     seed = int(spec["run_order_seed"])
-    cells = [CellPlan(c["adapter"], c["config"], conc) for c in spec["configs"] for conc in spec["concurrencies"]]
-    extra_by = {(c["adapter"], c["config"]): c.get("extra", []) for c in spec["configs"]}
+    cands = unique_candidates([make_candidate(c) for c in spec["configs"]])
+    cells = [make_cell(c, conc, int(spec["k"]), spec.get("id_set", "eval"), int(spec.get("seed_index", 0)), float(spec.get("timeout_s", 180.0)),
+                       int(spec["gpu"])) for c in cands for conc in spec["concurrencies"]]
     order = plan_sweep(cells, seed)
-    record = {"spec": spec, "order": [asdict(c) for c in order], "cells": []}
-    (out / "sweep.json").write_text(json.dumps(record, indent=1))
+    record["order"] = [{"candidate_id": c.candidate.candidate_id, "concurrency": c.concurrency, "digest": c.digest} for c in order]
+    rec_path.write_text(json.dumps(record, indent=1))
     rc = 0
-    for i, c in enumerate(order):
-        cell_dir = out / f"{i:02d}_{c.engine}_{Path(c.config).stem}_c{c.concurrency}"
-        if (cell_dir / "result.json").exists():
+    for i, cell in enumerate(order):
+        safe = cell.candidate.candidate_id.replace(":", "_").replace("/", "_")
+        cell_dir = out / f"{i:02d}_{safe}_c{cell.concurrency}"
+        state = resume_state(cell_dir, cell)
+        if state == "retry":
+            record["attempts"].append({"cell": cell.digest, "moved_to": str(_set_aside(cell_dir))})
+        if state == "reuse":
             res = json.loads((cell_dir / "result.json").read_text())
         else:
-            res = await run_one_cell(
-                adapter_name=c.engine, config=c.config, concurrency=c.concurrency, k=int(spec["k"]), out=cell_dir, gpu=int(spec["gpu"]),
-                port=int(spec.get("port", 18100)), url=None, cache_policy="restart", id_set=spec.get("id_set", "eval"),
-                seed_index=int(spec.get("seed_index", 0)), run_order_seed=seed, timeout=float(spec.get("timeout_s", 180.0)),
-                extra=extra_by[(c.engine, c.config)], save_audio=bool(spec.get("save_audio", True)), strict=True,
-            )
-        record["cells"].append({"index": i, **asdict(c), "dir": str(cell_dir), "cell_valid": res["cell_valid"], "cell_compliant": res["cell_compliant"]})
-        (out / "sweep.json").write_text(json.dumps(record, indent=1))
-        rc |= 0 if res["cell_valid"] else 1
+            res = await run_one_cell(cell=cell, out=cell_dir, port=int(spec.get("port", 18100)), url=None, cache_policy="restart",
+                                     run_order_seed=seed, save_audio=bool(spec.get("save_audio", True)), strict=True)
+        record["cells"][cell.digest] = {"index": i, "candidate_id": cell.candidate.candidate_id, "concurrency": cell.concurrency,
+                                        "dir": str(cell_dir), "reused": state == "reuse", "cell_valid": res["cell_valid"],
+                                        "cell_compliant": res["cell_compliant"], "manifest_errors": res["manifest_errors"]}
+        rec_path.write_text(json.dumps(record, indent=1))
+        if not res["cell_compliant"] or res["manifest_errors"]:
+            rc = 1
     return rc
 
 
@@ -249,6 +347,8 @@ def main(argv=None) -> int:
     cp.add_argument("--no-audio", action="store_true")
     cp.add_argument("--loose", action="store_true", help="skip mandatory-geometry checks (development only)")
     cp.add_argument("--sglang-stream", action="store_true")
+    cp.add_argument("--label", default="", help="variant label, e.g. mps-on")
+    cp.add_argument("--env", action="append", default=[], help="KEY=VALUE added to the server environment")
     cp.add_argument("extra", nargs="*", help="extra server args after --")
     sw = sub.add_parser("sweep")
     sw.add_argument("--spec", required=True)

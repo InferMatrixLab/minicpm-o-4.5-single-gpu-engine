@@ -43,8 +43,9 @@ def env_lock(python: str, out_dir: Path, name: str) -> dict:
         frozen = _run([python, "-m", "pip", "freeze"])
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"env-{name}.lock"
-    path.write_text(frozen + "\n")
-    return {"python": python, "path": str(path), "sha256": hashlib.sha256(frozen.encode()).hexdigest(), "packages": len(frozen.splitlines())}
+    data = (frozen + "\n").encode()
+    path.write_bytes(data)
+    return {"python": python, "path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "packages": len(frozen.splitlines())}
 
 
 def _mps_state() -> dict:
@@ -129,6 +130,14 @@ def validate_manifest(m: dict) -> list[str]:
     for name, lock in m["env_lock"].items():
         if not lock.get("sha256") or not lock.get("packages"):
             errs.append(f"env lock {name} is empty")
+            continue
+        try:
+            actual = hashlib.sha256(Path(lock["path"]).read_bytes()).hexdigest()
+        except OSError:
+            errs.append(f"env lock {name} file {lock.get('path')} is missing")
+            continue
+        if actual != lock["sha256"]:
+            errs.append(f"env lock {name} hash does not match its file")
     if m["model"].get("revision") != MODEL_REVISION:
         errs.append(f"model revision {m['model'].get('revision')} != {MODEL_REVISION}")
     if not m["datasets"]:
@@ -140,6 +149,11 @@ def validate_manifest(m: dict) -> list[str]:
             errs.append(f"dataset {d.get('repo')} has no id lists")
     if not m["deploy"].get("resolved"):
         errs.append("deploy has no resolved config")
+    cand = m["deploy"].get("candidate") or {}
+    if not cand.get("candidate_id") or not cand.get("digest"):
+        errs.append("deploy has no candidate identity")
+    if not (m["deploy"].get("cell") or {}).get("digest"):
+        errs.append("deploy has no cell specification digest")
     if not m["sampling"]:
         errs.append("sampling is empty")
     hw = m["hardware"]

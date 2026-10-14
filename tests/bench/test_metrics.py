@@ -266,3 +266,19 @@ def test_silence_frames():
     # -50 dBFS boundary: RMS of 0.003 is about -50.5 dBFS
     quiet = tone(480, amp=0.003 * np.sqrt(2))
     assert silent_frame_mask(quiet)[0]
+
+
+def test_malformed_sse_json_invalidates_request():
+    chunks = [
+        (0.5, vllm_audio(wav_b64(tone(SR, 300)))),
+        (0.6, b"data: {broken json\n\n"),
+        (0.7, vllm_audio(wav_b64(tone(SR, 500)))),
+        (0.8, sse("[DONE]")),
+    ]
+    tr = replay(VllmOmniAdapter(), "v", 0.0, chunks)
+    m = request_metrics(tr)
+    assert not m.ok and "error" in m.invalid_reasons
+    assert any(e.kind == "error" and "broken json" in e.note for e in tr.events)
+    # SSE comment heartbeats remain fine
+    ok = replay(VllmOmniAdapter(), "v", 0.0, [(0.5, b": ping\n\n"), (0.6, vllm_audio(wav_b64(tone(SR)))), (0.7, sse("[DONE]"))])
+    assert request_metrics(ok).ok

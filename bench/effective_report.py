@@ -41,19 +41,22 @@ BASELINE_STACKS = {"vllm-omni", "sglang-omni"}
 
 
 def main(argv: list[str]) -> int:
+    """``effective_report <dir> [stack ...]``; the default requires both baselines."""
     d = Path(argv[0] if argv else "results/effective_inputs")
+    stacks = argv[1:] or sorted(BASELINE_STACKS)
+    unknown = set(stacks) - (STRICT_STACKS | BASELINE_STACKS)
+    if unknown:
+        raise SystemExit(f"unknown stacks {sorted(unknown)}; expected {sorted(STRICT_STACKS | BASELINE_STACKS)}")
     canon = load_dumps(d / "canonical.jsonl")
     report = {}
-    for path in sorted(d.glob("*.jsonl")):
-        name = path.stem
-        if name == "canonical":
-            continue
-        if name not in STRICT_STACKS | BASELINE_STACKS:
-            raise SystemExit(f"unknown stack dump {path.name}; expected one of {sorted(STRICT_STACKS | BASELINE_STACKS)}")
+    for name in stacks:
+        path = d / f"{name}.jsonl"
+        if not path.exists():
+            raise SystemExit(f"required stack dump {path} is missing")
         report[name] = stack_report(load_dumps(path), canon, strict=name in STRICT_STACKS)
     (d / "report.json").write_text(json.dumps(report, indent=1))
     print(json.dumps({k: {"eligible": v["eligible"], **v["reference_conditioning"]} for k, v in report.items()}, indent=1))
-    return 0 if all(v["eligible"] for v in report.values()) else 1
+    return 0 if report and all(v["eligible"] for v in report.values()) else 1
 
 
 if __name__ == "__main__":

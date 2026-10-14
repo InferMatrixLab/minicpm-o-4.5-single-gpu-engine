@@ -109,26 +109,60 @@ def compare(candidate: EffectiveInput, canonical: EffectiveInput, strict_referen
 
 
 MIN_ROWS = 32
-REQUIRED_CANONICAL_FIELDS = ("ref_source_sha256", "ref_waveform_hash", "speech_tokens", "speaker_embedding")
+_HEX = set("0123456789abcdef")
+
+
+def _is_sha(h) -> bool:
+    return isinstance(h, str) and len(h) == 64 and set(h) <= _HEX
+
+
+def evidence_problems(e: EffectiveInput) -> list[str]:
+    """Structural completeness of one dump: every field present, well-formed and finite."""
+    p = []
+    ids = e.prompt_token_ids
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, int) and i >= 0 for i in ids):
+        p.append("prompt_token_ids missing or malformed")
+    for f in ("ref_source_sha256", "ref_waveform_hash"):
+        if not _is_sha(getattr(e, f)):
+            p.append(f"{f} missing or not a sha256")
+    if not isinstance(e.ref_waveform_sample_rate, int) or e.ref_waveform_sample_rate <= 0:
+        p.append("ref_waveform_sample_rate missing or invalid")
+    toks = e.speech_tokens
+    if not isinstance(toks, list) or not toks or not all(isinstance(t, int) and t >= 0 for t in toks):
+        p.append("speech_tokens missing or malformed")
+    emb = e.speaker_embedding
+    if not isinstance(emb, list) or not emb:
+        p.append("speaker_embedding missing")
+    elif not np.isfinite(np.asarray(emb, dtype=np.float64)).all():
+        p.append("speaker_embedding non-finite")
+    return p
 
 
 def compare_sets(
     candidates: dict[str, EffectiveInput], canonical: dict[str, EffectiveInput], strict_reference: bool = False, min_rows: int = MIN_ROWS
 ) -> list[Mismatch]:
-    """Compare a stack's dumps with the canonical dumps.  Incomplete evidence is a hard mismatch."""
+    """Compare a stack's dumps with the canonical dumps.
+
+    Both sets are validated structurally first: identical row sets of at least
+    ``min_rows`` rows, and complete, finite evidence in every dump.  Missing
+    evidence is always a hard failure; only measured, finite reference-conditioning
+    differences of a baseline are soft (documented).
+    """
     out: list[Mismatch] = []
     if len(canonical) < min_rows:
         out.append(Mismatch("*", "evidence", f"canonical set has {len(canonical)} rows (need {min_rows})", True))
+    if set(candidates) != set(canonical):
+        extra = sorted(set(candidates) - set(canonical))
+        missing = sorted(set(canonical) - set(candidates))
+        out.append(Mismatch("*", "row_set", f"row sets differ: missing {missing[:3]}, extra {extra[:3]}", True))
+    for side, dumps in (("canonical", canonical), ("candidate", candidates)):
+        for rid, e in dumps.items():
+            for prob in evidence_problems(e):
+                out.append(Mismatch(rid, "evidence", f"{side}: {prob}", True))
+    if any(m.hard for m in out):
+        return out
     for rid, canon in canonical.items():
-        for f in REQUIRED_CANONICAL_FIELDS:
-            if getattr(canon, f) is None:
-                out.append(Mismatch(rid, "evidence", f"canonical dump lacks {f}", True))
-    for rid, canon in canonical.items():
-        cand = candidates.get(rid)
-        if cand is None:
-            out.append(Mismatch(rid, "missing", "no dump for row", True))
-            continue
-        out.extend(compare(cand, canon, strict_reference=strict_reference))
+        out.extend(compare(candidates[rid], canon, strict_reference=strict_reference))
     return out
 
 

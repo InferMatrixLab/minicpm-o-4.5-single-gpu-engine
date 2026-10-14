@@ -62,26 +62,56 @@ def per_run_values(run_summaries: list[dict], metric: str) -> np.ndarray:
     return np.asarray(vals, dtype=np.float64)
 
 
-#: Fields that must agree across every run compared within one cell.
-CELL_IDENTITY_FIELDS = ("gpu", "concurrency", "id_set", "ids_sha256", "seed_index", "n_requests")
+#: Workload identity: must agree within a side and between engine and baseline.
+WORKLOAD_FIELDS = ("gpu", "concurrency", "id_set", "ids_sha256", "seed_index", "n_requests", "timeout_s")
+#: Configuration identity: must be constant within a side (one declared configuration).
+CONFIG_FIELDS = ("engine", "config", "candidate_id", "config_digest", "cell_digest")
+REQUIRED_TIMEOUT_S = 180.0
 
 
-def validate_cell_runs(runs: list[dict], expected_k: int | None, side: str) -> dict:
-    """Check that ``runs`` is one complete, comparable experiment; returns its identity."""
-    if expected_k is not None:
-        labels = sorted(r.get("label") for r in runs)
-        want = sorted(f"run{i}" for i in range(1, expected_k + 1))
-        if labels != want:
-            raise StatisticsInputError(f"{side}: expected measured runs {want}, got {labels} (invalid runs cannot be omitted)")
+def _check_run(r: dict, side: str) -> None:
+    from bench.workload import n_eval
+
+    lab = r.get("label")
+    if not r.get("strict", False):
+        raise StatisticsInputError(f"{side}: run {lab} was not measured with mandatory geometry (strict)")
+    if not r.get("ids_sha256") or r.get("ids_sha256") != r.get("expected_ids_sha256"):
+        raise StatisticsInputError(f"{side}: run {lab} measured IDs differ from the declared ID set")
+    if r.get("id_set") == "eval" and r.get("n_requests") != n_eval(int(r.get("concurrency", 0))):
+        raise StatisticsInputError(f"{side}: run {lab} has {r.get('n_requests')} requests, N_eval is {n_eval(int(r.get('concurrency', 0)))}")
+    if float(r.get("timeout_s", 0)) != REQUIRED_TIMEOUT_S:
+        raise StatisticsInputError(f"{side}: run {lab} used timeout {r.get('timeout_s')} s (required {REQUIRED_TIMEOUT_S})")
+    policy = r.get("cache_policy")
+    ev = r.get("cache_evidence") or {}
+    if policy == "restart":
+        if ev.get("fresh_server") is not True or not ev.get("server_pid") or not (r.get("server_startup_s") or 0) > 0:
+            raise StatisticsInputError(f"{side}: run {lab} claims a fresh server without launch evidence")
+    elif policy == "flush":
+        if ev.get("empty") is not True:
+            raise StatisticsInputError(f"{side}: run {lab} has no verified cache flush")
+    else:
+        raise StatisticsInputError(f"{side}: run {lab} did not start with verified-cold caches")
+
+
+def validate_cell_runs(runs: list[dict], expected_k: int, side: str) -> dict:
+    """One complete, comparable experiment: exactly run1..runK, valid, one configuration, one workload."""
+    labels = sorted((r.get("label") for r in runs), key=str)
+    want = sorted((f"run{i}" for i in range(1, expected_k + 1)), key=str)
+    if labels != want:
+        raise StatisticsInputError(f"{side}: expected measured runs {want}, got {labels} (failed runs cannot be omitted)")
     ident = {}
-    for f in CELL_IDENTITY_FIELDS:
+    for f in WORKLOAD_FIELDS + CONFIG_FIELDS:
         vals = {json_key(r.get(f)) for r in runs}
         if len(vals) != 1 or None in vals or "" in vals:
             raise StatisticsInputError(f"{side}: runs disagree on or lack {f}: {sorted(map(str, vals))}")
         ident[f] = runs[0].get(f)
     for r in runs:
-        if r.get("cache_policy") not in ("restart", "flush"):
-            raise StatisticsInputError(f"{side}: run {r.get('label')} did not start with verified-cold caches")
+        if not r.get("measured") or not r.get("valid"):
+            raise StatisticsInputError(f"{side}: run {r.get('label')} is not a valid measured run")
+        _check_run(r, side)
+    pids = [(r.get("cache_evidence") or {}).get("server_pid") for r in runs if r.get("cache_policy") == "restart"]
+    if len(pids) != len(set(pids)):
+        raise StatisticsInputError(f"{side}: restart runs share a server process")
     return ident
 
 
@@ -90,18 +120,19 @@ def json_key(v):
 
 
 def validate_comparison(new_runs: list[dict], base_runs: list[dict], final: bool) -> None:
-    """Final confirmation: predeclared K=10 on both sides and the same workload identity.
+    """Final confirmation: predeclared K=10 on both sides.  Development: K=5..10 complete runs.
 
-    Development comparisons need at least 5 runs per side (up to 10).
+    Both sides must be complete experiments (run1..runK) on the same workload.
     """
-    k = FINAL_K if final else None
-    ni = validate_cell_runs(new_runs, k, "engine")
-    bi = validate_cell_runs(base_runs, k, "baseline")
-    if not final:
-        for side, runs in (("engine", new_runs), ("baseline", base_runs)):
-            if not (DEV_MIN_K <= len(runs) <= FINAL_K):
-                raise StatisticsInputError(f"{side}: development comparisons use {DEV_MIN_K}..{FINAL_K} runs, got {len(runs)}")
-    for f in CELL_IDENTITY_FIELDS:
+    for side, runs in (("engine", new_runs), ("baseline", base_runs)):
+        k = len(runs)
+        if final and k != FINAL_K:
+            raise StatisticsInputError(f"{side}: final confirmation requires K={FINAL_K}, got {k}")
+        if not final and not (DEV_MIN_K <= k <= FINAL_K):
+            raise StatisticsInputError(f"{side}: development comparisons use {DEV_MIN_K}..{FINAL_K} runs, got {k}")
+    ni = validate_cell_runs(new_runs, len(new_runs), "engine")
+    bi = validate_cell_runs(base_runs, len(base_runs), "baseline")
+    for f in WORKLOAD_FIELDS:
         if ni[f] != bi[f]:
             raise StatisticsInputError(f"engine and baseline differ on {f}: {ni[f]} vs {bi[f]}")
 
@@ -156,17 +187,23 @@ def estimate(
     new_runs: list[dict],
     base_runs: list[dict],
     metric: str,
+    *,
+    final: bool,
     replicates: int = BOOTSTRAP_REPLICATES,
     seed: int = 0,
     target: float = TARGET_SPEEDUP,
-    final: bool | None = None,
 ) -> RatioEstimate:
-    """``final=True`` enforces the final-confirmation rules, ``False`` the development rules,
-    ``None`` skips experiment-level validation (unit-level use only)."""
+    """Validated estimate: ``final=True`` applies the final-confirmation rules, ``False`` the development rules."""
+    validate_comparison(new_runs, base_runs, final=final)
+    return _estimate_unchecked(new_runs, base_runs, metric, replicates=replicates, seed=seed, target=target)
+
+
+def _estimate_unchecked(
+    new_runs: list[dict], base_runs: list[dict], metric: str, replicates: int = BOOTSTRAP_REPLICATES, seed: int = 0, target: float = TARGET_SPEEDUP
+) -> RatioEstimate:
+    """Numerical core only; never use it for reported results."""
     if metric not in HEADLINE_METRICS:
         raise StatisticsInputError(f"unknown headline metric {metric}")
-    if final is not None:
-        validate_comparison(new_runs, base_runs, final=final)
     hib = HEADLINE_METRICS[metric]
     nv = per_run_values(new_runs, metric)
     bv = per_run_values(base_runs, metric)

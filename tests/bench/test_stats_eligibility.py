@@ -3,13 +3,27 @@ import pytest
 
 from bench.effective_inputs import EffectiveInput, compare, eligible
 from bench.eligibility import ConfigClass, EnvelopeEntry, EnvelopeError, envelope_winner, validate_envelope
-from bench.stats import StatisticsInputError, bootstrap_ratio, duration_guard, estimate, needs_more_runs, per_run_values, validate_comparison, verdict
+from bench.stats import StatisticsInputError, _estimate_unchecked, bootstrap_ratio, duration_guard, estimate, needs_more_runs, per_run_values, validate_comparison, verdict
 
 
-def runs(values, metric="throughput_frames_s", prefix="run", **ident):
-    base = {"gpu": "H200", "concurrency": 8, "id_set": "eval", "ids_sha256": "abc", "seed_index": 0, "cache_policy": "restart"}
+_PID = [1000]
+
+
+def runs(values, metric="throughput_frames_s", prefix="run", side="new", **ident):
+    base = {"gpu": "H200", "concurrency": 8, "id_set": "eval", "ids_sha256": "abc", "expected_ids_sha256": "abc", "seed_index": 0,
+            "cache_policy": "restart", "timeout_s": 180.0, "strict": True, "n_requests": 320, "engine": side, "config": f"{side}.yaml",
+            "candidate_id": f"{side}:cfg:0123", "config_digest": f"{side}-digest", "cell_digest": f"{side}-cell"}
     base.update(ident)
-    return [{**base, "label": f"{prefix}{i + 1}", "measured": True, "valid": True, "n_requests": 320, metric: v} for i, v in enumerate(values)]
+    out = []
+    for i, v in enumerate(values):
+        _PID[0] += 1
+        out.append({**base, "label": f"{prefix}{i + 1}", "measured": True, "valid": True, metric: v, "server_startup_s": 300.0,
+                    "cache_evidence": {"fresh_server": True, "server_pid": _PID[0]}})
+    return out
+
+
+def base_runs(values, metric="throughput_frames_s", **ident):
+    return runs(values, metric=metric, side="base", **ident)
 
 
 def test_pass_rule_and_inconclusive():
@@ -21,20 +35,20 @@ def test_pass_rule_and_inconclusive():
 def test_estimate_point_is_ratio_of_means_and_orientation():
     new = runs([400, 410, 390, 405, 395])
     base = runs([100, 102, 98, 101, 99])
-    e = estimate(new, base, "throughput_frames_s", replicates=2000)
+    e = _estimate_unchecked(new, base, "throughput_frames_s", replicates=2000)
     assert e.point == pytest.approx(400 / 100)
     assert e.lcb95 > 3.8 and e.verdict == "pass"
     # latency: best / new
     new_t = runs([0.1, 0.11, 0.09], metric="ttfa_p50_s")
     base_t = runs([0.5, 0.5, 0.5], metric="ttfa_p50_s")
-    et = estimate(new_t, base_t, "ttfa_p50_s", replicates=2000)
+    et = _estimate_unchecked(new_t, base_t, "ttfa_p50_s", replicates=2000)
     assert et.point == pytest.approx(0.5 / 0.1)
 
 
 def test_noisy_ratio_is_inconclusive():
     new = runs([180.0, 230.0, 200.0, 260.0, 170.0])  # mean 208
     base = runs([100.0] * 5)
-    e = estimate(new, base, "throughput_frames_s", replicates=4000)
+    e = _estimate_unchecked(new, base, "throughput_frames_s", replicates=4000)
     assert e.point == pytest.approx(2.08)
     assert e.lcb95 < 2.0
     assert e.verdict == "inconclusive"
@@ -176,30 +190,30 @@ def test_baseline_reference_preprocessing_is_documented_not_disqualifying():
 
 def test_final_confirmation_requires_k10_and_matching_identity():
     new = runs([400.0] * 10)
-    base = runs([100.0] * 10)
+    base = base_runs([100.0] * 10)
     e = estimate(new, base, "throughput_frames_s", replicates=500, final=True)
     assert e.verdict == "pass" and e.k_new == 10
     # a one-run, one-request comparison cannot pass final confirmation
     tiny = [{**runs([400.0])[0], "n_requests": 1}]
     with pytest.raises(StatisticsInputError):
-        estimate(tiny, [{**runs([100.0])[0], "n_requests": 1}], "throughput_frames_s", final=True)
+        estimate(tiny, [{**base_runs([100.0])[0], "n_requests": 1}], "throughput_frames_s", final=True)
     # omitting one (invalid) run is not a complete experiment
     with pytest.raises(StatisticsInputError):
         validate_comparison(new[:9], base, final=True)
     with pytest.raises(StatisticsInputError):
-        validate_comparison(new, runs([100.0] * 10, concurrency=16), final=True)
+        validate_comparison(new, base_runs([100.0] * 10, concurrency=16), final=True)
     with pytest.raises(StatisticsInputError):
-        validate_comparison(new, runs([100.0] * 10, cache_policy="none"), final=True)
+        validate_comparison(new, base_runs([100.0] * 10, cache_policy="none"), final=True)
     with pytest.raises(StatisticsInputError):
         per_run_values(runs([float("nan"), 1.0]), "throughput_frames_s")
 
 
 def test_development_k_policy():
     with pytest.raises(StatisticsInputError):
-        estimate(runs([400.0] * 3), runs([100.0] * 3), "throughput_frames_s", final=False)
-    wide = estimate(runs([180.0, 230.0, 200.0, 260.0, 170.0]), runs([100.0] * 5), "throughput_frames_s", replicates=2000, final=False)
+        estimate(runs([400.0] * 3), base_runs([100.0] * 3), "throughput_frames_s", final=False)
+    wide = estimate(runs([180.0, 230.0, 200.0, 260.0, 170.0]), base_runs([100.0] * 5), "throughput_frames_s", replicates=2000, final=False)
     assert needs_more_runs(wide)
-    tight = estimate(runs([400.0] * 5), runs([100.0] * 5), "throughput_frames_s", replicates=500, final=False)
+    tight = estimate(runs([400.0] * 5), base_runs([100.0] * 5), "throughput_frames_s", replicates=500, final=False)
     assert not needs_more_runs(tight)
 
 
@@ -210,7 +224,91 @@ def test_nan_speaker_embedding_and_incomplete_evidence_rejected():
     assert not eligible(compare(_ei(spk=(float("nan"), 2.0)), canon))
     one = {"r1": canon}
     assert not eligible(compare_sets(one, one))  # fewer than 32 rows is incomplete evidence
-    many = {f"r{i}": EffectiveInput(f"r{i}", [1], "s", "h", 16000, [1], [1.0]) for i in range(32)}
+    many = _full_set()
     assert eligible(compare_sets(many, many))
-    partial = {k: EffectiveInput(k, [1], None, "h", 16000, [1], [1.0]) for k in many}
+    partial = {k: EffectiveInput(k, [1], None, H2, 16000, [1], [1.0]) for k in many}
     assert not eligible(compare_sets(partial, partial))
+
+
+H1, H2 = "a" * 64, "b" * 64
+
+
+def _full_set(n=32, **over):
+    out = {}
+    for i in range(n):
+        d = dict(row_id=f"r{i}", prompt_token_ids=[1, 2], ref_source_sha256=H1, ref_waveform_hash=H2, ref_waveform_sample_rate=16000,
+                 speech_tokens=[5, 6], speaker_embedding=[1.0, 2.0])
+        d.update(over)
+        out[f"r{i}"] = EffectiveInput(**d)
+    return out
+
+
+def test_missing_candidate_conditioning_evidence_is_hard_failure():
+    from bench.effective_inputs import compare_sets
+
+    canon = _full_set()
+    bare = _full_set(ref_waveform_hash=None, ref_waveform_sample_rate=None, speech_tokens=None, speaker_embedding=None)
+    assert not eligible(compare_sets(bare, canon))
+    # finite, measured baseline differences stay documented (soft)
+    diff = _full_set(ref_waveform_hash="c" * 64, speech_tokens=[5, 7, 8], speaker_embedding=[1.0, 2.3])
+    mm = compare_sets(diff, canon)
+    assert mm and eligible(mm)
+
+
+def test_nonfinite_canonical_embedding_and_row_mismatch_rejected():
+    from bench.effective_inputs import compare_sets
+
+    canon = _full_set(speaker_embedding=[float("nan"), 1.0])
+    assert not eligible(compare_sets(_full_set(), canon))
+    fewer = dict(list(_full_set().items())[:31])
+    assert not eligible(compare_sets(fewer, _full_set()))
+    assert not eligible(compare_sets({}, {}))
+
+
+
+def test_b1_mixed_configuration_rejected():
+    new = runs([400.0] * 10)
+    for i, r in enumerate(new):
+        r["config"] = f"cfg{i}.yaml"
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+    new = runs([400.0] * 10)
+    new[3]["config_digest"] = "other"
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+
+
+def test_b1_one_request_runs_rejected():
+    with pytest.raises(StatisticsInputError):
+        estimate(runs([400.0] * 10, n_requests=1), base_runs([100.0] * 10, n_requests=1), "throughput_frames_s", final=True)
+    mism = runs([400.0] * 10)
+    mism[0]["ids_sha256"] = "zzz"  # measured IDs differ from the declared set
+    with pytest.raises(StatisticsInputError):
+        estimate(mism, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+    with pytest.raises(StatisticsInputError):
+        estimate(runs([400.0] * 10, timeout_s=30.0), base_runs([100.0] * 10, timeout_s=30.0), "throughput_frames_s", final=True)
+    with pytest.raises(StatisticsInputError):
+        estimate(runs([400.0] * 10, strict=False), base_runs([100.0] * 10, strict=False), "throughput_frames_s", final=True)
+
+
+def test_b1_development_run_omission_rejected():
+    new = [r for r in runs([400.0] * 6) if r["label"] != "run3"]
+    base = [r for r in base_runs([100.0] * 6) if r["label"] != "run3"]
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base, "throughput_frames_s", final=False)
+
+
+def test_b1_false_cache_evidence_rejected():
+    new = runs([400.0] * 10)
+    new[2]["cache_evidence"] = {"fresh_server": True}  # no launch evidence
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+    new = runs([400.0] * 10)
+    new[4]["cache_evidence"] = dict(new[3]["cache_evidence"])  # same server process for two runs
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)
+    new = runs([400.0] * 10, cache_policy="flush")
+    for r in new:
+        r["cache_evidence"] = {"empty": False}
+    with pytest.raises(StatisticsInputError):
+        estimate(new, base_runs([100.0] * 10), "throughput_frames_s", final=True)

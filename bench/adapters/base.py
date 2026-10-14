@@ -36,7 +36,15 @@ class Adapter(ABC):
         try:
             obj = json.loads(data)
         except json.JSONDecodeError:
-            trace.events.append(EventRecord(t=t, kind="other", nbytes=len(data), note="non-json"))
+            if not data.strip():
+                return
+            # a dropped payload could have carried audio: invalidate the request
+            trace.error = trace.error or "protocol error: malformed SSE data payload"
+            trace.events.append(EventRecord(t=t, kind="error", nbytes=len(data), note=f"malformed SSE data: {data[:160]!r}"))
+            return
+        if not isinstance(obj, dict):
+            trace.error = trace.error or "protocol error: SSE data is not a JSON object"
+            trace.events.append(EventRecord(t=t, kind="error", nbytes=len(data), note=f"non-object SSE data: {data[:160]!r}"))
             return
         self.handle_event(t, obj, trace, asm, nbytes=len(data))
 
