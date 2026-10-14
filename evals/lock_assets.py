@@ -23,6 +23,10 @@ REPOS = {
         "liarliar/Daily-Omni",
     ],
 }
+MODEL_DIRS = {
+    "qwen3-asr": HUB / "models--Qwen--Qwen3-ASR-1.7B" / "snapshots" / "7278e1e70fe206f11671096ffdd38061171dd6e5",
+    "whisper": HUB / "models--openai--whisper-large-v3" / "snapshots" / "06f233fe06e710322aca913c1bc4249a0d71fce1",
+}
 FILES = [
     SGL_CACHE / "speaker_sim" / "wavlm_large.pt",
     SGL_CACHE / "speaker_sim" / "wavlm_large_finetune.pth",
@@ -52,6 +56,9 @@ def main() -> None:
             out["repos"][r] = {"kind": kind, **snapshots(kind, r)}
     for f in FILES:
         out["files"][str(f)] = {"sha256": sha256(f) if f.exists() else None, "bytes": f.stat().st_size if f.exists() else None}
+    out["models"] = {}
+    for name, d in MODEL_DIRS.items():
+        out["models"][name] = {"dir": str(d), "files": {p.name: sha256(p.resolve()) for p in sorted(d.iterdir()) if p.is_file()}}
     print(json.dumps(out, indent=1))
 
 

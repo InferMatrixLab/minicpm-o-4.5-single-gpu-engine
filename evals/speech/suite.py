@@ -1,12 +1,16 @@
-"""Speech quality suite over harness run directories.
+"""Speech quality suite over verified harness cells.
 
-    python -m evals.speech.suite score --run results/.../run1:0 --run results/.../run1:1 \
+    python -m evals.speech.suite score --cell CELL_DIR [--cell ...] --scope development|final \
         --gpu 2 --out results/quality/<name>.json [--d-ref d_ref.json] [--no-whisper]
 
-Each ``--run DIR:SEED`` names one harness run directory (``requests.jsonl``,
-``traces.jsonl``, ``wav/``) produced with that seed index.  Every request of
-every run must be valid and have audio: coverage is complete or the suite
-fails.  Scorers run in the locked evaluation environment.
+Each ``--cell`` is a measured cell directory; it must pass ``bench.verify``.
+The seed index comes from the cell's frozen experiment spec, never from the
+command line.  All cells must share one candidate, GPU, concurrency and row set,
+with distinct seeds.  Every declared row needs its request record, trace text
+and a WAV whose length matches the recorded duration: coverage is complete or
+the suite fails.  ASR is offline and fixed-batch (``asr_worker.py``); WER
+normalization, SIM and UTMOS run in the locked evaluation environment.  The
+evaluator fingerprint is verified before any model is loaded.
 """
 
 from __future__ import annotations
@@ -27,8 +31,9 @@ import soundfile as sf
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from bench.servers import Server, ServerSpec  # noqa: E402
+from bench.verify import verify_cell  # noqa: E402
 from bench.workload import load_seed_tts_rows  # noqa: E402
+from evals.evaluator import ASR_PYTHON, ASSETS_LOCK, EVAL_PYTHON, SETTINGS, SGLANG_DIR, verify_evaluator  # noqa: E402
 from evals.speech.detectors import (  # noqa: E402
     CATASTROPHIC_WER,
     RowQuality,
@@ -40,12 +45,8 @@ from evals.speech.detectors import (  # noqa: E402
 )
 from evals.speech.gates import absolute_floors  # noqa: E402
 
-EVAL_PYTHON = "/workspace/cgzheng/cgzheng/omni-baselines/eval-env/bin/python"
-SGLANG_DIR = "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main"
-ASSETS_LOCK = ROOT / "evals" / "assets.lock.json"
-ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
-WHISPER_MODEL = "openai/whisper-large-v3"
-ASR_CONCURRENCY = 16  # fixed and recorded
+SCOPES = ("development", "final")
+FULL_ROWS = 1088
 
 
 class CoverageError(RuntimeError):
@@ -64,67 +65,127 @@ class GenRow:
     duration_s: float
 
 
-def collect_rows(runs: list[tuple[Path, int]]) -> list[GenRow]:
+@dataclass
+class Collection:
+    rows: list[GenRow]
+    generation: dict  # shared identity of all seeds
+    seeds: dict  # seed_index -> source binding
+
+
+def _jsonl(p: Path) -> list[dict]:
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+
+
+def collect(cells: list[Path], run_label: str | None = None) -> Collection:
+    cells = [Path(c).resolve() for c in cells]
+    if len(set(cells)) != len(cells):
+        raise CoverageError("the same source cell was given more than once")
     meta = {r.row_id: r for r in load_seed_tts_rows()}
-    out: list[GenRow] = []
-    for run_dir, seed in runs:
-        run_dir = Path(run_dir).resolve()  # the scorer worker runs from another working directory
-        reqs = [json.loads(line) for line in (run_dir / "requests.jsonl").read_text().splitlines() if line.strip()]
-        texts = {}
-        for line in (run_dir / "traces.jsonl").read_text().splitlines():
-            if line.strip():
-                t = json.loads(line)
-                texts[t["request_id"]] = t.get("text", "")
-        bad = [r["request_id"] for r in reqs if not r["ok"]]
-        if bad:
-            raise CoverageError(f"{run_dir}: {len(bad)} invalid requests (e.g. {bad[:3]}); quality needs complete coverage")
-        for r in reqs:
-            rid = r["request_id"]
+    rows: list[GenRow] = []
+    seeds: dict[int, dict] = {}
+    gen = None
+    for cell in cells:
+        v = verify_cell(cell)
+        if not v.ok:
+            raise CoverageError(f"{cell} failed verification: {v.problems[:3]}")
+        spec = v.spec
+        k = int(spec["k"])
+        label = run_label or ("run1" if k == 1 else None)
+        if label is None or label == "run0" or label not in {f"run{i}" for i in range(1, k + 1)}:
+            raise CoverageError(f"{cell}: choose one measured run (run1..run{k}); run0 is discarded")
+        ident = {
+            "candidate_id": spec["candidate"]["candidate_id"],
+            "candidate_digest": spec["candidate"]["digest"],
+            "candidate": {k: spec["candidate"][k] for k in ("adapter", "config", "mps", "label")},
+            "gpu_sku": spec["hardware"].get("gpu_sku"),
+            "gpu_uuid": spec["hardware"].get("gpu_uuid"),
+            "concurrency": spec["concurrency"],
+            "id_set": spec["id_set"],
+            "measured_ids_sha256": hashlib.sha256("\n".join(spec["measured_ids"]).encode()).hexdigest(),
+            "dataset": spec["dataset"],
+            "model": spec["model"],
+        }
+        if gen is None:
+            gen = ident
+        elif ident != gen:
+            diff = {k2: (gen[k2], ident[k2]) for k2 in gen if gen[k2] != ident[k2]}
+            raise CoverageError(f"{cell} differs from the other seeds: {diff}")
+        seed = int(spec["seed_index"])
+        if seed in seeds:
+            raise CoverageError(f"seed index {seed} appears twice ({seeds[seed]['cell']} and {cell})")
+        run_dir = cell / label
+        reqs = {r["request_id"]: r for r in _jsonl(run_dir / "requests.jsonl")}
+        traces = {t["request_id"]: t for t in _jsonl(run_dir / "traces.jsonl")}
+        res = json.loads((cell / "result.json").read_text())
+        for rid in spec["measured_ids"]:
+            r = reqs.get(rid)
+            if r is None or not r["ok"]:
+                raise CoverageError(f"{cell}/{label}: request {rid} missing or invalid")
+            t = traces.get(rid)
+            if t is None or "text" not in t:
+                raise CoverageError(f"{cell}/{label}: trace text for {rid} missing")
             wav = run_dir / "wav" / f"{rid}.wav"
-            if not wav.exists():
-                raise CoverageError(f"{run_dir}: missing audio for {rid}")
+            try:
+                info = sf.info(str(wav))
+            except Exception:
+                raise CoverageError(f"{cell}/{label}: audio for {rid} missing") from None
+            if info.samplerate != 24000 or abs(info.frames / info.samplerate - r["duration_s"]) > 1.0 / 24000 + 1e-9:
+                raise CoverageError(f"{cell}/{label}: audio for {rid} does not match its recorded duration/rate")
             row = meta[rid]
-            out.append(GenRow(f"{seed}:{rid}", rid, seed, row.target_text, str(Path(row.ref_wav_path).resolve()), str(wav), texts.get(rid, ""),
-                              r["duration_s"]))
-    keys = [g.key for g in out]
-    if len(set(keys)) != len(keys):
-        raise CoverageError("duplicate (seed, row) pairs across runs")
-    return out
+            rows.append(GenRow(f"{seed}:{rid}", rid, seed, row.target_text, str(Path(row.ref_wav_path).resolve()), str(wav), t["text"], r["duration_s"]))
+        seeds[seed] = {"cell": str(cell), "run": label, "experiment_digest": res["experiment_digest"],
+                       "artifacts": res["artifacts"][label], "rows": len(spec["measured_ids"])}
+    if gen is None:
+        raise CoverageError("no source cells")
+    return Collection(rows=rows, generation=gen, seeds={str(s): seeds[s] for s in sorted(seeds)})
 
 
 def rows_sha256(rows: list[GenRow]) -> str:
     return hashlib.sha256("\n".join(sorted(r.key for r in rows)).encode()).hexdigest()
 
 
-def _worker(job: dict, gpu: int) -> dict:
+def _env() -> dict:
+    return {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": "/workspace/models/hub",
+            "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules", "HF_HUB_OFFLINE": "1"}
+
+
+def _run_worker(python: str, script: str, job: dict, gpu: int, cwd: Path) -> dict:
     with tempfile.TemporaryDirectory() as td:
         jp, op = Path(td) / "job.json", Path(td) / "out.json"
         jp.write_text(json.dumps(job))
-        env = {"CUDA_VISIBLE_DEVICES": str(gpu), "PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
-               "HF_HUB_CACHE": "/workspace/models/hub", "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules", "HF_HUB_OFFLINE": "1"}
-        subprocess.run([EVAL_PYTHON, str(ROOT / "evals" / "speech" / "scorer_worker.py"), str(jp), str(op)], cwd=SGLANG_DIR, env=env, check=True)
+        subprocess.run([python, str(ROOT / "evals" / "speech" / script), str(jp), str(op)], cwd=str(cwd), env={**_env(), "CUDA_VISIBLE_DEVICES": str(gpu)},
+                       check=True)
         return json.loads(op.read_text())
 
 
-def _asr_spec(kind: str, port: int, gpu: int) -> ServerSpec:
-    return ServerSpec(name=f"asr:{kind}", cmd=["bash", str(ROOT / "scripts" / "serve_sglang_asr.sh"), kind, str(port)], port=port, gpu=gpu)
-
-
-def score(rows: list[GenRow], gpu: int, out_dir: Path, whisper: bool = True, port: int = 18300) -> dict:
-    job_rows = [{"id": r.key, "target_text": r.target_text, "wav": r.wav, "ref_wav": r.ref_wav} for r in rows]
-    base = {"rows": job_rows, "lock": str(ASSETS_LOCK), "asr_concurrency": ASR_CONCURRENCY, "device": "cuda:0",
-            "asr_model": ASR_MODEL, "whisper_model": WHISPER_MODEL, "asr_port": port, "whisper_port": port}
-    results: dict = {"tasks": {}}
-    with Server(_asr_spec("qwen3-asr", port, gpu), out_dir / "asr_server.log"):
-        r = _worker({**base, "tasks": ["asr"]}, gpu)
-        results["assets"] = r["assets"]
-        results["tasks"]["asr"] = r["tasks"]["asr"]
+def score(rows: list[GenRow], gpu: int, whisper: bool = True) -> dict:
+    """Verify the evaluator, then transcribe (fixed batches) and score every row."""
+    fp = verify_evaluator()
+    assets = json.loads(ASSETS_LOCK.read_text())
+    files = list(assets["files"])
+    finetune = next(f for f in files if f.endswith("wavlm_large_finetune.pth"))
+    base = next(f for f in files if f.endswith("wavlm_large.pt"))
+    utmos = next(f for f in files if f.endswith("utmos.jit"))
+    asr_rows = [{"id": r.key, "wav": r.wav} for r in rows]
+    asr = _run_worker(ASR_PYTHON, "asr_worker.py", {"rows": asr_rows, "model": "qwen3-asr", "model_path": assets["models"]["qwen3-asr"]["dir"],
+                                                    "batch_size": SETTINGS["asr"]["batch_size"]}, gpu, ROOT)
+    wsp = None
     if whisper:
-        with Server(_asr_spec("whisper", port, gpu), out_dir / "whisper_server.log"):
-            results["tasks"]["whisper"] = _worker({**base, "tasks": ["whisper"]}, gpu)["tasks"]["whisper"]
-    r = _worker({**base, "tasks": ["sim", "utmos"]}, gpu)
-    results["tasks"].update(r["tasks"])
-    return results
+        wsp = _run_worker(ASR_PYTHON, "asr_worker.py", {"rows": asr_rows, "model": "whisper", "model_path": assets["models"]["whisper"]["dir"],
+                                                        "batch_size": SETTINGS["whisper"]["batch_size"]}, gpu, ROOT)
+    job_rows = [{"id": r.key, "target_text": r.target_text, "wav": r.wav, "ref_wav": r.ref_wav, "hyp_text": asr["texts"][r.key],
+                 "whisper_text": (wsp["texts"][r.key] if wsp else "")} for r in rows]
+    tasks = ["wer", "sim", "utmos"] + (["whisper_wer"] if whisper else [])
+    scored = _run_worker(EVAL_PYTHON, "scorer_worker.py", {"rows": job_rows, "tasks": tasks, "device": "cuda:0", "wavlm_finetune": finetune,
+                                                          "wavlm_base": base, "utmos_jit": utmos, "sim_batch": SETTINGS["sim"]["batch"]}, gpu, SGLANG_DIR)
+    evidence = {"asr": asr["evidence"], "whisper": wsp["evidence"] if wsp else None}
+    for name, ev in evidence.items():
+        if ev is None:
+            continue
+        b = SETTINGS[name]["batch_size"]
+        if any(s != b for s in ev["batch_sizes"]) or "bfloat16" not in ev["settings"]["dtype"] or ev["settings"]["do_sample"] is not False:
+            raise RuntimeError(f"{name} execution evidence contradicts the declared evaluator settings: {ev}")
+    return {"evaluator": fp, "execution_evidence": evidence, "tasks": scored["tasks"]}
 
 
 def build_quality(rows: list[GenRow], scored: dict, d_ref: dict[str, float] | None) -> list[RowQuality]:
@@ -172,42 +233,60 @@ def summarize(quality: list[RowQuality]) -> dict:
     return {"seed_indices": seeds, "per_seed": per_seed, "pooled": pooled, "absolute_floors_pooled": absolute_floors(pooled)}
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="evals.speech.suite")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    sp = sub.add_parser("score")
-    sp.add_argument("--run", action="append", required=True, help="RUN_DIR:SEED_INDEX")
-    sp.add_argument("--gpu", type=int, required=True)
-    sp.add_argument("--out", required=True)
-    sp.add_argument("--d-ref", default=None, help="JSON {row_id: D_ref seconds} from the cell's throughput winner")
-    sp.add_argument("--no-whisper", action="store_true")
-    sp.add_argument("--port", type=int, default=18300)
-    a = ap.parse_args(argv)
-    runs = []
-    for spec in a.run:
-        d, _, s = spec.rpartition(":")
-        runs.append((Path(d), int(s)))
-    rows = collect_rows(runs)
-    out = Path(a.out)
+def check_scope(scope: str, col: Collection) -> None:
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}")
+    if scope == "final":
+        if col.generation["id_set"] != "full":
+            raise CoverageError("final-scope quality needs the full 1088-row set")
+        if len(col.seeds) != 3 or any(s["rows"] != FULL_ROWS for s in col.seeds.values()):
+            raise CoverageError("final-scope quality needs exactly three seeds of all 1088 rows")
+
+
+def write_report(out: Path, scope: str, col: Collection, scored: dict, quality: list[RowQuality], d_ref_path: str | None, t0: float) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
-    t0 = time.time()
-    scored = score(rows, a.gpu, out.parent, whisper=not a.no_whisper, port=a.port)
-    d_ref = json.loads(Path(a.d_ref).read_text()) if a.d_ref else None
-    quality = build_quality(rows, scored, d_ref)
+    sidecar = out.with_suffix(".rows.jsonl")
+    with sidecar.open("w") as f:
+        for q in quality:
+            f.write(json.dumps(q.to_json()) + "\n")
     rep = {
-        "runs": [{"dir": str(d), "seed_index": s} for d, s in runs],
-        "rows_sha256": rows_sha256(rows),
-        "n_rows": len(rows),
-        "asr": {"model": ASR_MODEL, "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5", "concurrency": ASR_CONCURRENCY, "decoding": "greedy server default"},
-        "whisper": None if a.no_whisper else {"model": WHISPER_MODEL, "revision": "06f233fe06e710322aca913c1bc4249a0d71fce1"},
-        "assets_verified": scored.get("assets", {}),
+        "scope": scope,
+        "generation": col.generation,
+        "seeds": col.seeds,
+        "rows_per_seed": {str(s): sum(1 for q in quality if q.seed_index == s) for s in sorted({q.seed_index for q in quality})},
+        "rows_sha256": rows_sha256([GenRow(f"{q.seed_index}:{q.row_id}", q.row_id, q.seed_index, "", "", "", "", 0.0) for q in quality]),
+        "n_rows": len(quality),
+        "evaluator": scored["evaluator"],
+        "execution_evidence": scored["execution_evidence"],
+        "d_ref": {"path": d_ref_path, "sha256": hashlib.sha256(Path(d_ref_path).read_bytes()).hexdigest()} if d_ref_path else None,
+        "truncation_evaluated": all(q.truncation is not None for q in quality),
+        "row_sidecar_sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
         "summary": summarize(quality),
         "wall_s": time.time() - t0,
     }
     out.write_text(json.dumps(rep, indent=1))
-    with out.with_suffix(".rows.jsonl").open("w") as f:
-        for q in quality:
-            f.write(json.dumps(q.to_json()) + "\n")
+    return rep
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="evals.speech.suite")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("score")
+    sp.add_argument("--cell", action="append", required=True, help="verified measured cell directory (one per seed)")
+    sp.add_argument("--run", default=None, help="measured run label to score (default run1 for K=1 cells)")
+    sp.add_argument("--scope", choices=SCOPES, required=True)
+    sp.add_argument("--gpu", type=int, required=True)
+    sp.add_argument("--out", required=True)
+    sp.add_argument("--d-ref", default=None, help="JSON {row_id: D_ref seconds} from the cell's throughput winner")
+    sp.add_argument("--no-whisper", action="store_true")
+    a = ap.parse_args(argv)
+    t0 = time.time()
+    col = collect([Path(c) for c in a.cell], a.run)
+    check_scope(a.scope, col)
+    scored = score(col.rows, a.gpu, whisper=not a.no_whisper)
+    d_ref = json.loads(Path(a.d_ref).read_text()) if a.d_ref else None
+    quality = build_quality(col.rows, scored, d_ref)
+    rep = write_report(Path(a.out), a.scope, col, scored, quality, a.d_ref, t0)
     s = rep["summary"]["pooled"]
     print(json.dumps({k: s[k] for k in ("rows", "wer_corpus", "wer_filtered_corpus", "catastrophic_count", "sim_mean", "utmos_mean",
                                          "silence_rate", "repetition_rate", "thinker_exact_match_rate")}, indent=1))

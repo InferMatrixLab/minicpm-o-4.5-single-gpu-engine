@@ -47,15 +47,16 @@ def fake_runtime(monkeypatch):
 
     monkeypatch.setattr(cli, "server_spec", fake_spec)
     monkeypatch.setattr(servers, "gpu_processes", fake_gpu_processes)
+    monkeypatch.setattr(servers, "gpu_memory_used_mib", lambda gpu: 0.0)  # real GPUs may be busy with other cells
     monkeypatch.setattr(cli, "deploy_files_sha256", lambda resolved: ("fake",))
     monkeypatch.setattr(cli, "make_candidate", lambda d: Candidate.from_spec(d, ("fake",)))
     return calls
 
 
-def _cell(tmp_path, k=1, label="", extra=(), env=None, mps="off"):
+def _cell(tmp_path, k=1, label="", extra=(), env=None, mps="off", seed=0):
     cand = Candidate.from_spec({"adapter": "engine", "config": "fake", "extra": list(extra), "env": env or {}, "label": label, "mps": mps}, ("fake",))
-    cell = cli.make_cell(cand, 1, k, "eval", 0, 180.0, GPU)
-    out = tmp_path / f"cell_{label or 'x'}_{k}"
+    cell = cli.make_cell(cand, 1, k, "eval", seed, 180.0, GPU)
+    out = tmp_path / f"cell_{label or 'x'}_{k}_s{seed}"
     res = asyncio.run(cli.run_one_cell(cell=cell, out=out, port=_free_port(), url=None, cache_policy="restart", run_order_seed=0,
                                        save_audio=True, strict=True))
     return cell, out, res

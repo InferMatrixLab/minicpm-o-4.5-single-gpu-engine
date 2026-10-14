@@ -1,6 +1,6 @@
 """Calibrate injected quality violations on fixed baseline outputs.
 
-    python -m evals.speech.calibrate --run DIR:0 --run DIR:1 --run DIR:2 --gpu 2 --out results/quality/calibration
+    python -m evals.speech.calibrate --cell SEED0_CELL --cell SEED1_CELL --cell SEED2_CELL --gpu 2 --out results/quality/calibration
 
 The clean baseline outputs (three seeds) are scored once; Q_ref is frozen from
 them.  Each injection is applied at a ladder of magnitudes to the same rows and
@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from evals.speech.gates import COMPARATIVE, comparative_gates, freeze_qref  # noqa: E402
-from evals.speech.suite import GenRow, build_quality, collect_rows, rows_sha256, score, summarize  # noqa: E402
+from evals.speech.suite import GenRow, build_quality, collect, rows_sha256, score, summarize  # noqa: E402
 
 LADDERS = {
     "silence_substitution": ("silence_rate", [0.01, 0.02, 0.05, 0.10]),
@@ -88,25 +88,21 @@ def _restore_keys(rows: list[GenRow]) -> list[GenRow]:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="evals.speech.calibrate")
-    ap.add_argument("--run", action="append", required=True, help="RUN_DIR:SEED_INDEX (three seeds)")
+    ap.add_argument("--cell", action="append", required=True, help="verified cell directory (three seeds)")
     ap.add_argument("--gpu", type=int, required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--port", type=int, default=18310)
     a = ap.parse_args(argv)
-    runs = []
-    for spec in a.run:
-        d, _, s = spec.rpartition(":")
-        runs.append((Path(d), int(s)))
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    clean = collect_rows(runs)
+    col = collect([Path(c) for c in a.cell])
+    clean = col.rows
     seeds = tuple(sorted({r.seed_index for r in clean}))
     if len(seeds) < 3:
         raise SystemExit("calibration needs three seeds for the noise measurement")
     fixtures = {(k, m): inject(k, m, clean, out / "fixtures") for k, (_, ladder) in LADDERS.items() for m in ladder}
     all_rows = clean + [r for rows in fixtures.values() for r in rows]
     t0 = time.time()
-    scored = score(all_rows, a.gpu, out, whisper=False, port=a.port)
+    scored = score(all_rows, a.gpu, whisper=False)
 
     def summary_for(rows: list[GenRow]) -> dict:
         """Score summary of one fixture: its rows re-keyed to the clean keys."""
@@ -119,7 +115,8 @@ def main(argv=None) -> int:
     base = summary_for(clean)
     rsha = rows_sha256(clean)
     qref = freeze_qref({"clean-baseline": {"qualified": True, "rows_sha256": rsha, "seed_indices": seeds, "per_seed": base["per_seed"]}}, "L20X", time.time())
-    report = {"runs": [{"dir": str(d), "seed_index": s} for d, s in runs], "rows_sha256": rsha, "q_ref": qref.to_json(), "injections": {}}
+    report = {"generation": col.generation, "seeds": col.seeds, "evaluator": scored["evaluator"], "rows_sha256": rsha,
+              "q_ref_scope": "calibration only", "q_ref": qref.to_json(), "injections": {}}
     ok_all = True
     for kind, (metric, ladder) in LADDERS.items():
         direction, margin, _ = COMPARATIVE[metric]
