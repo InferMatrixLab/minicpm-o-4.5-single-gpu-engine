@@ -68,6 +68,7 @@ def collect_rows(runs: list[tuple[Path, int]]) -> list[GenRow]:
     meta = {r.row_id: r for r in load_seed_tts_rows()}
     out: list[GenRow] = []
     for run_dir, seed in runs:
+        run_dir = Path(run_dir).resolve()  # the scorer worker runs from another working directory
         reqs = [json.loads(line) for line in (run_dir / "requests.jsonl").read_text().splitlines() if line.strip()]
         texts = {}
         for line in (run_dir / "traces.jsonl").read_text().splitlines():
@@ -83,7 +84,8 @@ def collect_rows(runs: list[tuple[Path, int]]) -> list[GenRow]:
             if not wav.exists():
                 raise CoverageError(f"{run_dir}: missing audio for {rid}")
             row = meta[rid]
-            out.append(GenRow(f"{seed}:{rid}", rid, seed, row.target_text, row.ref_wav_path, str(wav), texts.get(rid, ""), r["duration_s"]))
+            out.append(GenRow(f"{seed}:{rid}", rid, seed, row.target_text, str(Path(row.ref_wav_path).resolve()), str(wav), texts.get(rid, ""),
+                              r["duration_s"]))
     keys = [g.key for g in out]
     if len(set(keys)) != len(keys):
         raise CoverageError("duplicate (seed, row) pairs across runs")

@@ -97,7 +97,7 @@ def main(argv=None) -> int:
     for spec in a.run:
         d, _, s = spec.rpartition(":")
         runs.append((Path(d), int(s)))
-    out = Path(a.out)
+    out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     clean = collect_rows(runs)
     seeds = tuple(sorted({r.seed_index for r in clean}))
