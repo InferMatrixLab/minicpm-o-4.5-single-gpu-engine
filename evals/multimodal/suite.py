@@ -17,6 +17,7 @@ Floors: MMMU >= 0.64, MMSU >= 0.533, Daily-Omni >= 0.77, and each >= Q_ref - 1 p
 from __future__ import annotations
 
 import argparse
+import os
 import hashlib
 import json
 import random
@@ -77,7 +78,7 @@ def verify_mm_evaluator() -> dict:
 
 
 def _worker(python: str, script: str, job: dict, cwd: Path, gpu: int | None = None) -> dict:
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": "/workspace/models/hub",
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": "/workspace/models/hub", "HF_HOME": os.environ.get("HF_HOME", "/workspace/models"), "HF_DATASETS_CACHE": os.environ.get("HF_DATASETS_CACHE", "/workspace/models/cgzheng/datasets"),
            "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules", "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
     if gpu is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -96,7 +97,10 @@ def run_bench(bench: str, adapter: str, url: str, subset: str, concurrency: int)
         out = _worker(VLLM_PYTHON, "evals/multimodal/daily_omni_worker.py", job, ROOT)
         out["accuracy"] = out["summary"].get("daily_omni_accuracy_incl_http_fail")
     else:
-        extra = {} if adapter == "sglang-omni" else {"chat_template_kwargs": {"enable_thinking": False}}
+        # sglang-omni (like the HF reference chat()) renders audio inputs with use_tts_template=True;
+        # other engines get the same template choice explicitly
+        kwargs = {"enable_thinking": False, **({"use_tts_template": True} if bench == "mmsu" else {})}
+        extra = {} if adapter == "sglang-omni" else {"chat_template_kwargs": kwargs}
         job = {"bench": bench, "repo_id": cfg["repo_id"], "max_samples": cfg["max_samples"], "url": url, "model": MODEL_NAME[adapter],
                "format": "sglang" if adapter == "sglang-omni" else "openai", "concurrency": concurrency, "max_tokens": MAX_TOKENS[bench],
                "extra_body": extra}

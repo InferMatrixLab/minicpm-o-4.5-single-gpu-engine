@@ -16,6 +16,7 @@ evaluator fingerprint is verified before any model is loaded.
 from __future__ import annotations
 
 import argparse
+import os
 import hashlib
 import json
 import subprocess
@@ -145,7 +146,7 @@ def rows_sha256(rows: list[GenRow]) -> str:
 
 
 def _env() -> dict:
-    return {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": "/workspace/models/hub",
+    return {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": "/workspace/models/hub", "HF_HOME": os.environ.get("HF_HOME", "/workspace/models"), "HF_DATASETS_CACHE": os.environ.get("HF_DATASETS_CACHE", "/workspace/models/cgzheng/datasets"),
             "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules", "HF_HUB_OFFLINE": "1"}
 
 
