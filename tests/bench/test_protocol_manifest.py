@@ -17,8 +17,10 @@ SR = 24000
 class FakeEngine:
     """Streams 0.5 s of audio in two chunks after a fixed delay; tracks in-flight count."""
 
-    def __init__(self, delay=0.05, fail_ids=()):
+    def __init__(self, delay=0.05, fail_ids=(), eof_delay=0.0, bad_wav_ids=()):
         self.delay = delay
+        self.eof_delay = eof_delay
+        self.bad_wav_ids = set(bad_wav_ids)
         self.in_flight = 0
         self.max_in_flight = 0
         self.order: list[str] = []
@@ -39,8 +41,14 @@ class FakeEngine:
                 await resp.write(sse({"error": {"message": "injected"}}))
             await resp.write(engine_audio(tone(SR // 4, 300), 0))
             await asyncio.sleep(self.delay / 2)
-            await resp.write(engine_audio(tone(SR // 4, 400), SR // 4))
+            if any(f in rid for f in self.bad_wav_ids):
+                await resp.write(sse({"modality": "audio", "audio_offset_samples": SR // 4, "num_samples": 4800,
+                                      "choices": [{"delta": {"content": "UklGRgAAAABXQVZFZm10IBAAAAABAA=="}}]}))
+            else:
+                await resp.write(engine_audio(tone(SR // 4, 400), SR // 4))
             await resp.write(sse("[DONE]"))
+            if self.eof_delay:
+                await asyncio.sleep(self.eof_delay)
             return resp
         finally:
             self.in_flight -= 1
@@ -101,7 +109,7 @@ async def test_run_cell_discards_run0_and_flags_invalid(tmp_path):
     try:
         warm = _reqs(4, "wu")
         ev = _reqs(8, "ev")
-        results = await run_cell(url, TextOnlyEngineAdapter(), warm, ev, concurrency=2, k_measured=2, out_dir=tmp_path, log=lambda s: None)
+        results = await run_cell(url, TextOnlyEngineAdapter(), warm, ev, concurrency=2, k_measured=2, out_dir=tmp_path, strict=False, log=lambda s: None)
         assert [r.label for r in results] == ["run0", "run1", "run2"]
         assert [r.measured for r in results] == [False, True, True]
         assert all(not r.metrics.valid for r in results)  # one injected error per run
@@ -110,7 +118,10 @@ async def test_run_cell_discards_run0_and_flags_invalid(tmp_path):
             s = json.loads((tmp_path / f"run{k}" / "summary.json").read_text())
             assert s["n_failed"] == 1
         with pytest.raises(ValueError):
-            await run_cell(url, TextOnlyEngineAdapter(), ev[:2], ev, concurrency=2, k_measured=1, out_dir=tmp_path / "x", log=lambda s: None)
+            await run_cell(url, TextOnlyEngineAdapter(), ev[:2], ev, concurrency=2, k_measured=1, out_dir=tmp_path / "x", strict=False, log=lambda s: None)
+        with pytest.raises(ValueError):  # mandatory geometry: warmup must be 2C and N_eval rows
+            await run_cell(url, TextOnlyEngineAdapter(), warm, ev, concurrency=2, k_measured=1, out_dir=tmp_path / "y", log=lambda s: None)
+        assert (tmp_path / "run1" / "wire.jsonl.gz").exists()
     finally:
         await runner.cleanup()
 
@@ -161,3 +172,72 @@ def test_manifest_validation(tmp_path):
     bad["datasets"][0]["ids"] = {}
     errs = validate_manifest(bad)
     assert any("model revision" in e for e in errs) and any("id lists" in e for e in errs)
+
+
+@pytest.mark.asyncio
+async def test_slot_released_at_done_not_eof():
+    fake = FakeEngine(delay=0.01, eof_delay=3.0)
+    runner, url = await _serve(fake)
+    try:
+        async with make_session() as s:
+            t0 = asyncio.get_running_loop().time()
+            traces = await closed_loop(s, url, TextOnlyEngineAdapter(), _reqs(4), concurrency=1, timeout_s=2.0)
+            elapsed = asyncio.get_running_loop().time() - t0
+        assert elapsed < 2.0  # four requests would take > 12 s if each waited for EOF
+        for t in traces:
+            assert t.terminal and not t.timed_out and not t.error
+            assert t.t_complete - t.t_dispatch < 0.5
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_malformed_audio_invalidates_request_not_run(tmp_path):
+    fake = FakeEngine(delay=0.01, bad_wav_ids=("ev002",))
+    runner, url = await _serve(fake)
+    try:
+        results = await run_cell(url, TextOnlyEngineAdapter(), _reqs(2, "wu"), _reqs(6, "ev"), concurrency=2, k_measured=1,
+                                 out_dir=tmp_path, strict=False, log=lambda s: None)
+        run1 = results[-1]
+        assert run1.metrics.n_requests == 6 and run1.metrics.n_failed == 1
+        bad = [m for m in run1.per_request if not m.ok][0]
+        assert bad.request_id == "ev002" and "audio_malformed_wav" in bad.invalid_reasons
+    finally:
+        await runner.cleanup()
+
+
+class _FakeServer:
+    started = 0
+
+    def __init__(self, url):
+        self.url = url
+        self.startup_s = 0.0
+
+    def __enter__(self):
+        _FakeServer.started += 1
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_restart_policy_uses_fresh_server_per_run(tmp_path):
+    fake = FakeEngine(delay=0.005)
+    runner, url = await _serve(fake)
+    try:
+        _FakeServer.started = 0
+        results = await run_cell(None, TextOnlyEngineAdapter(), _reqs(2, "wu"), _reqs(4, "ev"), concurrency=1, k_measured=2,
+                                 out_dir=tmp_path, cache_policy="restart", server_factory=lambda k: _FakeServer(url), strict=False,
+                                 log=lambda s: None)
+        assert _FakeServer.started == 3  # run0 + 2 measured runs
+        assert all(r.meta.cache_policy == "restart" and r.meta.cache_evidence == {"fresh_server": True} for r in results)
+        assert (tmp_path / "run2_warmup" / "summary.json").exists()
+        from bench.protocol import cell_compliant
+
+        assert cell_compliant(results)
+        with pytest.raises(ValueError):
+            await run_cell(None, TextOnlyEngineAdapter(), _reqs(2, "wu"), _reqs(4, "ev"), concurrency=1, k_measured=1,
+                           out_dir=tmp_path / "z", cache_policy="flush", strict=False, log=lambda s: None)
+    finally:
+        await runner.cleanup()

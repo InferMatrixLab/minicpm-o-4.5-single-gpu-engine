@@ -13,15 +13,51 @@ from bench.metrics import EventRecord, RequestTrace
 from bench.workload import CanonicalRequest
 
 
+def stage_sampling(req: CanonicalRequest) -> list[dict]:
+    """Full per-stage ``sampling_params_list`` for one canonical request.
+
+    vllm-omni builds each supplied stage dict into ``SamplingParams`` as is
+    (no merge with deploy defaults), and top-level OpenAI fields only reach the
+    Thinker when no list is supplied.  So every stage is spelled out: the
+    non-canonical fields mirror ``vllm_omni/deploy/minicpmo_4_5.yaml`` (which
+    every candidate config inherits), and the canonical fields come from the
+    request.  The Talker's ``repetition_penalty`` is consumed by the Talker as
+    the multiplicative 16-frame window penalty, not vLLM's sampler penalty.
+    """
+    t = req.talker
+    return [
+        {
+            "temperature": req.thinker.temperature,
+            "top_p": 1.0,
+            "top_k": -1,
+            "max_tokens": req.thinker.max_tokens,
+            "seed": 42,
+            "detokenize": True,
+            "repetition_penalty": 1.0,
+        },
+        {
+            "temperature": t.temperature,
+            "top_p": t.top_p,
+            "top_k": t.top_k,
+            "repetition_penalty": t.repetition_penalty,
+            "min_tokens": t.min_new_tokens,
+            "max_tokens": t.max_new_tokens,
+            "seed": req.seed,
+            "detokenize": False,
+        },
+        {"temperature": 0.0, "top_p": 1.0, "top_k": -1, "max_tokens": 65536, "detokenize": True},
+    ]
+
+
 class VllmOmniAdapter(Adapter):
     name = "vllm-omni"
     streaming = True
 
-    def __init__(self, model: str = "openbmb/MiniCPM-o-4_5", stage_sampling_override: list[dict] | None = None) -> None:
+    def __init__(self, model: str = "openbmb/MiniCPM-o-4_5", control_sampling: bool = True) -> None:
         super().__init__(model=model)
-        #: Optional full per-stage sampling list (``sampling_params_list``); when
-        #: None the deploy YAML defaults apply and are recorded in the manifest.
-        self.stage_sampling_override = stage_sampling_override
+        #: Send a full per-request ``sampling_params_list`` so the canonical
+        #: Talker sampling and per-request seed take effect.
+        self.control_sampling = control_sampling
 
     def build_payload(self, req: CanonicalRequest) -> dict:
         payload = {
@@ -39,8 +75,8 @@ class VllmOmniAdapter(Adapter):
         }
         if req.stream:
             payload["stream_options"] = {"include_usage": True}
-        if self.stage_sampling_override is not None:
-            payload["sampling_params_list"] = self.stage_sampling_override
+        if self.control_sampling:
+            payload["sampling_params_list"] = stage_sampling(req)
         return payload
 
     def new_assembler(self) -> WavChunkAssembler:

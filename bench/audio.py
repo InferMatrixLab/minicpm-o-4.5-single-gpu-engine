@@ -36,12 +36,17 @@ class Pcm:
         return int(self.samples.shape[0])
 
 
-def decode_wav(data: bytes) -> Pcm:
-    """Decode a RIFF/WAVE payload (PCM16 or IEEE float32) into mono float32.
+#: Data-chunk sizes that streaming writers use when the length is unknown.
+_PLACEHOLDER_SIZES = (0, 0xFFFFFFFF)
 
-    A header-only payload decodes to zero samples.  Streaming servers often
-    write a placeholder (0 or 0xFFFFFFFF) data-chunk size, so a data chunk that
-    claims more bytes than are present is truncated to what was received.
+
+def decode_wav(data: bytes) -> Pcm:
+    """Decode a self-contained RIFF/WAVE payload (PCM16 or IEEE float32) into mono float32.
+
+    A header-only payload decodes to zero samples.  A data chunk whose size is
+    the streaming placeholder (0 or 0xFFFFFFFF) takes the bytes present; any
+    other declared size must be fully present.  Partial sample frames and
+    non-finite float samples are rejected.
     """
     if len(data) < 12 or data[0:4] != b"RIFF" or data[8:12] != b"WAVE":
         raise WavFormatError("not a RIFF/WAVE payload")
@@ -52,35 +57,45 @@ def decode_wav(data: bytes) -> Pcm:
         chunk_id = data[pos : pos + 4]
         (chunk_size,) = struct.unpack_from("<I", data, pos + 4)
         body_start = pos + 8
+        available = len(data) - body_start
         if chunk_id == b"fmt ":
-            if chunk_size < 16:
-                raise WavFormatError("fmt chunk too short")
+            if chunk_size < 16 or available < chunk_size:
+                raise WavFormatError("fmt chunk truncated")
             audio_format, channels, sample_rate, _, _, bits = struct.unpack_from("<HHIIHH", data, body_start)
-            if audio_format == 0xFFFE and chunk_size >= 40:
+            if audio_format == 0xFFFE:
+                if chunk_size < 40:
+                    raise WavFormatError("extensible fmt chunk truncated")
                 (audio_format,) = struct.unpack_from("<H", data, body_start + 24)
             fmt = (audio_format, channels, sample_rate, bits)
         elif chunk_id == b"data":
-            available = len(data) - body_start
-            if chunk_size == 0 or chunk_size > available:
+            if chunk_size in _PLACEHOLDER_SIZES:
                 chunk_size = available
+            elif chunk_size > available:
+                raise WavFormatError(f"data chunk truncated: declared {chunk_size} bytes, have {available}")
             pcm_bytes = data[body_start : body_start + chunk_size]
             break
+        elif chunk_size > available:
+            raise WavFormatError("chunk truncated")
         pos = body_start + chunk_size + (chunk_size & 1)
     if fmt is None:
         raise WavFormatError("missing fmt chunk")
     audio_format, channels, sample_rate, bits = fmt
     if pcm_bytes is None:
         pcm_bytes = b""
-    if channels < 1:
-        raise WavFormatError("invalid channel count")
+    if channels < 1 or sample_rate < 1:
+        raise WavFormatError("invalid channel count or sample rate")
     if audio_format == 1 and bits == 16:
         frame_bytes = 2 * channels
-        usable = len(pcm_bytes) - (len(pcm_bytes) % frame_bytes)
-        raw = np.frombuffer(pcm_bytes[:usable], dtype="<i2").astype(np.float32) / 32768.0
+        if len(pcm_bytes) % frame_bytes:
+            raise WavFormatError("partial sample frame")
+        raw = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
     elif audio_format == 3 and bits == 32:
         frame_bytes = 4 * channels
-        usable = len(pcm_bytes) - (len(pcm_bytes) % frame_bytes)
-        raw = np.frombuffer(pcm_bytes[:usable], dtype="<f4").astype(np.float32)
+        if len(pcm_bytes) % frame_bytes:
+            raise WavFormatError("partial sample frame")
+        raw = np.frombuffer(pcm_bytes, dtype="<f4").astype(np.float32)
+        if not np.isfinite(raw).all():
+            raise WavFormatError("non-finite float samples")
     else:
         raise WavFormatError(f"unsupported WAV encoding format={audio_format} bits={bits}")
     if channels > 1:

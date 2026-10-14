@@ -17,6 +17,7 @@ import numpy as np
 TARGET_SPEEDUP = 2.0
 BOOTSTRAP_REPLICATES = 10_000
 FINAL_K = 10
+DEV_MIN_K = 5
 
 #: metric -> True when larger is better
 HEADLINE_METRICS = {
@@ -35,7 +36,8 @@ def per_run_values(run_summaries: list[dict], metric: str) -> np.ndarray:
     """Extract one value per *measured run* from run summary dicts.
 
     Rejects request-level inputs: every element must be a run summary (has a
-    ``label`` and ``measured`` flag) and must be a measured, valid run.
+    ``label`` and ``measured`` flag) and must be a measured, valid run with a
+    finite, positive value.
     """
     if not run_summaries:
         raise StatisticsInputError("no runs")
@@ -53,8 +55,55 @@ def per_run_values(run_summaries: list[dict], metric: str) -> np.ndarray:
         if s["label"] in labels:
             raise StatisticsInputError(f"duplicate run label {s['label']}")
         labels.add(s["label"])
-        vals.append(float(s[metric]))
+        v = float(s[metric])
+        if not np.isfinite(v) or v <= 0:
+            raise StatisticsInputError(f"run {s['label']} has non-finite or non-positive {metric}={v}")
+        vals.append(v)
     return np.asarray(vals, dtype=np.float64)
+
+
+#: Fields that must agree across every run compared within one cell.
+CELL_IDENTITY_FIELDS = ("gpu", "concurrency", "id_set", "ids_sha256", "seed_index", "n_requests")
+
+
+def validate_cell_runs(runs: list[dict], expected_k: int | None, side: str) -> dict:
+    """Check that ``runs`` is one complete, comparable experiment; returns its identity."""
+    if expected_k is not None:
+        labels = sorted(r.get("label") for r in runs)
+        want = sorted(f"run{i}" for i in range(1, expected_k + 1))
+        if labels != want:
+            raise StatisticsInputError(f"{side}: expected measured runs {want}, got {labels} (invalid runs cannot be omitted)")
+    ident = {}
+    for f in CELL_IDENTITY_FIELDS:
+        vals = {json_key(r.get(f)) for r in runs}
+        if len(vals) != 1 or None in vals or "" in vals:
+            raise StatisticsInputError(f"{side}: runs disagree on or lack {f}: {sorted(map(str, vals))}")
+        ident[f] = runs[0].get(f)
+    for r in runs:
+        if r.get("cache_policy") not in ("restart", "flush"):
+            raise StatisticsInputError(f"{side}: run {r.get('label')} did not start with verified-cold caches")
+    return ident
+
+
+def json_key(v):
+    return v if isinstance(v, (str, int, float, type(None))) else str(v)
+
+
+def validate_comparison(new_runs: list[dict], base_runs: list[dict], final: bool) -> None:
+    """Final confirmation: predeclared K=10 on both sides and the same workload identity.
+
+    Development comparisons need at least 5 runs per side (up to 10).
+    """
+    k = FINAL_K if final else None
+    ni = validate_cell_runs(new_runs, k, "engine")
+    bi = validate_cell_runs(base_runs, k, "baseline")
+    if not final:
+        for side, runs in (("engine", new_runs), ("baseline", base_runs)):
+            if not (DEV_MIN_K <= len(runs) <= FINAL_K):
+                raise StatisticsInputError(f"{side}: development comparisons use {DEV_MIN_K}..{FINAL_K} runs, got {len(runs)}")
+    for f in CELL_IDENTITY_FIELDS:
+        if ni[f] != bi[f]:
+            raise StatisticsInputError(f"engine and baseline differ on {f}: {ni[f]} vs {bi[f]}")
 
 
 def oriented_ratio(new_mean: float, base_mean: float, higher_is_better: bool) -> float:
@@ -110,9 +159,14 @@ def estimate(
     replicates: int = BOOTSTRAP_REPLICATES,
     seed: int = 0,
     target: float = TARGET_SPEEDUP,
+    final: bool | None = None,
 ) -> RatioEstimate:
+    """``final=True`` enforces the final-confirmation rules, ``False`` the development rules,
+    ``None`` skips experiment-level validation (unit-level use only)."""
     if metric not in HEADLINE_METRICS:
         raise StatisticsInputError(f"unknown headline metric {metric}")
+    if final is not None:
+        validate_comparison(new_runs, base_runs, final=final)
     hib = HEADLINE_METRICS[metric]
     nv = per_run_values(new_runs, metric)
     bv = per_run_values(base_runs, metric)
@@ -135,8 +189,8 @@ class DurationGuard:
 def duration_guard(
     d_new: dict[str, float],
     d_ref: dict[str, float],
-    silence_new: dict[str, float] | None = None,
-    silence_ref: dict[str, float] | None = None,
+    silence_new: dict[str, float],
+    silence_ref: dict[str, float],
 ) -> DurationGuard:
     """Paired output-duration guard against D_ref (the cell's throughput winner).
 
@@ -163,14 +217,22 @@ def duration_guard(
     tail = outside / len(ids)
     if tail > 0.02:
         reasons.append(f"{tail:.1%} of rows outside [0.67, 1.5] (max 2%)")
-    excess = 0.0
-    if silence_new is not None and silence_ref is not None:
+    missing = [i for i in ids if i not in silence_new or i not in silence_ref]
+    if missing:
+        reasons.append(f"silence fractions missing for {len(missing)} rows")
+        excess = float("nan")
+    else:
         excess = 100.0 * (float(np.mean([silence_new[i] for i in ids])) - float(np.mean([silence_ref[i] for i in ids])))
-        if excess > 2.0:
+        if not np.isfinite(excess) or excess > 2.0:
             reasons.append(f"silence fraction exceeds reference by {excess:.2f} pp (max 2)")
     return DurationGuard(corpus, tail, excess, not reasons, reasons)
 
 
-def cell_estimates(new_runs: list[dict], base_runs_by_metric: dict[str, list[dict]], seed: int = 0) -> dict[str, RatioEstimate]:
+def cell_estimates(new_runs: list[dict], base_runs_by_metric: dict[str, list[dict]], final: bool, seed: int = 0) -> dict[str, RatioEstimate]:
     """All four headline metrics for one (GPU, C) cell; each metric has its own winning baseline."""
-    return {m: estimate(new_runs, base_runs_by_metric[m], m, seed=seed) for m in HEADLINE_METRICS}
+    return {m: estimate(new_runs, base_runs_by_metric[m], m, seed=seed, final=final) for m in HEADLINE_METRICS}
+
+
+def needs_more_runs(e: RatioEstimate) -> bool:
+    """Development policy: start at K=5; add runs up to K=10 while the 90% interval is wider than 10%."""
+    return e.interval_too_wide and min(e.k_new, e.k_base) < FINAL_K

@@ -101,13 +101,28 @@ def compare(candidate: EffectiveInput, canonical: EffectiveInput, strict_referen
             out.append(Mismatch(rid, "speaker_embedding", "missing", soft))
         else:
             e = rel_l2(candidate.speaker_embedding, canonical.speaker_embedding)
-            if e > tol:
+            if not np.isfinite(np.asarray(candidate.speaker_embedding, dtype=np.float64)).all():
+                out.append(Mismatch(rid, "speaker_embedding", "non-finite values", True))
+            elif not (e <= tol):
                 out.append(Mismatch(rid, "speaker_embedding", f"rel L2 {e:.2e} > {tol:.0e}", soft))
     return out
 
 
-def compare_sets(candidates: dict[str, EffectiveInput], canonical: dict[str, EffectiveInput], strict_reference: bool = False) -> list[Mismatch]:
+MIN_ROWS = 32
+REQUIRED_CANONICAL_FIELDS = ("ref_source_sha256", "ref_waveform_hash", "speech_tokens", "speaker_embedding")
+
+
+def compare_sets(
+    candidates: dict[str, EffectiveInput], canonical: dict[str, EffectiveInput], strict_reference: bool = False, min_rows: int = MIN_ROWS
+) -> list[Mismatch]:
+    """Compare a stack's dumps with the canonical dumps.  Incomplete evidence is a hard mismatch."""
     out: list[Mismatch] = []
+    if len(canonical) < min_rows:
+        out.append(Mismatch("*", "evidence", f"canonical set has {len(canonical)} rows (need {min_rows})", True))
+    for rid, canon in canonical.items():
+        for f in REQUIRED_CANONICAL_FIELDS:
+            if getattr(canon, f) is None:
+                out.append(Mismatch(rid, "evidence", f"canonical dump lacks {f}", True))
     for rid, canon in canonical.items():
         cand = candidates.get(rid)
         if cand is None:
@@ -136,6 +151,8 @@ def load_dumps(path: Path) -> dict[str, EffectiveInput]:
     for line in path.read_text().splitlines():
         if line.strip():
             e = EffectiveInput.from_json(json.loads(line))
+            if e.row_id in out:
+                raise ValueError(f"duplicate dump for row {e.row_id} in {path}")
             out[e.row_id] = e
     return out
 

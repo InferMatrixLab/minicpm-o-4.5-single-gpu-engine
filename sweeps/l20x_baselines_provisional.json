@@ -1,0 +1,18 @@
+{
+  "description": "Provisional L20X class-R baseline sweep (development evidence only).",
+  "gpu": 1,
+  "port": 18100,
+  "k": 5,
+  "id_set": "eval",
+  "seed_index": 0,
+  "run_order_seed": 20261015,
+  "timeout_s": 180,
+  "save_audio": true,
+  "concurrencies": [1, 2, 4, 8, 16, 32],
+  "configs": [
+    {"adapter": "vllm-omni", "config": "minicpmo_4_5_turn.yaml"},
+    {"adapter": "vllm-omni", "config": "minicpmo_4_5_turn_mrv2.yaml"},
+    {"adapter": "vllm-omni", "config": "minicpmo_4_5_turn_mrv2_h200.yaml"},
+    {"adapter": "sglang-omni", "config": "speech"}
+  ]
+}

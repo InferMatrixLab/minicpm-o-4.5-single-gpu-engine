@@ -226,6 +226,35 @@ def test_wav_roundtrip_and_float_wav():
     # streaming placeholder data size
     fw2 = hdr + b"data" + struct.pack("<I", 0xFFFFFFFF) + data
     assert decode_wav(fw2).num_samples == 1234
+    from bench.audio import WavFormatError
+
+    # a declared 4800-sample chunk that carries only 480 samples is rejected
+    short = encode_wav_pcm16(tone(4800))[: 44 + 960]
+    with pytest.raises(WavFormatError):
+        decode_wav(short)
+    with pytest.raises(WavFormatError):  # partial sample frame
+        decode_wav(hdr + b"data" + struct.pack("<I", 0) + data + b"\x00")
+    nan = np.array([0.1, np.nan], dtype="<f4").tobytes()
+    with pytest.raises(WavFormatError):
+        decode_wav(hdr + b"data" + struct.pack("<I", len(nan)) + nan)
+    with pytest.raises(WavFormatError):  # truncated fmt chunk
+        decode_wav(b"RIFF" + struct.pack("<I", 20) + b"WAVEfmt " + struct.pack("<I", 16) + b"\x01\x00")
+
+
+def test_truncated_wav_chunk_invalidates_request():
+    short = encode_wav_pcm16(tone(4800))[: 44 + 960]
+    import base64 as b64
+
+    chunks = [(0.5, vllm_audio(b64.b64encode(short).decode())), (0.6, vllm_audio(wav_b64(tone(SR)))), (0.7, sse("[DONE]"))]
+    m = request_metrics(replay(VllmOmniAdapter(), "v", 0.0, chunks))
+    assert "audio_malformed_wav" in m.invalid_reasons
+
+
+def test_events_after_done_are_ignored():
+    chunks = [(0.5, engine_audio(tone(SR), 0)), (0.6, sse("[DONE]")), (0.9, engine_audio(tone(SR, 900), SR))]
+    tr = replay(EngineAdapter(), "e", 0.0, chunks)
+    m = request_metrics(tr)
+    assert m.ok and m.duration_s == pytest.approx(1.0) and tr.t_complete == pytest.approx(0.6)
 
 
 def test_silence_frames():

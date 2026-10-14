@@ -35,6 +35,11 @@ def stack_report(cand: dict, canon: dict, strict: bool) -> dict:
     return rep
 
 
+#: Stacks held to the HF reference path exactly (the new engine); baselines are not.
+STRICT_STACKS = {"engine"}
+BASELINE_STACKS = {"vllm-omni", "sglang-omni"}
+
+
 def main(argv: list[str]) -> int:
     d = Path(argv[0] if argv else "results/effective_inputs")
     canon = load_dumps(d / "canonical.jsonl")
@@ -43,7 +48,9 @@ def main(argv: list[str]) -> int:
         name = path.stem
         if name == "canonical":
             continue
-        report[name] = stack_report(load_dumps(path), canon, strict=name.startswith("engine"))
+        if name not in STRICT_STACKS | BASELINE_STACKS:
+            raise SystemExit(f"unknown stack dump {path.name}; expected one of {sorted(STRICT_STACKS | BASELINE_STACKS)}")
+        report[name] = stack_report(load_dumps(path), canon, strict=name in STRICT_STACKS)
     (d / "report.json").write_text(json.dumps(report, indent=1))
     print(json.dumps({k: {"eligible": v["eligible"], **v["reference_conditioning"]} for k, v in report.items()}, indent=1))
     return 0 if all(v["eligible"] for v in report.values()) else 1

@@ -1,0 +1,129 @@
+{
+ "hub": "/workspace/models/hub",
+ "repos": {
+  "openbmb/MiniCPM-o-4_5": {
+   "kind": "model",
+   "refs": {
+    "main": "503e754207c94da6bb26850b4469f367c9ea3582"
+   },
+   "snapshots": [
+    "073dbbc8c5bc0af2d789e1ce12e7c17a6be746e1",
+    "1f761131fa83f5ed3cd6f2f22b225c4501d154fa",
+    "503e754207c94da6bb26850b4469f367c9ea3582"
+   ],
+   "present": true
+  },
+  "Qwen/Qwen3-ASR-1.7B": {
+   "kind": "model",
+   "refs": {
+    "main": "7278e1e70fe206f11671096ffdd38061171dd6e5"
+   },
+   "snapshots": [
+    "7278e1e70fe206f11671096ffdd38061171dd6e5"
+   ],
+   "present": true
+  },
+  "openai/whisper-large-v3": {
+   "kind": "model",
+   "refs": {
+    "main": "06f233fe06e710322aca913c1bc4249a0d71fce1"
+   },
+   "snapshots": [
+    "06f233fe06e710322aca913c1bc4249a0d71fce1"
+   ],
+   "present": true
+  },
+  "balacoon/utmos": {
+   "kind": "model",
+   "refs": {
+    "main": "b44d848644aa5d89a6e4f180ea50452d8c162db2"
+   },
+   "snapshots": [
+    "b44d848644aa5d89a6e4f180ea50452d8c162db2"
+   ],
+   "present": true
+  },
+  "zhaochenyang20/seed-tts-eval": {
+   "kind": "dataset",
+   "refs": {
+    "main": "8f5e1aa2a35d42f42e940074c1983358b9491f89"
+   },
+   "snapshots": [
+    "8f5e1aa2a35d42f42e940074c1983358b9491f89"
+   ],
+   "present": true
+  },
+  "zhaochenyang20/seed-tts-eval-arrow": {
+   "kind": "dataset",
+   "refs": {},
+   "snapshots": [
+    "27f4c1adee83b5b29b7c4b375f6b976324bda308"
+   ],
+   "present": true
+  },
+  "MMMU/MMMU": {
+   "kind": "dataset",
+   "refs": {
+    "main": "876ce5cb130f7f7e290ce4d9984357737d4db5cf"
+   },
+   "snapshots": [
+    "876ce5cb130f7f7e290ce4d9984357737d4db5cf"
+   ],
+   "present": true
+  },
+  "zhaochenyang20/mmmu-ci-50": {
+   "kind": "dataset",
+   "refs": {
+    "main": "ff72fd69cc7e0719e04a0ddb12d160de89c6fefe"
+   },
+   "snapshots": [
+    "ff72fd69cc7e0719e04a0ddb12d160de89c6fefe"
+   ],
+   "present": true
+  },
+  "ddwang2000/MMSU": {
+   "kind": "dataset",
+   "refs": {
+    "main": "548e2283105825bf908a7db5c09c00dbcf42bd4c"
+   },
+   "snapshots": [
+    "548e2283105825bf908a7db5c09c00dbcf42bd4c"
+   ],
+   "present": true
+  },
+  "zhaochenyang20/mmsu-ci-2000": {
+   "kind": "dataset",
+   "refs": {
+    "main": "5ae6ed4343a89566be6dd90023d529f1bd97802d"
+   },
+   "snapshots": [
+    "5ae6ed4343a89566be6dd90023d529f1bd97802d"
+   ],
+   "present": true
+  },
+  "liarliar/Daily-Omni": {
+   "kind": "dataset",
+   "refs": {
+    "main": "bf5a6ee4c829510b7a14869e3104efeafc330b07"
+   },
+   "snapshots": [
+    "bf5a6ee4c829510b7a14869e3104efeafc330b07"
+   ],
+   "present": true
+  }
+ },
+ "files": {
+  "/home/cgzheng/.cache/sglang-omni/speaker_sim/wavlm_large.pt": {
+   "sha256": "6fb4b3c3e6aa567f0a997b30855859cb81528ee8078802af439f7b2da0bf100f",
+   "bytes": 1261965425
+  },
+  "/home/cgzheng/.cache/sglang-omni/speaker_sim/wavlm_large_finetune.pth": {
+   "sha256": "51f07e3b94d9e0262a6a675ef5a087be3dd09e8c62e9d886827f44f82fe7f94b",
+   "bytes": 1301926579
+  },
+  "/home/cgzheng/.cache/sglang-omni/utmos/utmos.jit": {
+   "sha256": "3080923f49ee69eb81ad875491eef94e533bf329d70e0cc37fa23745c464669d",
+   "bytes": 413019495
+  }
+ }
+}

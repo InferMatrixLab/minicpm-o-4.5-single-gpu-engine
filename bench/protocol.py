@@ -2,13 +2,23 @@
 
 Closed loop at fixed concurrency C: requests go out in a fixed ID order, a new
 request is dispatched as soon as a slot frees, with no think time.  A cell is
-one (engine, config, C) on a fresh server: warmup (2C disjoint IDs), run 0
-(discarded), then K measured runs over the evaluation IDs.
+one (engine, config, C): warmup (2C disjoint IDs), run 0 (discarded), then K
+measured runs over the evaluation IDs.
+
+Caches must be cold at the start of every measured run.  ``cache_policy``:
+
+* ``restart``  - a fresh server for every run (warmup on disjoint IDs first);
+* ``flush``    - one server, and a reset hook that returns evidence of an
+                 empty reference/prefix cache before each run;
+* ``none``     - development smoke only; the cell is marked non-compliant.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
+import hashlib
 import json
 import random
 import time
@@ -22,7 +32,9 @@ from bench.adapters.base import Adapter
 from bench.audio import encode_wav_pcm16
 from bench.client import DEFAULT_TIMEOUT_S, make_session, send_request
 from bench.metrics import RequestMetrics, RequestTrace, RunMetrics, request_metrics, run_metrics
-from bench.workload import CanonicalRequest
+from bench.workload import CONCURRENCIES, CanonicalRequest, n_eval
+
+CACHE_POLICIES = ("restart", "flush", "none")
 
 
 async def closed_loop(
@@ -58,6 +70,23 @@ async def closed_loop(
     return [t for t in traces if t is not None]
 
 
+def ids_sha256(ids: list[str]) -> str:
+    return hashlib.sha256("\n".join(ids).encode()).hexdigest()
+
+
+@dataclass
+class RunMeta:
+    gpu: str = ""
+    engine: str = ""
+    config: str = ""
+    id_set: str = "eval"
+    ids_sha256: str = ""
+    seed_index: int = 0
+    cache_policy: str = "none"
+    cache_evidence: dict = field(default_factory=dict)
+    server_startup_s: float | None = None
+
+
 @dataclass
 class RunResult:
     label: str
@@ -66,14 +95,17 @@ class RunResult:
     metrics: RunMetrics
     per_request: list[RequestMetrics]
     traces: list[RequestTrace] = field(repr=False, default_factory=list)
+    meta: RunMeta = field(default_factory=RunMeta)
 
     def summary(self) -> dict:
-        return {"label": self.label, "concurrency": self.concurrency, "measured": self.measured, **self.metrics.to_json()}
+        return {"label": self.label, "concurrency": self.concurrency, "measured": self.measured, **asdict(self.meta), **self.metrics.to_json()}
 
 
-def evaluate_run(label: str, concurrency: int, traces: list[RequestTrace], measured: bool = True) -> RunResult:
+def evaluate_run(label: str, concurrency: int, traces: list[RequestTrace], measured: bool = True, meta: RunMeta | None = None) -> RunResult:
     per = [request_metrics(t) for t in traces]
-    return RunResult(label=label, concurrency=concurrency, measured=measured, metrics=run_metrics(per), per_request=per, traces=traces)
+    return RunResult(
+        label=label, concurrency=concurrency, measured=measured, metrics=run_metrics(per), per_request=per, traces=traces, meta=meta or RunMeta()
+    )
 
 
 def save_run(run: RunResult, out_dir: Path, save_audio: bool = True) -> None:
@@ -86,6 +118,16 @@ def save_run(run: RunResult, out_dir: Path, save_audio: bool = True) -> None:
     with (out_dir / "traces.jsonl").open("w") as f:
         for t in run.traces:
             f.write(json.dumps(t.to_json()) + "\n")
+    raw = [(t, getattr(t, "raw_chunks", None)) for t in run.traces]
+    if any(r is not None for _, r in raw):
+        with gzip.open(out_dir / "wire.jsonl.gz", "wt") as f:
+            for t, chunks in raw:
+                rec = {
+                    "request_id": t.request_id,
+                    "t_dispatch": t.t_dispatch,
+                    "chunks": [[c_t - t.t_dispatch, base64.b64encode(b).decode()] for c_t, b in (chunks or [])],
+                }
+                f.write(json.dumps(rec) + "\n")
     if save_audio:
         wav_dir = out_dir / "wav"
         wav_dir.mkdir(exist_ok=True)
@@ -103,14 +145,36 @@ class CellPlan:
 
 
 def plan_sweep(cells: list[CellPlan], seed: int) -> list[CellPlan]:
-    """Randomized run order; the seed goes into the manifest."""
+    """Randomized run order; the seed and the executed order go into the sweep record."""
     order = list(cells)
     random.Random(seed).shuffle(order)
     return order
 
 
+def check_cell_geometry(warmup: list[CanonicalRequest], evaluation: list[CanonicalRequest], concurrency: int, k_measured: int, id_set: str, strict: bool) -> None:
+    eval_ids = [r.request_id for r in evaluation]
+    if len(set(eval_ids)) != len(eval_ids):
+        raise ValueError("measured IDs repeat within a run")
+    if set(eval_ids) & {r.request_id for r in warmup}:
+        raise ValueError("warmup IDs must be disjoint from evaluation IDs")
+    if k_measured < 1:
+        raise ValueError("at least one measured run is required")
+    if not strict:
+        return
+    if concurrency not in CONCURRENCIES:
+        raise ValueError(f"C={concurrency} is not a mandatory concurrency {CONCURRENCIES}")
+    if len(warmup) != 2 * concurrency:
+        raise ValueError(f"warmup must be 2C={2 * concurrency} requests, got {len(warmup)}")
+    if id_set == "eval" and len(evaluation) != n_eval(concurrency):
+        raise ValueError(f"evaluation must be N_eval={n_eval(concurrency)} requests, got {len(evaluation)}")
+
+
+ServerFactory = Callable[[int], object]  # run index -> context manager yielding an object with .url and .startup_s
+FlushHook = Callable[[int], Awaitable[dict]]  # run index -> evidence that caches are empty
+
+
 async def run_cell(
-    base_url: str,
+    base_url: str | None,
     adapter: Adapter,
     warmup: list[CanonicalRequest],
     evaluation: list[CanonicalRequest],
@@ -118,36 +182,63 @@ async def run_cell(
     k_measured: int,
     out_dir: Path,
     timeout_s: float = DEFAULT_TIMEOUT_S,
-    between_runs: Callable[[int], Awaitable[None]] | None = None,
+    cache_policy: str = "none",
+    server_factory: ServerFactory | None = None,
+    flush: FlushHook | None = None,
+    meta: RunMeta | None = None,
     save_audio: bool = True,
+    record_raw: bool = True,
+    strict: bool = True,
     log: Callable[[str], None] = print,
 ) -> list[RunResult]:
     """Warmup, discarded run 0, then ``k_measured`` runs.  Every run is saved."""
-    eval_ids = [r.request_id for r in evaluation]
-    if len(set(eval_ids)) != len(eval_ids):
-        raise ValueError("measured IDs repeat within a run")
-    if set(eval_ids) & {r.request_id for r in warmup}:
-        raise ValueError("warmup IDs must be disjoint from evaluation IDs")
+    if cache_policy not in CACHE_POLICIES:
+        raise ValueError(f"cache_policy must be one of {CACHE_POLICIES}")
+    if cache_policy == "restart" and server_factory is None:
+        raise ValueError("cache_policy=restart needs a server_factory")
+    if cache_policy == "flush" and (flush is None or base_url is None):
+        raise ValueError("cache_policy=flush needs a flush hook and a base_url")
+    if cache_policy != "restart" and base_url is None:
+        raise ValueError("base_url is required unless servers are restarted per run")
+    check_cell_geometry(warmup, evaluation, concurrency, k_measured, (meta.id_set if meta else "eval"), strict)
+    base_meta = meta or RunMeta()
+    base_meta.ids_sha256 = ids_sha256([r.request_id for r in evaluation])
+    base_meta.cache_policy = cache_policy
     results: list[RunResult] = []
-    async with make_session(connections=max(64, 4 * concurrency)) as session:
-        t0 = time.perf_counter()
-        wtr = await closed_loop(session, base_url, adapter, warmup, concurrency, timeout_s)
-        warm = evaluate_run("warmup", concurrency, wtr, measured=False)
-        save_run(warm, out_dir / "warmup", save_audio=False)
-        log(f"[C={concurrency}] warmup {len(wtr)} reqs in {time.perf_counter() - t0:.1f}s valid={warm.metrics.valid}")
-        for k in range(k_measured + 1):
-            if between_runs is not None:
-                await between_runs(k)
-            trs = await closed_loop(session, base_url, adapter, evaluation, concurrency, timeout_s)
-            run = evaluate_run(f"run{k}", concurrency, trs, measured=k > 0)
-            save_run(run, out_dir / f"run{k}", save_audio=save_audio)
-            m = run.metrics
-            log(
-                f"[C={concurrency}] run{k}{' (discarded)' if k == 0 else ''}: valid={m.valid} "
-                f"fps={m.throughput_frames_s:.1f} ttfa50={m.ttfa_p50_s * 1e3:.0f}ms ttfa95={m.ttfa_p95_s * 1e3:.0f}ms "
-                f"rtf={m.rtf_mean:.3f} fails={m.n_failed} {m.invalid_reasons or ''}"
-            )
-            results.append(run)
+
+    async def one_run(k: int, url: str, startup_s: float | None, do_warmup: bool) -> None:
+        async with make_session(connections=max(64, 4 * concurrency)) as session:
+            if do_warmup:
+                t0 = time.perf_counter()
+                wtr = await closed_loop(session, url, adapter, warmup, concurrency, timeout_s)
+                warm = evaluate_run("warmup", concurrency, wtr, measured=False, meta=base_meta)
+                save_run(warm, out_dir / (f"run{k}_warmup" if cache_policy == "restart" else "warmup"), save_audio=False)
+                log(f"[C={concurrency}] warmup {len(wtr)} reqs in {time.perf_counter() - t0:.1f}s valid={warm.metrics.valid}")
+            evidence: dict = {}
+            if cache_policy == "flush":
+                evidence = await flush(k)  # type: ignore[misc]
+                if not evidence.get("empty", False):
+                    raise RuntimeError(f"cache flush before run{k} not verified: {evidence}")
+            elif cache_policy == "restart":
+                evidence = {"fresh_server": True}
+            run_meta = RunMeta(**{**asdict(base_meta), "cache_evidence": evidence, "server_startup_s": startup_s})
+            trs = await closed_loop(session, url, adapter, evaluation, concurrency, timeout_s, record_raw=record_raw)
+        run = evaluate_run(f"run{k}", concurrency, trs, measured=k > 0, meta=run_meta)
+        save_run(run, out_dir / f"run{k}", save_audio=save_audio)
+        m = run.metrics
+        log(
+            f"[C={concurrency}] run{k}{' (discarded)' if k == 0 else ''}: valid={m.valid} "
+            f"fps={m.throughput_frames_s:.1f} ttfa50={m.ttfa_p50_s * 1e3:.0f}ms ttfa95={m.ttfa_p95_s * 1e3:.0f}ms "
+            f"rtf={m.rtf_mean:.3f} fails={m.n_failed} {m.invalid_reasons or ''}"
+        )
+        results.append(run)
+
+    for k in range(k_measured + 1):
+        if cache_policy == "restart":
+            with server_factory(k) as srv:  # type: ignore[misc]
+                await one_run(k, srv.url, getattr(srv, "startup_s", None), do_warmup=True)
+        else:
+            await one_run(k, base_url, None, do_warmup=(k == 0))  # type: ignore[arg-type]
     return results
 
 
@@ -159,3 +250,8 @@ def cell_valid(results: list[RunResult]) -> bool:
     """A cell is usable only if every measured run is valid; invalid runs are reported, never dropped."""
     runs = measured_runs(results)
     return bool(runs) and all(r.metrics.valid for r in runs)
+
+
+def cell_compliant(results: list[RunResult]) -> bool:
+    """Valid, and every measured run started with verified-cold caches."""
+    return cell_valid(results) and all(r.meta.cache_policy in ("restart", "flush") for r in measured_runs(results))

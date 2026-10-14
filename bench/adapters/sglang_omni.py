@@ -4,6 +4,12 @@ Turn-mode MiniCPM-o speech in sglang-omni does not stream audio: the single
 terminal waveform in ``choices[0].message.audio.data`` is the only audio event,
 timestamped at the end of the response body.  Its TTFA is therefore close to
 its end-to-end latency, and its results are labelled "non-streaming".
+
+Talker controls: the chat API forwards ``talker_temperature``, ``talker_top_p``,
+``talker_top_k``, ``talker_repetition_penalty``, ``talker_max_new_tokens`` and
+the top-level ``seed``.  ``min_new_tokens`` (50) and the 16-frame penalty window
+are fixed implementation defaults at the pinned commit
+(``talker_request.py`` / ``talker_model_runner.py``) and are not request fields.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ class SglangOmniAdapter(Adapter):
                     "talker_top_p": req.talker.top_p,
                     "talker_top_k": req.talker.top_k,
                     "talker_repetition_penalty": req.talker.repetition_penalty,
+                    "talker_max_new_tokens": req.talker.max_new_tokens,
                 }
             )
         return payload
