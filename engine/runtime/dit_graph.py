@@ -41,8 +41,11 @@ class EstimatorGraphs:
     ``TimestepEmbedder`` builds its frequency table on the host)."""
 
     def __init__(self, est, eager_fn, dtype, autocast_dtype, graph_t=STEADY_T + FINAL_T + SETUP_T, max_rows: int = ROW_BUCKETS[-1],
-                 max_l: int = MAX_L):
+                 max_l: int = MAX_L, fallback_fn=None):
+        """``fallback_fn`` runs shapes outside the graph set (default ``eager_fn``); pass the uncompiled estimator when
+        ``eager_fn`` is inductor-compiled, or every new shape (large setup batches, long prompts) recompiles."""
         self.est, self.eager_fn, self.dtype, self.autocast_dtype = est, eager_fn, dtype, autocast_dtype
+        self.fallback_fn = fallback_fn or eager_fn
         self.graphs: dict[tuple[int, int, int], tuple] = {}
         self.pool = torch.cuda.graph_pool_handle()
         self.graph_t, self.max_rows, self.max_l = tuple(graph_t), max_rows, max_l
@@ -157,7 +160,7 @@ class EstimatorGraphs:
             r = f"rows={n} T={T} L={L}"
             self.counts["eager_reasons"][r] = self.counts["eager_reasons"].get(r, 0) + 1
             with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
-                return self.eager_fn(self.est, x, mu, t, spks, cond, cnn, att, mask, tr)
+                return self.fallback_fn(self.est, x, mu, t, spks, cond, cnn, att, mask, tr)
         key = (bucket(n, ROW_BUCKETS), T, l_bucket(L))
         if key not in self.graphs:
             self._capture(key)

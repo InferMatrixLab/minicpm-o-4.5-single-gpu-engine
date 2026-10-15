@@ -129,7 +129,7 @@ class BatchedToken2Wav:
             fn = BatchedToken2Wav._estimator_temb
             if compile_estimator:  # inductor fuses the adaLN / norm / activation chains (dynamic shapes: one compile)
                 fn = torch.compile(fn, dynamic=True)
-            self.graphs = EstimatorGraphs(est, fn, next(est.parameters()).dtype, self.dtype)
+            self.graphs = EstimatorGraphs(est, fn, next(est.parameters()).dtype, self.dtype, fallback_fn=BatchedToken2Wav._estimator_temb)
             if euler_graphs:
                 self.euler = EulerGraphs(self.flow.decoder, fn, next(est.parameters()).dtype, self.dtype, t2w.n_timesteps)
 

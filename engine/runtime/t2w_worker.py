@@ -129,6 +129,21 @@ def worker_main(inq, outq, cfg: dict) -> None:
                 return
 
     threading.Thread(target=reader, daemon=True).start()
+
+    def parent_watch(ppid: int):  # the engine died without a stop message (SIGKILL / SIGTERM to its PID only)
+        import os
+
+        while True:
+            time.sleep(1.0)
+            if os.getppid() != ppid:
+                msgs.append(("stop",))
+                wake.set()
+                time.sleep(5)
+                os._exit(0)
+
+    import os
+
+    threading.Thread(target=parent_watch, args=(os.getppid(),), daemon=True).start()
     outq.put(("ready",))
     torch.cuda.set_device(0)
     while True:
@@ -136,6 +151,8 @@ def worker_main(inq, outq, cfg: dict) -> None:
             m = msgs.popleft()
             kind = m[0]
             if kind == "stop":
+                if hasattr(pool, "shutdown"):
+                    pool.shutdown(wait=False, cancel_futures=True)
                 return
             if kind == "open":
                 _, seq, ref, seed = m
