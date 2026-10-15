@@ -324,3 +324,130 @@ class EncoderGraphs:
             st["m2"][n:] = True
         g.replay()
         return out[0][:n], out[1][:, :n], out[2][:, :n], out[3][:n]
+
+
+class EulerGraphs:
+    """Whole-Euler CUDA graphs: all ``steps`` estimator calls and Euler updates of one steady window in one replay.
+
+    Keys ``(rows, T, L)`` as for ``EstimatorGraphs`` (rows = 2 x requests, CFG).  The caller writes the padded caches
+    straight into the input arena (``att``/``cnn`` [steps, depth, rows, ...]) and reads the new caches straight from the
+    output arena, so the caches are copied once each way per window instead of once per step plus once per window.
+    The solver loop inside the graph is the reference's (cosine t schedule, t accumulated by ``t + dt``, CFG combine);
+    the timestep embeddings come from the same recurrence, computed per key at capture (they do not depend on inputs).
+    Padded cache positions may hold stale finite values: they are masked.
+    """
+
+    MEM_ROWS = {512: 64, 1024: 32}  # largest rows per cache bucket (arena memory)
+
+    def __init__(self, cfm, est_fn, dtype, autocast_dtype, steps: int, graph_t=STEADY_T):
+        self.cfm, self.est, self.est_fn = cfm, cfm.estimator, est_fn
+        self.dtype, self.autocast_dtype, self.steps, self.graph_t = dtype, autocast_dtype, steps, tuple(graph_t)
+        e = self.est
+        self.depth, self.nh, self.dk2 = len(e.blocks), e.blocks[0].attn.num_heads, 2 * e.blocks[0].attn.head_dim
+        self.cnn_c = e.blocks[0].conv.in_channels + e.blocks[0].conv.out_channels
+        self.mel, self.hidden = e.in_proj.in_features // 4, e.in_proj.out_features
+        self.device = next(e.parameters()).device
+        self.graphs: dict[tuple[int, int, int], tuple] = {}
+        self.pool = torch.cuda.graph_pool_handle()
+        self.arena: dict[str, torch.Tensor] = {}
+
+    def supports(self, rows: int, T: int, L: int) -> bool:
+        Lb = l_bucket(L) if L > 0 else 0
+        return T in self.graph_t and Lb in self.MEM_ROWS and rows <= self.MEM_ROWS[Lb]
+
+    def _shapes(self):
+        for T in self.graph_t:
+            for Lb, rmax in self.MEM_ROWS.items():
+                for rows in ROW_BUCKETS:
+                    if rows <= rmax:
+                        yield rows, T, Lb
+
+    def _alloc(self) -> None:
+        S, D = self.steps, self.depth
+        need: dict[str, int] = {}
+        for rows, T, Lb in self._shapes():
+            for k, n in {"x0": rows // 2 * self.mel * T, "mu": rows * self.mel * T, "spks": rows * self.mel, "cond": rows * self.mel * T,
+                         "cnn": S * D * rows * self.cnn_c * 2, "att": S * D * rows * self.nh * Lb * self.dk2,
+                         "o_x": rows // 2 * self.mel * T, "o_cnn": S * D * rows * self.cnn_c * 2,
+                         "o_att": S * D * rows * self.nh * (T + Lb) * self.dk2, "dphi": rows * self.mel * T}.items():
+                need[k] = max(need.get(k, 0), n)
+            need["mask"] = max(need.get("mask", 0), rows * T * (T + Lb))
+            need["tr"] = max(need.get("tr", 0), rows)
+        for k, n in need.items():
+            dt = torch.bool if k == "mask" else torch.int64 if k == "tr" else self.dtype
+            self.arena[k] = torch.zeros(n, dtype=dt, device=self.device)
+
+    def views(self, rows: int, T: int, Lb: int) -> dict:
+        if not self.arena:
+            self._alloc()
+        S, D = self.steps, self.depth
+
+        def v(name, *shape):
+            n = 1
+            for d in shape:
+                n *= d
+            return self.arena[name][:n].view(shape)
+
+        return {"x0": v("x0", rows // 2, self.mel, T), "mu": v("mu", rows, self.mel, T), "spks": v("spks", rows, self.mel),
+                "cond": v("cond", rows, self.mel, T), "cnn": v("cnn", S, D, rows, self.cnn_c, 2), "att": v("att", S, D, rows, self.nh, Lb, self.dk2),
+                "mask": v("mask", rows, T, T + Lb), "tr": v("tr", rows), "o_x": v("o_x", rows // 2, self.mel, T),
+                "o_cnn": v("o_cnn", S, D, rows, self.cnn_c, 2), "o_att": v("o_att", S, D, rows, self.nh, T + Lb, self.dk2),
+                "dphi": v("dphi", rows, self.mel, T)}
+
+    def _tembs(self, rows: int) -> torch.Tensor:
+        """The timestep embedding of every step, from the solver's own t recurrence ([steps, rows, 1, hidden])."""
+        steps, dt_ = self.steps, self.dtype
+        t_span = torch.linspace(0, 1, steps + 1, device=self.device, dtype=dt_)
+        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        t, dt = t_span[0].unsqueeze(0), t_span[1] - t_span[0]
+        out = []
+        with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
+            for step in range(1, steps + 1):
+                out.append(self.est.t_embedder(t.repeat(rows)).unsqueeze(1))
+                t = t + dt
+                if step < steps:
+                    dt = t_span[step + 1] - t
+        return torch.stack(out)
+
+    def _body(self, w: dict, temb: torch.Tensor) -> None:
+        cfm, steps = self.cfm, self.steps
+        t_span = torch.linspace(0, 1, steps + 1, device=self.device, dtype=self.dtype)
+        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        t, dt = t_span[0].unsqueeze(0), t_span[1] - t_span[0]
+        x = w["x0"]
+        for step in range(1, steps + 1):
+            self.est_fn(self.est, x.repeat(2, 1, 1), w["mu"], temb[step - 1], w["spks"], w["cond"], w["cnn"][step - 1], w["att"][step - 1],
+                        w["mask"], w["tr"], out=(w["dphi"], w["o_cnn"][step - 1], w["o_att"][step - 1]))
+            d, u = w["dphi"].chunk(2, dim=0)
+            x = x + dt * ((1.0 + cfm.inference_cfg_rate) * d - cfm.inference_cfg_rate * u)
+            t = t + dt
+            if step < steps:
+                dt = t_span[step + 1] - t
+        w["o_x"].copy_(x)
+
+    @torch.inference_mode()
+    def capture(self, rows: int, T: int, Lb: int) -> None:
+        key = (rows, T, Lb)
+        if key in self.graphs:
+            return
+        w = self.views(rows, T, Lb)
+        w["mask"].zero_()
+        w["mask"][:, :, :T] = True
+        w["tr"].fill_(T)
+        temb = self._tembs(rows)
+        with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
+            self._body(w, temb)
+            torch.cuda.synchronize()
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g, pool=self.pool, capture_error_mode="thread_local"):
+                self._body(w, temb)
+        torch.cuda.synchronize()
+        self.graphs[key] = (g, w, temb)
+
+    def capture_all(self) -> int:
+        for k in self._shapes():
+            self.capture(*k)
+        return len(self.graphs)
+
+    def key(self, rows: int, T: int, L: int) -> tuple[int, int, int]:
+        return bucket(rows, ROW_BUCKETS), T, l_bucket(L)

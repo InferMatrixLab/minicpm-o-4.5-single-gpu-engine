@@ -84,7 +84,8 @@ def worker_main(inq, outq, cfg: dict) -> None:
     torch.backends.cudnn.allow_tf32 = False  # AC-3.4: Token2Wav against FP32
     model_dir = cfg["model_dir"]
     t2w = Token2Wav(f"{model_dir}/assets/token2wav", float16=cfg.get("float16_flow", False), spk_threads=cfg.get("spk_threads", 8))
-    bt = BatchedToken2Wav(t2w, use_graphs=cfg.get("t2w_graphs", False), compile_estimator=cfg.get("t2w_compile", False))
+    bt = BatchedToken2Wav(t2w, use_graphs=cfg.get("t2w_graphs", False), compile_estimator=cfg.get("t2w_compile", False),
+                          euler_graphs=cfg.get("t2w_euler_graphs", False))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             bt.capture_graphs(bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav")))

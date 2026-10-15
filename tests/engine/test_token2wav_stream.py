@@ -293,3 +293,42 @@ def test_merged_final_windows_match_unmerged(graphs):
         for x, y in zip(mels[1][j], mels[0][j]):
             assert x.shape == y.shape
             assert float((x - y).norm() / y.norm()) <= 1e-4, j
+
+
+@pytest.mark.parametrize("float16", [False, True])
+def test_whole_euler_graph_matches_eager(float16):
+    """The whole-Euler graph (all steps in one replay, caches through its arenas) gives the eager batched mels
+    (FP32 1e-4; FP16 within the AC-3.4 FP16 bound), for ragged prompts and staggered streams."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", float16=float16, noise_seed=7)
+    prompts = [ours.prepare(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav")]
+    gen = np.random.default_rng(8)
+    plans = []
+    for n in (120, 95, 70):
+        ch = StreamChunker()
+        plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
+    starts = [0, 1, 2]
+    mels = []
+    for bt in (BatchedToken2Wav(ours), BatchedToken2Wav(ours, use_graphs=True, euler_graphs=True)):
+        rec, flow = [], bt._flow
+        bt._flow = lambda sts, ws, last, *rest, flow=flow, rec=rec: (lambda m: rec.extend(zip([id(s) for s in sts], [x.float().cpu() for x in m])) or m)(
+            flow(sts, ws, last, *rest))
+        sts = [ours.new_stream(p, noise_seed=j) for j, p in enumerate(prompts)]
+        order = {id(st): j for j, st in enumerate(sts)}
+        for tick in range(max(s + len(p) for s, p in zip(starts, plans))):
+            items = [(sts[j], *plans[j][tick - s]) for j, s in enumerate(starts) if s <= tick < s + len(plans[j])]
+            bt.decode(items)
+        got = {j: [] for j in range(3)}
+        for sid, m in rec:
+            got[order[sid]].append(m)
+        mels.append(got)
+        if bt.euler is not None:
+            assert bt.euler.graphs, "the whole-Euler path was not used"
+    tol = 5e-3 if float16 else 1e-4
+    for j in range(3):
+        for x, y in zip(mels[1][j], mels[0][j]):
+            assert x.shape == y.shape
+            assert float((x - y).norm() / y.norm()) <= tol, j

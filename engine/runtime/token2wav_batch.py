@@ -108,7 +108,7 @@ def _block_chunk(block, x, c, cnn_cache, att_cache, mask, tr):
 
 
 class BatchedToken2Wav:
-    def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False):
+    def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False):
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.merge_finals = True
@@ -121,15 +121,17 @@ class BatchedToken2Wav:
             self.hift_graphs = HiFTGraphs(self.hift)
             self.enc_graphs = EncoderGraphs(self.flow.encoder, _encoder_core, self.dtype)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
-        self.graphs = None
+        self.graphs = self.euler = None
         if use_graphs:
-            from engine.runtime.dit_graph import EstimatorGraphs
+            from engine.runtime.dit_graph import EstimatorGraphs, EulerGraphs
 
             est = self.flow.decoder.estimator
             fn = BatchedToken2Wav._estimator_temb
             if compile_estimator:  # inductor fuses the adaLN / norm / activation chains (dynamic shapes: one compile)
                 fn = torch.compile(fn, dynamic=True)
             self.graphs = EstimatorGraphs(est, fn, next(est.parameters()).dtype, self.dtype)
+            if euler_graphs:
+                self.euler = EulerGraphs(self.flow.decoder, fn, next(est.parameters()).dtype, self.dtype, t2w.n_timesteps)
 
     @torch.inference_mode()
     def decode(self, items: list[tuple[StreamState, list[int], bool]]) -> list[np.ndarray]:
@@ -156,6 +158,8 @@ class BatchedToken2Wav:
         n = {}
         if self.graphs is not None:
             n["estimator"] = self.graphs.capture_all()
+        if self.euler is not None:
+            n["euler"] = self.euler.capture_all()
         if self.hift_graphs is not None:
             n["hift"] = self.hift_graphs.capture_all()
         if self.enc_graphs is not None:
@@ -316,6 +320,9 @@ class BatchedToken2Wav:
         Tp = self._t_pad(T, keep_cache, L == 0)
         steps, depth = self.t2w.n_timesteps, atts[0].shape[1]
         assert all(a.shape[0] == steps for a in atts) and all(c.shape[0] == steps for c in cnns)
+        if (self.euler is not None and keep_cache and cond is None and t_real is None and L > 0 and Tp == T
+                and self.euler.supports(2 * n, T, L)):
+            return self._solve_euler_graph(sts, mu, spks, atts, cnns, lens, T, L)
         A = atts[0].new_zeros((steps, depth, 2 * n) + atts[0].shape[3:4] + (L, atts[0].shape[5]))
         C = cnns[0].new_empty((steps, depth, 2 * n) + cnns[0].shape[3:])
         mask = torch.zeros(2 * n, Tp, Tp + L, dtype=torch.bool, device=dev)
@@ -363,6 +370,38 @@ class BatchedToken2Wav:
                 st.flow_cache["estimator_att_cache"] = torch.stack(rows, dim=2)
                 st.flow_cache["estimator_cnn_cache"] = torch.stack([new_cnn[:, :, i], new_cnn[:, :, n + i]], dim=2)
         return x[:, :, :T].float()
+
+    def _solve_euler_graph(self, sts, mu, spks, atts, cnns, lens, T: int, L: int) -> torch.Tensor:
+        """A steady window's whole Euler solve in one graph replay (``EulerGraphs``): caches go straight into and come
+        straight out of the graph's arenas."""
+        eg = self.euler
+        n = len(sts)
+        key = eg.key(2 * n, T, L)
+        eg.capture(*key)
+        g, w, _ = eg.graphs[key]
+        R = key[0]
+        H = R // 2  # graph rows: [cond rows 0..H-1 | uncond rows H..R-1] (x.repeat(2, 1, 1) of H request rows)
+        cfm = self.flow.decoder
+        w["mask"].zero_()
+        w["mask"][:, :, :T] = True  # padding rows: their own new frames only
+        w["cond"].zero_()
+        w["mu"][H:].zero_()
+        w["spks"][H:].zero_()
+        w["mu"][:n].copy_(mu)
+        w["spks"][:n].copy_(spks)
+        for i in range(n):
+            w["x0"][i].copy_(cfm.rand_noise[0, :, lens[i]:lens[i] + T])
+            for half in range(2):
+                r = i + half * H
+                w["att"][:, :, r, :, :lens[i]] = atts[i][:, :, half]
+                w["cnn"][:, :, r] = cnns[i][:, :, half]
+                w["mask"][r, :, T:T + lens[i]] = True
+        g.replay()
+        x = w["o_x"][:n].clone()
+        for i, st in enumerate(sts):
+            st.flow_cache["estimator_att_cache"] = torch.stack([w["o_att"][:, :, i, :, :T + lens[i]], w["o_att"][:, :, H + i, :, :T + lens[i]]], dim=2)
+            st.flow_cache["estimator_cnn_cache"] = torch.stack([w["o_cnn"][:, :, i], w["o_cnn"][:, :, H + i]], dim=2)
+        return x.float()
 
     @staticmethod
     def _estimator(est, x, mu, t, spks, cond, cnn_cache, att_cache, mask):
