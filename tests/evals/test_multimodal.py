@@ -198,3 +198,20 @@ def test_daily_omni_payload_matches_native_vllm_requests():
         assert "image_url" in parts and "audio_url" in parts
         assert p["modalities"] == ["text"] and p["chat_template_kwargs"] == {"enable_thinking": False}
     assert [k for k, _ in w.manifest(job)["items"]] == [f"{r.daily_omni_video_id}#{i}" for i, r in enumerate(native)]
+
+
+def test_daily_omni_sglang_form_is_the_native_video_request():
+    """sglang-omni gets MiniCPM-o's official omni form: one video_url with its audio, the same question text."""
+    pytest.importorskip("vllm_omni")
+    from evals.multimodal import daily_omni_worker as w
+
+    job = {"model": "m", "max_samples": 3, "video_dir": str(mm.DAILY_ROOT / "Videos"), "qa_json": str(mm.DAILY_ROOT / "qa.json"),
+           "tokenizer": mm.MODEL_PATH}
+    for r in w.load_requests(job):
+        native = w.payload(job, r)
+        sgl = w.payload({**job, "format": "sglang"}, r)
+        parts = sgl["messages"][0]["content"]
+        assert parts[0]["type"] == "video_url" and parts[0]["video_url"]["use_audio"] is True
+        assert Path(parts[0]["video_url"]["url"]).name == f"{r.daily_omni_video_id}_video.mp4" and Path(parts[0]["video_url"]["url"]).exists()
+        assert parts[1:] == [c for c in native["messages"][0]["content"] if c["type"] == "text"]
+        assert "mm_processor_kwargs" not in sgl and sgl["chat_template_kwargs"] == {"enable_thinking": False}

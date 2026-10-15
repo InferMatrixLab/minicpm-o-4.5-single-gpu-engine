@@ -1,0 +1,26 @@
+{
+ "description": "L20X tuning qualification, seed 1, rerun 1: run1 startup refused: sglang MPS state left dirty by the run0 teardown (group SIGTERM raced the launcher's ordered retire)",
+ "kind": "quality",
+ "id_set": "tuning",
+ "seed_index": 1,
+ "gpu": 2,
+ "port": 18420,
+ "k": 1,
+ "run_order_seed": 20261016,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  8
+ ],
+ "configs": [
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-on",
+   "mps": "on",
+   "env": {
+    "OMNI_SGLANG_MPS": "1"
+   }
+  }
+ ]
+}

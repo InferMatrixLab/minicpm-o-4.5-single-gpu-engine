@@ -202,14 +202,20 @@ class Server:
             return
         pgid = self.pgid
         if pgid is not None:
-            for sig, wait in ((signal.SIGTERM, timeout_s), (signal.SIGKILL, 30.0)):
+            # The leader first: servers that own resources outside the group (sglang-omni's MPS daemon) retire their
+            # workers in order; signalling every worker at once races that teardown. Then the group, then SIGKILL.
+            for target, sig, wait in (("leader", signal.SIGTERM, timeout_s), ("group", signal.SIGTERM, 30.0), ("group", signal.SIGKILL, 30.0)):
                 try:
-                    os.killpg(pgid, sig)
+                    if target == "leader":
+                        self.proc.send_signal(sig)
+                    else:
+                        os.killpg(pgid, sig)
                 except ProcessLookupError:
                     break
                 end = time.monotonic() + wait
                 while time.monotonic() < end:
-                    self.proc.poll()  # reap the leader so a zombie does not keep the group "alive"
+                    if self.proc.poll() is not None and target == "leader":  # reaped; orphaned workers get a short grace
+                        end = min(end, time.monotonic() + 15.0)
                     if not self._group_alive(pgid):
                         break
                     time.sleep(0.5)

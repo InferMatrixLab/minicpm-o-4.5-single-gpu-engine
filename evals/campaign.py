@@ -34,6 +34,9 @@ VLLM_CONFIGS = ("minicpmo_4_5_turn", "minicpmo_4_5_turn_mrv2", "minicpmo_4_5_tur
 SEEDS = ({"seed_index": 0, "gpu": 1, "port": 18410}, {"seed_index": 1, "gpu": 2, "port": 18420}, {"seed_index": 2, "gpu": 3, "port": 18430})
 RUN_ORDER_SEED = 20261015
 SEEDS_REQUIRED = 3
+#: Reruns of cells whose server failed (each is recorded; the failed attempt stays in the campaign record).
+RERUNS = ({"seed_index": 1, "adapter": "sglang-omni", "label": "mps-on",
+           "reason": "run1 startup refused: sglang MPS state left dirty by the run0 teardown (group SIGTERM raced the launcher's ordered retire)"},)
 
 
 def candidates() -> list[dict]:
@@ -55,17 +58,31 @@ def sweep_spec(seed: dict) -> dict:
             "configs": candidates()}
 
 
+def rerun_spec(i: int, rerun: dict) -> dict:
+    seed = next(s for s in SEEDS if s["seed_index"] == rerun["seed_index"])
+    spec = sweep_spec(seed)
+    spec["description"] = f"L20X tuning qualification, seed {seed['seed_index']}, rerun {i}: {rerun['reason']}"
+    spec["configs"] = [c for c in spec["configs"] if c["adapter"] == rerun["adapter"] and c["label"] == rerun["label"]]
+    return spec
+
+
+def all_specs() -> dict[str, dict]:
+    out = {f"qualify_seed{s['seed_index']}.json": sweep_spec(s) for s in SEEDS}
+    for i, r in enumerate(RERUNS, 1):
+        out[f"qualify_seed{r['seed_index']}_rerun{i}.json"] = rerun_spec(i, r)
+    return out
+
+
 def cmd_specs(a) -> int:
     bad = []
-    for seed in SEEDS:
-        p = SPEC_DIR / f"qualify_seed{seed['seed_index']}.json"
-        want = sweep_spec(seed)
+    for name, want in all_specs().items():
+        p = SPEC_DIR / name
         if a.check:
             if not p.exists() or json.loads(p.read_text()) != want:
                 bad.append(str(p))
         else:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(want, indent=1) + "\n")
+            p.write_text(json.dumps(want, indent=1))  # byte-identical to the executed specs
     if bad:
         print(f"specs differ from the generator: {bad}")
         return 1
@@ -77,14 +94,17 @@ def _sha(p) -> str:
 
 
 def group_cells(sweeps: list[str]) -> dict[str, dict]:
-    """digest -> {"candidate": identity, "cells": {seed_index: cell_dir}}; a seed seen twice for one digest is an error."""
+    """digest -> {"candidate", "cells": {seed_index: cell_dir}, "failed_attempts"}; a completed seed seen twice is an error."""
     groups: dict[str, dict] = {}
     for sw in sweeps:
         for exp in sorted(Path(sw).glob("*/experiment.json")):
             spec = json.loads(exp.read_text())["experiment"]
             cand = spec["candidate"]
-            g = groups.setdefault(cand["digest"], {"candidate": cand, "cells": {}})
+            g = groups.setdefault(cand["digest"], {"candidate": cand, "cells": {}, "failed_attempts": []})
             seed = int(spec["seed_index"])
+            if not (exp.parent / "result.json").exists():  # the cell never completed: a recorded failed attempt, not a seed
+                g["failed_attempts"].append({"seed_index": seed, "cell": str(exp.parent)})
+                continue
             if seed in g["cells"]:
                 raise SystemExit(f"candidate {cand['candidate_id']}: seed {seed} appears in {g['cells'][seed]} and {exp.parent}")
             g["cells"][seed] = str(exp.parent)
@@ -165,7 +185,7 @@ def cmd_qualify(a) -> int:
         t.start()
     for t in threads:
         t.join()
-    rows = [record(g["candidate"], g["cells"], out) for g in sorted(groups.values(), key=lambda g: g["candidate"]["candidate_id"])]
+    rows = [{**record(g["candidate"], g["cells"], out), "failed_attempts": g["failed_attempts"]} for g in sorted(groups.values(), key=lambda g: g["candidate"]["candidate_id"])]
     doc = {"scope": "development", "id_set": "tuning", "sweeps": [str(s) for s in a.sweep], "effective_dir": str(EFFECTIVE_DIR), "candidates": rows}
     (out / "campaign_qualification.json").write_text(json.dumps(doc, indent=1))
     for r in rows:

@@ -12,7 +12,8 @@ tokens).  Scoring is ``evaluate_answer_official`` /
 pinned snapshot given in the job.
 
 Modes: ``manifest`` (per-item content sha256: QA fields plus the video and audio
-file bytes), ``run``, ``rescore`` (saved raw responses -> official correctness),
+file bytes), ``run`` (``format`` ``sglang`` sends sglang-omni's native ``video_url`` form, see
+``sglang_payload``), ``rescore`` (saved raw responses -> official correctness),
 and ``dump_payloads`` (first N request bodies, for the native-form fixture test).
 """
 
@@ -81,11 +82,36 @@ def load_requests(job: dict) -> list:
     return ds.sample(tok, n, output_len=MAX_TOKENS, no_oversample=True)
 
 
+def _video_path(job: dict, video_id: str) -> str:
+    return str(Path(job["video_dir"]) / video_id / f"{video_id}_video.mp4")
+
+
 def payload(job: dict, req) -> dict:
+    if job.get("format") == "sglang":
+        return sglang_payload(job, req)
     body = {"model": job["model"], "messages": req.omni_chat_messages, "temperature": 0.0, "max_tokens": MAX_TOKENS, "stream": False}
     body.update(EXTRA_BODY)
     if req.omni_extra_body:
         body.update(req.omni_extra_body)
+    return body
+
+
+def sglang_payload(job: dict, req) -> dict:
+    """sglang-omni's native form of the same request: MiniCPM-o's official omni path.
+
+    vllm-omni expands the video by hand into 1 fps ``image_url`` frames interleaved with 1 s
+    ``audio_url`` segments and asks for the omni frame policy through ``mm_processor_kwargs``
+    (``max_slice_nums=1``, ``use_image_id=False``).  sglang-omni does not read those kwargs; it
+    applies that policy, the 1 fps sampling and the per-frame audio interleave itself, only for a
+    ``video_url`` part with ``use_audio``.  Sent as frames, each frame would be sliced and labelled as a
+    separate picture.  The question text parts are unchanged; the media is the same video file.
+    """
+    (msg,) = req.omni_chat_messages
+    texts = [c for c in msg["content"] if isinstance(c, dict) and c.get("type") == "text"]
+    content = [{"type": "video_url", "video_url": {"url": _video_path(job, req.daily_omni_video_id), "use_audio": True}}, *texts]
+    body = {"model": job["model"], "messages": [{"role": msg["role"], "content": content}], "temperature": 0.0, "max_tokens": MAX_TOKENS,
+            "stream": False}
+    body.update(EXTRA_BODY)
     return body
 
 
