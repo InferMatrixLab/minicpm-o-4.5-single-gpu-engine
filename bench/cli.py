@@ -239,7 +239,7 @@ async def run_one_cell(
     prev = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
     manifest = build_manifest(
         repos=DEFAULT_REPOS,
-        env_pythons=DEFAULT_PYTHONS,
+        env_pythons={**DEFAULT_PYTHONS, cand.adapter: ADAPTER_PYTHON[cand.adapter]},  # every environment the spec fingerprints
         out_dir=out,
         gpu_index=cell.gpu_index,
         deploy={"engine": cand.adapter, "config": cand.config, "resolved": resolved, "candidate": asdict_candidate(cand), "cell": cell.to_json(),
@@ -252,7 +252,8 @@ async def run_one_cell(
     )
     header = {"experiment": spec, "experiment_digest": spec_digest(spec), "experiment_base_digest": base_digest, "manifest": manifest}
     prev_decl = json.loads((out / "experiment.json").read_text()) if (out / "experiment.json").exists() else {}
-    declare(out, {**header, "recoveries": prev_decl.get("recoveries", []) + list(recovery or [])})  # frozen before execution
+    declare(out, {**header, "declared_unix": prev_decl.get("declared_unix", time.time()),
+                  "recoveries": prev_decl.get("recoveries", []) + list(recovery or [])})  # frozen before execution
     gpu_name = spec["hardware"].get("gpu_sku", "")
     meta = RunMeta(gpu=gpu_name, engine=cand.adapter, config=cand.config, candidate_id=cand.candidate_id, config_digest=cand.digest,
                    cell_digest=cell.digest, experiment_base_digest=base_digest, mps_policy=cand.mps, id_set=cell.id_set, seed_index=cell.seed_index)

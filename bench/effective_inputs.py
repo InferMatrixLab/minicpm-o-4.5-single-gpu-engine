@@ -196,3 +196,59 @@ def save_dumps(path: Path, dumps: list[EffectiveInput]) -> None:
     with path.open("w") as f:
         for d in dumps:
             f.write(json.dumps(d.to_json()) + "\n")
+
+
+# --- provenance: which execution produced a dump -------------------------------------------------
+PROVENANCE_SCHEMA = "effective_dump/v1"
+STACK_REPOS = {"vllm-omni": "/workspace/cgzheng/cgzheng/vllm-omni", "sglang-omni": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main"}
+_ADAPTER_MODULE = {"vllm-omni": "vllm_omni", "sglang-omni": "sglang_omni"}
+
+
+def provenance_path(dump: Path) -> Path:
+    return Path(dump).with_suffix(".provenance.json")
+
+
+def _code_files(stack: str) -> list[str]:
+    files = ["bench/effective_dump.py", "bench/effective_inputs.py", "bench/workload.py", "bench/adapters/base.py"]
+    if stack in _ADAPTER_MODULE:
+        files.append(f"bench/adapters/{_ADAPTER_MODULE[stack]}.py")
+    return files
+
+
+def code_hashes(stack: str) -> dict:
+    root = Path(__file__).resolve().parents[1]
+    return {f: hashlib.sha256((root / f).read_bytes()).hexdigest() for f in _code_files(stack)}
+
+
+def write_provenance(dump: Path, stack: str, model: dict, server: dict | None = None) -> dict:
+    """Record the execution that produced ``dump``: stack commit, model revision, request/preprocessing code."""
+    from bench.fingerprint import repo_fingerprint
+
+    doc = {"schema": PROVENANCE_SCHEMA, "stack": stack, "dump_sha256": hashlib.sha256(Path(dump).read_bytes()).hexdigest(),
+           "rows": len(load_dumps(Path(dump))), "model": model,
+           "stack_repo": repo_fingerprint(STACK_REPOS[stack]) if stack in STACK_REPOS else None, "code_sha256": code_hashes(stack),
+           "server": server}
+    provenance_path(dump).write_text(json.dumps(doc, indent=1))
+    return doc
+
+
+def verify_provenance(dump: Path, stack: str, model: dict, stack_repo: dict | None) -> list[str]:
+    """Problems binding ``dump`` to the measured execution (model revision, stack commit, current request code)."""
+    p = provenance_path(dump)
+    if not p.exists():
+        return [f"{dump}: no provenance record"]
+    doc = json.loads(p.read_text())
+    out = []
+    if doc.get("schema") != PROVENANCE_SCHEMA or doc.get("stack") != stack:
+        out.append(f"{dump}: provenance is for {doc.get('stack')!r} ({doc.get('schema')}), not {stack!r}")
+    if doc.get("dump_sha256") != hashlib.sha256(Path(dump).read_bytes()).hexdigest():
+        out.append(f"{dump}: dump bytes differ from the recorded execution")
+    if doc.get("model") != model:
+        out.append(f"{dump}: produced with model {doc.get('model')}, measured with {model}")
+    if stack in STACK_REPOS:
+        rec = doc.get("stack_repo") or {}
+        if stack_repo is None or rec.get("commit") != stack_repo.get("commit") or rec.get("dirty") or stack_repo.get("dirty"):
+            out.append(f"{dump}: produced at {stack} {rec.get('commit')} (dirty={rec.get('dirty')}), measured at {stack_repo}")
+    if doc.get("code_sha256") != code_hashes(stack):
+        out.append(f"{dump}: request/preprocessing code changed since the dump was produced")
+    return out

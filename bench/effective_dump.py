@@ -191,6 +191,10 @@ def main() -> int:
     else:
         dumps = dump_sglang_omni(a.n)
     save_dumps(Path(a.out), dumps)
+    from bench.effective_inputs import write_provenance
+    from bench.workload import MODEL_REPO, MODEL_REVISION
+
+    write_provenance(Path(a.out), a.stack, {"repo": MODEL_REPO, "revision": MODEL_REVISION}, {"url": a.url} if a.url else None)
     print(f"wrote {len(dumps)} rows to {a.out}")
     return 0
 

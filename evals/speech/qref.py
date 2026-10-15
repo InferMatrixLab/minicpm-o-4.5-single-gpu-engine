@@ -3,17 +3,26 @@
     python -m evals.speech.qref qualify --quality tuning.json --effective-dir results/effective_inputs --out qual.json
     python -m evals.speech.qref freeze --scope development|final --gpu L20X --out qref.json \
         --reference quality.json=qual.json [--reference ...]
+    python -m evals.speech.qref verify --qref qref.json
     python -m evals.speech.qref gate --qref qref.json --quality engine.json --out gate.json [--headline-digest D]
 
 * qualify: the tuning-set report must pass ``verify_report``.  Floors are
   re-derived from its sidecar; effective-input eligibility is recomputed from
-  the bound dumps under the recorded baseline policy (hard on prompt IDs and
-  reference bytes); class R is computed from the resolved candidate semantics
-  and fails closed when they are unknown.
+  dumps whose provenance binds them to the measured stack commit, model
+  revision and current request code (hard on prompt IDs and reference bytes
+  under the recorded baseline policy); class R is computed from the resolved
+  candidate semantics, bound to the measured deploy files, and fails closed
+  when they are unknown.
 * verify_qualification re-runs qualify on the recorded, hash-checked inputs.
-* freeze/gate accept only verified reports and verified qualifications; the
-  qualification must belong to the same candidate, GPU and evaluator as the
-  reference (tuning -> full-row reuse is the intended transition).
+* freeze accepts only verified reports and verified qualifications of the same
+  candidate, hardware class and evaluator.  A final Q_ref is frozen from
+  full-set reports of every scored concurrency (all qualified candidates at
+  C=32, the C=1 throughput winner at C=1); its identity is rows, seeds,
+  evaluator, model, dataset and hardware class, and each gate also binds C.
+* verify_qref rebuilds the Q_ref from its recorded sources (re-verifying every
+  report, sidecar, source cell and qualification) and compares every decisive
+  field; gate uses only a verified Q_ref, and a final gate rejects a Q_ref
+  frozen after the engine cells were declared.
 """
 
 from __future__ import annotations
@@ -28,13 +37,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from bench.effective_inputs import compare_sets, eligible, load_dumps  # noqa: E402
+from bench.effective_inputs import compare_sets, eligible, load_dumps, verify_provenance  # noqa: E402
 from bench.semantics import SemanticsUnknown, class_r  # noqa: E402
 from evals.speech.gates import QRef, comparative_gates, freeze_qref  # noqa: E402
 from evals.speech.verify_report import ReportError, verify_report  # noqa: E402
 
 REQUIRED_SEEDS = 3
-DECISIVE = ("candidate_digest", "gpu_sku", "gpu_driver", "evaluator_digest", "floors", "effective_inputs_eligible", "class_r", "qualified")
+DECISIVE = ("candidate_digest", "gpu_sku", "gpu_driver", "evaluator_digest", "floors", "effective_inputs_eligible", "effective_inputs_problems",
+            "class_r", "qualified")
+FINAL_GATE_C = (1, 32)
+QREF_DECISIVE = ("scope", "gpu", "rows_sha256", "seed_indices", "values", "per_seed", "sources", "identity", "references")
 
 
 class QRefError(ValueError):
@@ -55,6 +67,11 @@ def _verified(path: str, check_sources: bool = True):
     return vr
 
 
+def _source_spec(vr) -> dict:
+    cell = next(iter(vr.report["seeds"].values()))["cell"]
+    return json.loads((Path(cell) / "experiment.json").read_text())["experiment"]
+
+
 def qualify(quality_path: str, effective_dir: str, check_sources: bool = True) -> dict:
     vr = _verified(quality_path, check_sources)
     gen = vr.report["generation"]
@@ -63,10 +80,20 @@ def qualify(quality_path: str, effective_dir: str, check_sources: bool = True) -
     cand = gen["candidate"]
     d = Path(effective_dir)
     canon_p, cand_p = d / "canonical.jsonl", d / f"{cand['adapter']}.jsonl"
-    mm = compare_sets(load_dumps(cand_p), load_dumps(canon_p), strict_reference=False)
-    elig = eligible(mm)
+    if check_sources:
+        repo = (_source_spec(vr)["fingerprints"]["repos"]).get(cand["adapter"])
+    else:
+        from bench.effective_inputs import STACK_REPOS
+        from bench.fingerprint import repo_fingerprint
+
+        repo = repo_fingerprint(STACK_REPOS[cand["adapter"]]) if cand["adapter"] in STACK_REPOS else None
+    if canon_p.exists() and cand_p.exists():
+        prov = verify_provenance(canon_p, "canonical", gen["model"], None) + verify_provenance(cand_p, cand["adapter"], gen["model"], repo)
+        elig = eligible(compare_sets(load_dumps(cand_p), load_dumps(canon_p), strict_reference=False)) and not prov
+    else:
+        prov, elig = [f"no effective-input dumps for {cand['adapter']} in {d}"], False
     try:
-        cr = class_r(cand, elig).to_json()
+        cr = class_r(cand, elig, check_binding=check_sources).to_json()
         cr_ok, reason = cr["class_r"], None
     except SemanticsUnknown as e:
         cr, cr_ok, reason = None, False, str(e)
@@ -76,19 +103,21 @@ def qualify(quality_path: str, effective_dir: str, check_sources: bool = True) -
         "candidate_digest": cand["digest"],
         "gpu_sku": gen["gpu_sku"],
         "gpu_driver": gen["gpu_driver"],
+        "gpu_memory_mib": gen.get("gpu_memory_mib"),
         "gpu_uuids": {s: v.get("gpu_uuid") for s, v in vr.report["seeds"].items()},
         "concurrency": gen["concurrency"],
         "evaluator_digest": vr.report["evaluator"]["digest"],
         "floors": floors,
         "per_seed_floors": {str(s["seed_index"]): s["absolute_floors"]["passed"] for s in vr.summary["per_seed"]},
         "effective_inputs_eligible": elig,
+        "effective_inputs_problems": prov,
         "class_r": cr,
         "class_r_unknown_reason": reason,
         "qualified": bool(floors["passed"] and elig and cr_ok),
         "inputs": {"quality": {"path": str(quality_path), "sha256": _sha(quality_path)},
                    "sidecar": {"path": str(Path(quality_path).with_suffix(".rows.jsonl")), "sha256": _sha(Path(quality_path).with_suffix(".rows.jsonl"))},
-                   "canonical_dumps": {"path": str(canon_p), "sha256": _sha(canon_p)},
-                   "candidate_dumps": {"path": str(cand_p), "sha256": _sha(cand_p)}},
+                   "canonical_dumps": {"path": str(canon_p), "sha256": _sha(canon_p) if canon_p.exists() else None},
+                   "candidate_dumps": {"path": str(cand_p), "sha256": _sha(cand_p) if cand_p.exists() else None}},
     }
 
 
@@ -96,6 +125,8 @@ def verify_qualification(qual_path: str, check_sources: bool = True) -> dict:
     """Recompute a qualification from its recorded inputs; every decisive field must agree."""
     q = json.loads(Path(qual_path).read_text())
     for name, inp in (q.get("inputs") or {}).items():
+        if inp["sha256"] is None and not Path(inp["path"]).exists():
+            continue  # recorded as absent (no dumps: not eligible), still absent
         if not Path(inp["path"]).exists() or _sha(inp["path"]) != inp["sha256"]:
             raise QRefError(f"{qual_path}: input {name} is missing or changed")
     again = json.loads(json.dumps(qualify(q["inputs"]["quality"]["path"], str(Path(q["inputs"]["canonical_dumps"]["path"]).parent), check_sources)))
@@ -115,9 +146,19 @@ def _check_scope(vr, scope: str) -> None:
         raise QRefError("seeds have different row counts (denominators)")
 
 
-def freeze(scope: str, gpu: str, refs: list[tuple[str, str]], out: Path, check_sources: bool = True) -> dict:
-    if out.exists():
-        raise QRefError(f"{out} exists: a frozen Q_ref is never rewritten")
+def _match_identity(vr, scope: str) -> dict:
+    """What a Q_ref and the reports it is compared with must share; a final Q_ref spans the gated concurrencies."""
+    ident = dict(vr.identity)
+    if scope == "final":
+        ident.pop("concurrency")
+        ident.pop("measured_ids_sha256")  # the full set is ordered per C; rows_sha256 binds membership
+    return ident
+
+
+def build_qref(scope: str, gpu: str, refs: list[tuple[str, str]], check_sources: bool = True) -> dict:
+    """The Q_ref document (without the freeze time) computed from verified references."""
+    if not refs:
+        raise QRefError("no references")
     cands, inputs, ident = {}, {}, None
     for qpath, qualpath in refs:
         vr = _verified(qpath, check_sources)
@@ -125,54 +166,88 @@ def freeze(scope: str, gpu: str, refs: list[tuple[str, str]], out: Path, check_s
         qual = verify_qualification(qualpath, check_sources)
         gen = vr.report["generation"]
         for k, w in (("candidate_digest", gen["candidate"]["digest"]), ("gpu_sku", gen["gpu_sku"]), ("gpu_driver", gen["gpu_driver"]),
-                     ("evaluator_digest", vr.report["evaluator"]["digest"])):
-            if qual[k] != w:
-                raise QRefError(f"{qualpath}: qualification {k}={qual[k]!r} does not match the reference ({w!r})")
+                     ("gpu_memory_mib", gen.get("gpu_memory_mib")), ("evaluator_digest", vr.report["evaluator"]["digest"])):
+            if qual.get(k) != w:
+                raise QRefError(f"{qualpath}: qualification {k}={qual.get(k)!r} does not match the reference ({w!r})")
+        if scope == "final" and gen["concurrency"] not in FINAL_GATE_C:
+            raise QRefError(f"{qpath}: final references are measured at C in {FINAL_GATE_C}")
+        mi = _match_identity(vr, scope)
         if ident is None:
-            ident = vr.identity
-        elif vr.identity != ident:
-            raise QRefError(f"references disagree on {[k for k in ident if ident[k] != vr.identity[k]]}")
-        cid = gen["candidate"]["candidate_id"]
-        inputs[cid] = {"quality": qpath, "quality_sha256": _sha(qpath), "qualification": qualpath, "qualification_sha256": _sha(qualpath),
-                       "qualified": qual["qualified"]}
+            ident = mi
+        elif mi != ident:
+            raise QRefError(f"references disagree on {[k for k in ident if ident[k] != mi.get(k)]}")
+        key = f"{gen['candidate']['candidate_id']}@C{gen['concurrency']}"
+        if key in inputs:
+            raise QRefError(f"{key} is given twice")
+        inputs[key] = {"quality": str(qpath), "quality_sha256": _sha(qpath), "sidecar_sha256": _sha(Path(qpath).with_suffix(".rows.jsonl")),
+                       "qualification": str(qualpath), "qualification_sha256": _sha(qualpath), "qualified": qual["qualified"],
+                       "concurrency": gen["concurrency"]}
         if qual["qualified"]:
-            cands[cid] = {"qualified": True, "rows_sha256": vr.report["rows_sha256"], "seed_indices": tuple(vr.summary["seed_indices"]),
+            cands[key] = {"qualified": True, "rows_sha256": vr.report["rows_sha256"], "seed_indices": tuple(vr.summary["seed_indices"]),
                           "per_seed": vr.summary["per_seed"]}
-    if ident is None:
-        raise QRefError("no references")
     if ident["gpu_sku"] != gpu:
         raise QRefError(f"references were generated on {ident['gpu_sku']}, not {gpu}")
     if not cands:
         raise QRefError("no qualified reference")
-    q = freeze_qref(cands, gpu, time.time())
+    q = freeze_qref(cands, gpu, 0.0).to_json()
+    q.pop("frozen_unix")
+    return {**q, "scope": scope, "identity": ident, "references": inputs}
+
+
+def freeze(scope: str, gpu: str, refs: list[tuple[str, str]], out: Path, check_sources: bool = True) -> dict:
+    if out.exists():
+        raise QRefError(f"{out} exists: a frozen Q_ref is never rewritten")
+    doc = {**build_qref(scope, gpu, refs, check_sources), "frozen_unix": time.time()}
     out.parent.mkdir(parents=True, exist_ok=True)
-    doc = {**q.to_json(), "identity": ident, "inputs": inputs}
     out.write_text(json.dumps(doc, indent=1))
     return doc
 
 
-def gate(qref_path: str, quality_path: str, headline_digest: str | None, check_sources: bool = True) -> dict:
+def verify_qref(qref_path: str, check_sources: bool = True) -> dict:
+    """Rebuild the Q_ref from its recorded references and compare every decisive field."""
     qd = json.loads(Path(qref_path).read_text())
-    ident = qd.pop("identity")
-    inputs = qd.pop("inputs", {})
-    for cid, inp in inputs.items():
-        if _sha(inp["quality"]) != inp["quality_sha256"] or _sha(inp["qualification"]) != inp["qualification_sha256"]:
-            raise QRefError(f"Q_ref source {cid} changed since freezing")
-    qd["seed_indices"] = tuple(qd["seed_indices"])
-    q = QRef(**qd)
+    refs = qd.get("references") or {}
+    if not refs:
+        raise QRefError(f"{qref_path}: Q_ref records no references")
+    for key, inp in refs.items():
+        for f, h in (("quality", "quality_sha256"), ("qualification", "qualification_sha256")):
+            if not Path(inp[f]).exists() or _sha(inp[f]) != inp[h]:
+                raise QRefError(f"{qref_path}: reference {key} {f} is missing or changed")
+    again = json.loads(json.dumps(build_qref(qd.get("scope"), qd.get("gpu"), [(v["quality"], v["qualification"]) for v in refs.values()], check_sources)))
+    bad = [k for k in QREF_DECISIVE if again.get(k) != qd.get(k)]
+    if bad:
+        raise QRefError(f"{qref_path}: recorded {bad} differ from the Q_ref rebuilt from its references")
+    if not isinstance(qd.get("frozen_unix"), (int, float)):
+        raise QRefError(f"{qref_path}: no freeze time")
+    return qd
+
+
+def gate(qref_path: str, quality_path: str, headline_digest: str | None, check_sources: bool = True) -> dict:
+    qd = verify_qref(qref_path, check_sources)
+    ident, scope = qd["identity"], qd["scope"]
+    q = QRef(gpu=qd["gpu"], rows_sha256=qd["rows_sha256"], seed_indices=tuple(qd["seed_indices"]), values=qd["values"], per_seed=qd["per_seed"],
+             sources=qd["sources"], frozen_unix=qd["frozen_unix"])
     vr = _verified(quality_path, check_sources)
-    _check_scope(vr, ident["scope"])
-    bad = [k for k in ident if vr.identity.get(k) != ident[k]]
+    _check_scope(vr, scope)
+    mi = _match_identity(vr, scope)
+    bad = [k for k in ident if mi.get(k) != ident[k]]
     if bad:
         raise QRefError(f"engine report and Q_ref differ on {bad}")
-    if ident["scope"] == "final":
+    if scope == "final":
+        c = vr.report["generation"]["concurrency"]
+        if c not in FINAL_GATE_C:
+            raise QRefError(f"final gates apply at C in {FINAL_GATE_C}, not {c}")
         if not vr.report.get("d_ref") or any(r.truncation is None for r in vr.rows):
             raise QRefError("final gates need verified D_ref-based truncation evidence for every row")
         if headline_digest is None or vr.report["generation"]["candidate"]["digest"] != headline_digest:
             raise QRefError("final gates apply only to the declared headline configuration")
+        if check_sources:
+            declared = [json.loads((Path(s["cell"]) / "experiment.json").read_text()).get("declared_unix") for s in vr.report["seeds"].values()]
+            if any(d is None for d in declared) or qd["frozen_unix"] >= min(declared):
+                raise QRefError("the Q_ref was not frozen before the engine cells were declared")
     res = comparative_gates(vr.summary["per_seed"], vr.report["rows_sha256"], tuple(vr.summary["seed_indices"]), q)
     res["absolute_floors_passed"] = bool(vr.summary["absolute_floors_pooled"]["passed"])
-    res["scope"] = ident["scope"]
+    res["scope"] = scope
     res["candidate_id"] = vr.report["generation"]["candidate"]["candidate_id"]
     return res
 
@@ -189,6 +264,8 @@ def main(argv=None) -> int:
     fz.add_argument("--gpu", required=True, help="asserted GPU SKU; must equal the references' generation GPU")
     fz.add_argument("--reference", action="append", required=True, help="QUALITY_JSON=QUALIFICATION_JSON")
     fz.add_argument("--out", required=True)
+    vf = sub.add_parser("verify")
+    vf.add_argument("--qref", required=True)
     gt = sub.add_parser("gate")
     gt.add_argument("--qref", required=True)
     gt.add_argument("--quality", required=True)
@@ -200,12 +277,16 @@ def main(argv=None) -> int:
         Path(a.out).write_text(json.dumps(rec, indent=1))
         print(json.dumps({"candidate": rec["candidate_id"], "qualified": rec["qualified"], "floors": rec["floors"]["passed"],
                           "eligible": rec["effective_inputs_eligible"], "class_r": (rec["class_r"] or {}).get("class_r"),
-                          "unknown": rec["class_r_unknown_reason"]}))
+                          "unknown": rec["class_r_unknown_reason"], "input_problems": rec["effective_inputs_problems"]}))
         return 0
     if a.cmd == "freeze":
         refs = [tuple(r.split("=", 1)) for r in a.reference]
         doc = freeze(a.scope, a.gpu, refs, Path(a.out))
         print(json.dumps({"values": doc["values"], "sources": doc["sources"]}, indent=1))
+        return 0
+    if a.cmd == "verify":
+        doc = verify_qref(a.qref)
+        print(json.dumps({"verified": True, "values": doc["values"], "sources": doc["sources"]}, indent=1))
         return 0
     res = gate(a.qref, a.quality, a.headline_digest)
     Path(a.out).write_text(json.dumps(res, indent=1))

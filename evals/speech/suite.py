@@ -273,6 +273,19 @@ def write_report(out: Path, scope: str, col: Collection, scored: dict, quality: 
     return rep
 
 
+def load_dref(path: str, col: Collection) -> dict[str, float]:
+    """The verified per-row map of a d_ref/v1 truncation reference that matches this collection."""
+    from evals.speech.verify_report import verify_dref
+
+    g = col.generation
+    expect = {"role": "truncation", "concurrency": g["concurrency"], "gpu_class": {k: g[k] for k in ("gpu_sku", "gpu_driver", "gpu_memory_mib")},
+              "model": g["model"], "dataset": g["dataset"], "rows": sorted({r.row_id for r in col.rows})}
+    problems, rows = verify_dref(path, expect)
+    if problems:
+        raise CoverageError(f"duration reference {path} does not verify: {problems[:4]}")
+    return rows
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="evals.speech.suite")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -282,14 +295,14 @@ def main(argv=None) -> int:
     sp.add_argument("--scope", choices=SCOPES, required=True)
     sp.add_argument("--gpu", type=int, required=True)
     sp.add_argument("--out", required=True)
-    sp.add_argument("--d-ref", default=None, help="JSON {row_id: D_ref seconds} from the cell's throughput winner")
+    sp.add_argument("--d-ref", default=None, help="d_ref/v1 truncation reference built from the frozen throughput winner at this C")
     sp.add_argument("--no-whisper", action="store_true")
     a = ap.parse_args(argv)
     t0 = time.time()
     col = collect([Path(c) for c in a.cell], a.run)
     check_scope(a.scope, col)
+    d_ref = load_dref(a.d_ref, col) if a.d_ref else None
     scored = score(col.rows, a.gpu, whisper=not a.no_whisper)
-    d_ref = json.loads(Path(a.d_ref).read_text()) if a.d_ref else None
     quality = build_quality(col.rows, scored, d_ref)
     rep = write_report(Path(a.out), a.scope, col, scored, quality, a.d_ref, t0)
     s = rep["summary"]["pooled"]

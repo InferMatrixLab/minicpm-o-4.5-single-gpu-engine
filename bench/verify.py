@@ -164,27 +164,44 @@ def reconcile_manifest(m: dict, spec: dict) -> list[str]:
     for k in ("concurrency", "id_set", "seed_index", "timeout_s", "gpu_index"):
         if mcell.get(k) != getattr(cell, k):
             out.append(f"deploy.cell.{k}={mcell.get(k)!r} != spec {getattr(cell, k)!r}")
-    if (m.get("model") or {}).get("revision") != spec["model"]["revision"]:
-        out.append("manifest model revision differs from the spec")
+    if mcell.get("candidate") != cand.identity() or mcell.get("workload") != workload:
+        out.append("deploy.cell candidate/workload differ from the spec")
+    if (m.get("model") or {}).get("revision") != spec["model"]["revision"] or (m.get("model") or {}).get("repo") != spec["model"]["repo"]:
+        out.append("manifest model differs from the spec")
+    for name, want in (spec["fingerprints"].get("repos") or {}).items():
+        got = (m.get("repos") or {}).get(name) or {}
+        if got.get("commit") != want.get("commit") or bool(got.get("dirty")) != bool(want.get("dirty")):
+            out.append(f"manifest repo {name} differs from the spec fingerprint")
     ds = m.get("datasets") or [{}]
     if ds[0].get("repo") != spec["dataset"]["repo"] or ds[0].get("revision") != spec["dataset"]["revision"]:
         out.append("manifest dataset differs from the spec")
     if list((ds[0].get("ids") or {}).get(spec["id_set"], [])) != spec["measured_ids"]:
         out.append("manifest measured ID list differs from the spec")
+    if list((ds[0].get("ids") or {}).get("warmup", [])) != spec["warmup_ids"]:
+        out.append("manifest warmup ID list differs from the spec")
     if m.get("sampling") != spec["sampling"]:
         out.append("manifest sampling differs from the spec")
     hw = m.get("hardware") or {}
-    if hw.get("gpu_index") != spec["hardware"].get("gpu_index") or (hw.get("gpu_sku") or "").replace("NVIDIA ", "") != spec["hardware"].get("gpu_sku"):
-        out.append("manifest hardware differs from the spec")
-    for name, lock in (m.get("env_lock") or {}).items():
-        want = spec["fingerprints"]["envs"].get(name)
-        if want is None:
+    sh = spec["hardware"]
+    try:
+        mem_ok = float(hw.get("gpu_memory_mib")) == float(sh.get("memory_mib"))
+    except (TypeError, ValueError):
+        mem_ok = False
+    if hw.get("gpu_index") != sh.get("gpu_index") or (hw.get("gpu_sku") or "").replace("NVIDIA ", "") != sh.get("gpu_sku") \
+            or hw.get("driver") != sh.get("driver") or not mem_ok:
+        out.append("manifest hardware (index, SKU, driver, memory) differs from the spec")
+    locks = m.get("env_lock") or {}
+    for name, want in (spec["fingerprints"].get("envs") or {}).items():
+        lock = locks.get(name)
+        if lock is None:
+            out.append(f"manifest has no lock for the required environment {name}")
             continue
         try:
             body = Path(lock["path"]).read_bytes()
         except OSError:
-            continue  # reported by validate_manifest
-        if hashlib.sha256(body).hexdigest() != want:
+            out.append(f"environment lock {name} is missing")
+            continue
+        if hashlib.sha256(body).hexdigest() != want or lock.get("sha256") != want:
             out.append(f"environment {name} at measurement time differs from the spec fingerprint")
     return out
 

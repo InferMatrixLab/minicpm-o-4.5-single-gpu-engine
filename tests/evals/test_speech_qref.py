@@ -19,15 +19,23 @@ from evals.speech.verify_report import verify_report  # noqa: E402
 
 EFF = ROOT / "results" / "effective_inputs"
 SETS = make_id_sets(load_seed_tts_rows())
-SGL = {"adapter": "sglang-omni", "config": "speech", "extra": [], "env": [], "mps": "off", "deploy_files_sha256": ["x"], "digest": "D1",
-       "candidate_id": "sglang-omni:speech:1", "label": ""}
+
+
+def _cand(adapter="sglang-omni", config="speech", label=""):
+    from bench.experiment import Candidate
+
+    c = Candidate.from_spec({"adapter": adapter, "config": config, "label": label}, ("x",))
+    return {**c.identity(), "candidate_id": c.candidate_id, "digest": c.digest, "label": label}
+
+
+SGL = _cand()
 EV = {"x": 1}
 EV["digest"] = hashlib.sha256(json.dumps({"x": 1}, sort_keys=True).encode()).hexdigest()
 
 pytestmark = pytest.mark.skipif(not (EFF / "canonical.jsonl").exists(), reason="effective-input dumps not available")
 
 
-def _row(rid, seed, utmos=4.3, trunc=False):
+def _row(rid, seed, utmos=4.3, trunc=None):
     return RowQuality(row_id=rid, seed_index=seed, target_text="t", thinker_text="t", hyp_text="h", ref_norm="a b", hyp_norm="a b", wer=0.0,
                       substitutions=0, deletions=0, insertions=0, hits=20, sim=60.0, utmos=utmos, duration_s=3.0, d_ref_s=3.0 if trunc is not None else None,
                       leading_silence_s=0.1, trailing_silence_s=0.1, max_internal_silence_s=0.1, silent_fraction=0.05, catastrophic=False,
@@ -35,7 +43,7 @@ def _row(rid, seed, utmos=4.3, trunc=False):
 
 
 def report(tmp_path, name, *, seeds=(0, 1, 2), ids=None, id_set="tuning", scope="development", cand=None, utmos=4.3, gpu="L20X", c=8,
-           evaluator=None, truncation=False, claim=None):
+           evaluator=None, truncation=None, claim=None):
     ids = ids if ids is not None else list(SETS.tuning(8))
     q = [_row(rid, s, utmos=utmos, trunc=truncation) for s in seeds for rid in ids]
     path = tmp_path / f"{name}.json"
@@ -45,8 +53,9 @@ def report(tmp_path, name, *, seeds=(0, 1, 2), ids=None, id_set="tuning", scope=
     rep = {
         "scope": scope,
         "generation": {"candidate_id": cand["candidate_id"], "candidate_digest": cand["digest"], "candidate": cand, "gpu_sku": gpu,
-                       "gpu_driver": "570", "concurrency": c, "id_set": id_set, "measured_ids_sha256": "ids", "dataset": {"repo": "d"},
-                       "model": {"revision": "m"}},
+                       "gpu_driver": "570", "gpu_memory_mib": "1", "concurrency": c, "id_set": id_set, "measured_ids_sha256": "ids",
+                       "dataset": {"repo": "d"}, "model": {"repo": "openbmb/MiniCPM-o-4_5", "revision": "503e754207c94da6bb26850b4469f367c9ea3582"}},
+        "truncation_evaluated": truncation is not None,
         "seeds": {str(s): {"cell": f"c{s}", "gpu_uuid": f"GPU-{s}"} for s in seeds},
         "rows_per_seed": claim or {str(s): len(ids) for s in seeds},
         "rows_sha256": hashlib.sha256("\n".join(sorted(f"{s}:{r}" for s in seeds for r in ids)).encode()).hexdigest(),
@@ -57,8 +66,22 @@ def report(tmp_path, name, *, seeds=(0, 1, 2), ids=None, id_set="tuning", scope=
     return str(path)
 
 
+@pytest.fixture
+def eff(tmp_path):
+    """The real 32-row dumps, with provenance records written for the current checkouts and request code."""
+    from bench.effective_inputs import write_provenance
+
+    d = tmp_path / "eff"
+    d.mkdir()
+    model = {"repo": "openbmb/MiniCPM-o-4_5", "revision": "503e754207c94da6bb26850b4469f367c9ea3582"}
+    for stack in ("canonical", "vllm-omni", "sglang-omni"):
+        shutil.copy(EFF / f"{stack}.jsonl", d / f"{stack}.jsonl")
+        write_provenance(d / f"{stack}.jsonl", stack, model)
+    return d
+
+
 def qual(tmp_path, rep_path):
-    rec = qualify(rep_path, str(EFF), check_sources=False)
+    rec = qualify(rep_path, str(tmp_path / "eff"), check_sources=False)
     p = Path(rep_path).with_suffix(".qual.json")
     p.write_text(json.dumps(rec))
     return str(p), rec
@@ -89,11 +112,11 @@ def test_duplicates_and_seed_map_inconsistency(tmp_path):
 
 def test_full_scope_needs_the_canonical_set(tmp_path):
     full = list(SETS.full())
-    ok = report(tmp_path, "full", ids=full, id_set="full", scope="final", truncation=True)
-    assert verify_report(ok, check_sources=False).ok
+    ok = report(tmp_path, "full", ids=full, id_set="full", scope="final")
+    assert not any("canonical" in p for p in verify_report(ok, check_sources=False).problems)
     fake = [f"x{i}" for i in range(1088)]  # 1088 rows that are not the canonical rows
-    bad = report(tmp_path, "fake", ids=fake, id_set="full", scope="final", truncation=True)
-    assert not verify_report(bad, check_sources=False).ok
+    bad = report(tmp_path, "fake", ids=fake, id_set="full", scope="final")
+    assert any("canonical" in p for p in verify_report(bad, check_sources=False).problems)
 
 
 REAL = ROOT / "results" / "quality_v2" / "sglang_speech_c8_tuning" / "speech_quality.json"
@@ -134,31 +157,77 @@ def test_foreign_duration_reference_rejected(tmp_path):
 
 
 # --- class R and qualification (B10) -----------------------------------------------------
+TURN = "/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn.yaml"
+MRV2 = "/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn_mrv2.yaml"
+OVERLAYS = {
+    "steps8": (MRV2, "connectors:\n  connector_of_shared_memory:\n    extra:\n      token2wav_n_timesteps: 8\n"),
+    "flow_fp16": (MRV2, "connectors:\n  connector_of_shared_memory:\n    extra:\n      token2wav_float16: true\n"),
+    "top_fp16": (TURN, "dtype: float16\n"),
+    "platform_fp16": (TURN, "platforms:\n  cuda:\n    stages:\n      - stage_id: 0\n        dtype: float16\n"),
+    "top_fp8": (TURN, "quantization: fp8\n"),
+    "first_chunk": (TURN, "connectors:\n  connector_of_shared_memory:\n    extra:\n      initial_codec_chunk_frames: 5\n"),
+    "left_context": (TURN, "connectors:\n  connector_of_shared_memory:\n    extra:\n      codec_left_context_frames: 0\n"),
+}
+
+
 def test_class_r_from_resolved_semantics(tmp_path):
-    base = {"adapter": "vllm-omni", "extra": [], "env": [], "mps": "off"}
-    assert class_r({**base, "config": "minicpmo_4_5_turn_mrv2.yaml"}, True).is_class_r
-    absolute = "/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5.yaml"
-    assert not class_r({**base, "config": absolute}, True).is_class_r  # default duplex by absolute path
+    from bench.cli import make_candidate
+    from bench.semantics import resolve_vllm_configs
+
+    def ident(config, **kw):
+        c = make_candidate({"adapter": "vllm-omni", "config": config, "mps": kw.pop("mps", "off"), **kw})
+        return {**c.identity(), "candidate_id": c.candidate_id, "digest": c.digest}
+
+    paths = {}
+    for name, (base, body) in OVERLAYS.items():
+        paths[name] = tmp_path / f"{name}.yaml"
+        paths[name].write_text(f"base_config: {base}\n{body}")
     renamed = tmp_path / "my_turn_profile.yaml"
-    shutil.copy(absolute, renamed)
-    assert not class_r({**base, "config": str(renamed)}, True).is_class_r  # renamed duplex
-    steps = tmp_path / "steps8.yaml"
-    steps.write_text(f"base_config: /workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn_mrv2.yaml\n"
-                     "connectors:\n  connector_of_shared_memory:\n    extra:\n      token2wav_n_timesteps: 8\n")
-    assert not class_r({**base, "config": str(steps)}, True).is_class_r
-    fp16 = tmp_path / "fp16.yaml"
-    fp16.write_text(f"base_config: /workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn_mrv2.yaml\n"
-                    "connectors:\n  connector_of_shared_memory:\n    extra:\n      token2wav_float16: true\n")
-    assert not class_r({**base, "config": str(fp16)}, True).is_class_r
+    shutil.copy("/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5.yaml", renamed)
+    stage_env = tmp_path / "stage_env.yaml"
+    stage_env.write_text(f"base_config: {TURN}\nstages:\n  - stage_id: 2\n    env:\n      MINICPMO_CODE2WAV_TF32: \"0\"\n")
+    absolute = "/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5.yaml"
+    resolve_vllm_configs(["minicpmo_4_5_turn_mrv2.yaml", absolute, str(renamed), str(stage_env)] + [str(p) for p in paths.values()])
+    assert class_r(ident("minicpmo_4_5_turn_mrv2.yaml"), True).is_class_r
+    assert not class_r(ident(absolute), True).is_class_r  # default duplex by absolute path
+    assert not class_r(ident(str(renamed)), True).is_class_r  # renamed duplex
+    for name, p in paths.items():  # resolved precision, quantization, steps and stream geometry overrides are never reference
+        assert not class_r(ident(str(p)), True).is_class_r, name
+    for kw in ({"extra": ["--quantization", "fp8"]}, {"env": {"MINICPMO_CODE2WAV_TF32": "0"}}, {"env": {"ANY_UNKNOWN": "1"}}, {"mps": "on"}):
+        with pytest.raises(SemanticsUnknown):
+            class_r(ident("minicpmo_4_5_turn_mrv2.yaml", **kw), True)
+    with pytest.raises(SemanticsUnknown):  # stage environment that reaches a worker
+        class_r(ident(str(stage_env)), True)
+    measured = ident(str(paths["top_fp16"]))
+    paths["top_fp16"].write_text(f"base_config: {TURN}\n")  # today's bytes differ from the measured candidate's
     with pytest.raises(SemanticsUnknown):
-        class_r({**base, "config": "minicpmo_4_5_turn_mrv2.yaml", "extra": ["--quantization", "fp8"]}, True)
-    with pytest.raises(SemanticsUnknown):
-        class_r({**base, "config": "minicpmo_4_5_turn_mrv2.yaml", "env": [["MINICPMO_CODE2WAV_TF32", "0"]]}, True)
-    with pytest.raises(SemanticsUnknown):  # declared MPS must match the launch
-        class_r({**base, "config": "minicpmo_4_5_turn_mrv2.yaml", "mps": "on"}, True)
+        class_r(measured, True)
 
 
-def test_qualification_recomputed_and_stale_records_rejected(tmp_path):
+def test_effective_inputs_bound_to_their_execution(tmp_path, eff):
+    import json as _json
+
+    from bench.effective_inputs import verify_provenance
+
+    model = {"repo": "openbmb/MiniCPM-o-4_5", "revision": "503e754207c94da6bb26850b4469f367c9ea3582"}
+    from bench.effective_inputs import STACK_REPOS
+    from bench.fingerprint import repo_fingerprint
+
+    repo = repo_fingerprint(STACK_REPOS["vllm-omni"])
+    assert verify_provenance(eff / "vllm-omni.jsonl", "vllm-omni", model, repo) == []
+    assert verify_provenance(eff / "vllm-omni.jsonl", "sglang-omni", model, repo)  # another stack's execution
+    assert verify_provenance(eff / "vllm-omni.jsonl", "vllm-omni", {**model, "revision": "x"}, repo)
+    assert verify_provenance(eff / "vllm-omni.jsonl", "vllm-omni", model, {**repo, "commit": "0" * 40})
+    prov = eff / "vllm-omni.provenance.json"
+    doc = _json.loads(prov.read_text())
+    doc["code_sha256"]["bench/workload.py"] = "0" * 64
+    prov.write_text(_json.dumps(doc))
+    assert verify_provenance(eff / "vllm-omni.jsonl", "vllm-omni", model, repo)
+    (eff / "sglang-omni.provenance.json").unlink()
+    assert verify_provenance(eff / "sglang-omni.jsonl", "sglang-omni", model, None)
+
+
+def test_qualification_recomputed_and_stale_records_rejected(tmp_path, eff):
     rep = report(tmp_path, "good")
     qp, rec = qual(tmp_path, rep)
     assert rec["qualified"] and rec["effective_inputs_eligible"]
@@ -176,13 +245,13 @@ def test_qualification_recomputed_and_stale_records_rejected(tmp_path):
     bad.write_text(json.dumps(q))
     with pytest.raises(QRefError):
         verify_qualification(str(bad), check_sources=False)
-    duplex = dict(SGL, adapter="vllm-omni", config="minicpmo_4_5.yaml")
+    duplex = _cand("vllm-omni", "minicpmo_4_5.yaml")
     _, rec = qual(tmp_path, report(tmp_path, "duplex", cand=duplex))
     assert not rec["qualified"]
 
 
 # --- freeze / gate --------------------------------------------------------------------------
-def test_freeze_and_gate_scope_checks(tmp_path):
+def test_freeze_and_gate_scope_checks(tmp_path, eff):
     ref = report(tmp_path, "ref")
     qp, _ = qual(tmp_path, ref)
     with pytest.raises(QRefError):
@@ -204,14 +273,9 @@ def test_freeze_and_gate_scope_checks(tmp_path):
         freeze("development", "L20X", [(other_eval, qp)], tmp_path / "q2.json", check_sources=False)
 
 
-def test_final_gate_needs_headline_and_truncation(tmp_path):
+def test_final_freeze_needs_truncation_evidence(tmp_path, eff):
     full = list(SETS.full())
     qp, _ = qual(tmp_path, report(tmp_path, "tq"))
-    ref = report(tmp_path, "fref", ids=full, id_set="full", scope="final", truncation=True)
-    with pytest.raises(QRefError):  # final references need D_ref-backed truncation in the engine report, checked at gate
-        freeze("final", "L20X", [(report(tmp_path, "short", ids=full[:20], id_set="full", scope="final"), qp)], tmp_path / "x.json",
+    with pytest.raises(QRefError):  # final references need a verified D_ref (truncation for every row)
+        freeze("final", "L20X", [(report(tmp_path, "fref", ids=full, id_set="full", scope="final"), qp)], tmp_path / "fq.json",
                check_sources=False)
-    freeze("final", "L20X", [(ref, qp)], tmp_path / "fq.json", check_sources=False)
-    eng = report(tmp_path, "feng", ids=full, id_set="full", scope="final", truncation=None)
-    with pytest.raises(QRefError):
-        gate(str(tmp_path / "fq.json"), eng, SGL["digest"], check_sources=False)

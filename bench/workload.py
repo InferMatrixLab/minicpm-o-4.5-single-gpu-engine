@@ -142,7 +142,7 @@ class IdSets:
         return list(self.eval_pool[:n])
 
     def full(self) -> list[str]:
-        """Every row, for full-set quality generation (AC-4.4); never a performance ID set."""
+        """Every row, for full-set quality generation; never a performance ID set."""
         return list(self.warmup_pool + self.eval_pool + self.tuning_pool)
 
     def measured(self, id_set: str, c: int) -> list[str]:

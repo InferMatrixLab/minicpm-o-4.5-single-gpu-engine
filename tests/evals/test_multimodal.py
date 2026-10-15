@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,10 @@ from evals.multimodal import suite as mm  # noqa: E402
 from evals.multimodal.sglang_mm_worker import build_payload  # noqa: E402
 
 BENCH_N = {"mmmu": 40, "mmsu": 40, "daily_omni": 40}
+EVAL = {"x": 1}
+EVAL["digest"] = hashlib.sha256(json.dumps({"x": 1}, sort_keys=True).encode()).hexdigest()
+GPU = {"gpu_index": 1, "gpu_sku": "L20X", "gpu_uuid": "GPU-1", "driver": "570", "memory_mib": "143771"}
+CONSUMED: dict = {}
 
 
 @pytest.fixture
@@ -32,15 +37,42 @@ def env(tmp_path, monkeypatch):
         per = [{"id": k, "is_correct": v == f"A:{k}", "is_success": bool(v), "raw": v} for k, v in job["responses"].items()]
         return {"per_sample": per, "accuracy": sum(p["is_correct"] for p in per) / len(per)}
 
+    def fake_consumed(subset, bench):
+        exp_doc = mm.load_expected(subset, bench)
+        if CONSUMED.get((subset, bench), exp_doc["items"]) != exp_doc["items"]:
+            raise mm.EvidenceError(f"{bench}/{subset}: consumed data differs from the frozen manifest")
+        return exp_doc
+
+    CONSUMED.clear()
     monkeypatch.setattr(mm, "_worker", fake_worker)
+    monkeypatch.setattr(mm, "check_consumed", fake_consumed)
+    monkeypatch.setattr(mm, "verify_mm_evaluator", lambda: EVAL)
     return tmp_path
 
 
-def make_report(d, *, acc=0.9, scope="development", subset="full", benches=mm.BENCHES, mps="off", observed="off", digest="H", n=None):
+def candidate(label="base", mps="off"):
+    from bench.experiment import Candidate
+
+    c = Candidate.from_spec({"adapter": "vllm-omni", "config": f"{label}.yaml", "label": label, "mps": mps}, ("fake",))
+    return c, {**c.identity(), "candidate_id": c.candidate_id, "digest": c.digest, "label": label}
+
+
+def digest_of(label):
+    return candidate(label)[1]["digest"]
+
+
+def make_report(d, *, acc=0.9, scope="development", subset="full", benches=mm.BENCHES, mps="off", observed="off", label="base", n=None,
+                started=None):
+    from bench.cli import server_spec
+
     d.mkdir(parents=True, exist_ok=True)
-    rep = {"scope": scope, "subset": subset, "concurrency": 16, "candidate": {"digest": digest, "candidate_id": f"c:{digest}", "mps": mps},
-           "gpu": {"gpu_sku": "L20X", "gpu_uuid": "GPU-1", "driver": "570"}, "evaluator": {"digest": "E"}, "benches": {},
-           "server_evidence": {"mps": {"observed": observed}, "gpu": {"gpu_uuid": "GPU-1"}}}
+    c, cd = candidate(label, mps)
+    gen = {"candidate": cd, "model": {"repo": "openbmb/MiniCPM-o-4_5", "revision": "r"}, "fingerprints": {}, "adapter_python": "py", "repos_checked": [],
+           "port": 18101, "hardware": dict(GPU), "requests": {b: mm.request_policy("vllm-omni", b, 16) for b in benches}, "evaluator_digest": EVAL["digest"]}
+    gen["digest"] = hashlib.sha256(json.dumps(gen, sort_keys=True).encode()).hexdigest()
+    rep = {"scope": scope, "subset": subset, "concurrency": 16, "candidate": cd, "generation": gen, "gpu": dict(GPU), "evaluator": EVAL,
+           "started_unix": started if started is not None else time.time(), "benches": {},
+           "server_evidence": {"mps": {"observed": observed}, "gpu": dict(GPU), "launch_argv": server_spec(c, 18101, 1).cmd, "launch_env": {}}}
     for b in benches:
         k = n if n is not None else BENCH_N[b]
         good = int(round(acc * k))
@@ -53,13 +85,18 @@ def make_report(d, *, acc=0.9, scope="development", subset="full", benches=mm.BE
     return d
 
 
+def edit(d, fn):
+    rep = json.loads((d / "report.json").read_text())
+    fn(rep)
+    (d / "report.json").write_text(json.dumps(rep))
+    return d
+
+
 def test_verified_report_and_tampering(env):
     d = make_report(env / "r")
     _, derived, problems = mm.verify_mm_report(d)
     assert not problems and all(v["coverage"]["complete"] for v in derived.values())
-    rep = json.loads((d / "report.json").read_text())
-    rep["benches"]["mmmu"]["accuracy"] = 0.99
-    (d / "report.json").write_text(json.dumps(rep))
+    edit(d, lambda r: r["benches"]["mmmu"].update(accuracy=0.99))
     assert any("accuracy" in p for p in mm.verify_mm_report(d)[2])
     d2 = make_report(env / "r2")
     (d2 / "mmsu.per_sample.jsonl").unlink()
@@ -68,6 +105,32 @@ def test_verified_report_and_tampering(env):
     side = d3 / "daily_omni.per_sample.jsonl"
     side.write_text(side.read_text().replace('"raw": "B"', '"raw": "C"', 1))
     assert any("sidecar" in p for p in mm.verify_mm_report(d3)[2])
+
+
+@pytest.mark.parametrize("name,fn", [
+    ("candidate config", lambda r: (r["candidate"].update(config="other.yaml"), r["generation"]["candidate"].update(config="other.yaml"))),
+    ("candidate digest", lambda r: r["candidate"].update(digest="FOREIGN")),
+    ("gpu sku", lambda r: r["gpu"].update(gpu_sku="H200")),
+    ("gpu driver", lambda r: r["gpu"].update(driver="999")),
+    ("gpu memory", lambda r: r["gpu"].update(memory_mib="1")),
+    ("evaluator digest", lambda r: r["evaluator"].update(digest="FOREIGN")),
+    ("request policy", lambda r: r.update(concurrency=4)),
+    ("launch", lambda r: r["server_evidence"].update(launch_argv=["bash", "other.sh"])),
+])
+def test_identity_relabelling_rejected(env, name, fn):
+    d = edit(make_report(env / name.replace(" ", "_")), fn)
+    assert mm.verify_mm_report(d)[2], name
+
+
+def test_rescorer_and_content_must_match_the_recorded_evaluator(env, monkeypatch):
+    d = make_report(env / "ev")
+    other = {"x": 2}
+    other["digest"] = hashlib.sha256(json.dumps({"x": 2}, sort_keys=True).encode()).hexdigest()
+    monkeypatch.setattr(mm, "verify_mm_evaluator", lambda: other)
+    assert any("evaluator" in p for p in mm.verify_mm_report(d)[2])
+    monkeypatch.setattr(mm, "verify_mm_evaluator", lambda: EVAL)
+    CONSUMED[("full", "mmmu")] = [[f"mmmu{i}", "changed"] for i in range(BENCH_N["mmmu"])]  # same IDs, different content
+    assert any("consumed" in p for p in mm.verify_mm_report(d)[2])
 
 
 def test_subset_and_empty_reports_are_not_complete(env):
@@ -82,67 +145,107 @@ def test_subset_and_empty_reports_are_not_complete(env):
         mm.load_expected("full", "mmmu")
 
 
-def _qual(env, monkeypatch, digest="H", qualified=True):
-    rec = {"qualified": qualified, "candidate_digest": digest, "gpu_sku": "L20X", "gpu_driver": "570"}
+def _qual(env, monkeypatch, label="base", qualified=True):
+    rec = {"qualified": qualified, "candidate_digest": digest_of(label), "gpu_sku": "L20X", "gpu_driver": "570", "gpu_memory_mib": "143771"}
     import evals.speech.qref as sq
 
-    monkeypatch.setattr(sq, "verify_qualification", lambda p, check_sources=True: rec)
-    p = env / f"q_{digest}.json"
+    monkeypatch.setattr(sq, "verify_qualification", lambda p, check_sources=True: json.loads(Path(p).read_text()))
+    p = env / f"q_{label}_{qualified}.json"
     p.write_text(json.dumps(rec))
     return str(p)
 
 
-def test_freeze_requires_verified_qualified_references(env, monkeypatch):
+def freeze(env, refs, name="qref.json", scope="final"):
+    args = SimpleNamespace(scope=scope, reference=refs, out=str(env / name))
+    assert mm.cmd_freeze(args) == 0
+    return str(env / name)
+
+
+def test_freeze_requires_verified_qualified_full_references(env, monkeypatch):
     rep = make_report(env / "base", scope="final")
     q = _qual(env, monkeypatch)
-    args = SimpleNamespace(scope="final", reference=[f"{rep}={q}"], out=str(env / "qref.json"))
-    assert mm.cmd_freeze(args) == 0
+    qref = freeze(env, [f"{rep}={q}"])
+    assert mm.verify_mm_qref(qref)["values"]["mmmu"] == 0.9
     with pytest.raises(SystemExit):  # never rewritten
-        mm.cmd_freeze(args)
-    bad = make_report(env / "bad", scope="final")
-    r = json.loads((bad / "report.json").read_text())
-    r["benches"]["mmmu"]["accuracy"] = 0.99
-    (bad / "report.json").write_text(json.dumps(r))
+        mm.cmd_freeze(SimpleNamespace(scope="final", reference=[f"{rep}={q}"], out=qref))
+    bad = edit(make_report(env / "bad", scope="final"), lambda r: r["benches"]["mmmu"].update(accuracy=0.99))
     with pytest.raises(SystemExit):
-        mm.cmd_freeze(SimpleNamespace(scope="final", reference=[f"{bad}={q}"], out=str(env / "q2.json")))
+        freeze(env, [f"{bad}={q}"], "q2.json")
     one = make_report(env / "one", scope="final", benches=("mmmu",))
     with pytest.raises(SystemExit):  # a final reference must cover every benchmark
-        mm.cmd_freeze(SimpleNamespace(scope="final", reference=[f"{one}={q}"], out=str(env / "q3.json")))
-    unq = _qual(env, monkeypatch, qualified=False)
+        freeze(env, [f"{one}={q}"], "q3.json")
     with pytest.raises(SystemExit):
-        mm.cmd_freeze(SimpleNamespace(scope="final", reference=[f"{rep}={unq}"], out=str(env / "q4.json")))
+        freeze(env, [f"{rep}={_qual(env, monkeypatch, qualified=False)}"], "q4.json")
+    dev = make_report(env / "devsub", scope="final", subset="dev")
+    with pytest.raises(SystemExit):  # a final Q_ref is frozen from the full sets
+        freeze(env, [f"{dev}={q}"], "q5.json")
+    with pytest.raises(SystemExit):
+        freeze(env, [], "q6.json")
 
 
 def test_certification_rules(env, monkeypatch):
-    base = make_report(env / "base", scope="final", acc=0.9)
-    q = _qual(env, monkeypatch)
-    mm.cmd_freeze(SimpleNamespace(scope="final", reference=[f"{base}={q}"], out=str(env / "qref.json")))
-    qref = str(env / "qref.json")
-    eng = make_report(env / "eng", scope="final", acc=0.9, digest="ENG")
-    assert mm.certify(str(eng), qref, "ENG")["certified"]
-    assert not mm.certify(str(eng), qref, "OTHER")["certified"]  # wrong headline
+    base = make_report(env / "base", scope="final", acc=0.9, started=1.0)
+    qref = freeze(env, [f"{base}={_qual(env, monkeypatch)}"])
+    eng = make_report(env / "eng", scope="final", acc=0.9, label="eng")
+    assert mm.certify(str(eng), qref, digest_of("eng"))["certified"]
+    assert not mm.certify(str(eng), qref, digest_of("other"))["certified"]  # wrong headline
     assert not mm.certify(str(eng), qref, None)["certified"]
-    low = make_report(env / "low", scope="final", acc=0.85, digest="ENG")
-    assert not mm.certify(str(low), qref, "ENG")["certified"]  # more than 1 pp below Q_ref
-    one = make_report(env / "eng1", scope="final", benches=("mmmu",), digest="ENG")
-    assert not mm.certify(str(one), qref, "ENG")["certified"]
-    dev = make_report(env / "dev", scope="development", digest="ENG")
-    assert not mm.certify(str(dev), qref, "ENG")["certified"]
-    mps = make_report(env / "mps", scope="final", digest="ENG", mps="on", observed="off")
-    assert not mm.certify(str(mps), qref, "ENG")["certified"]
+    low = make_report(env / "low", scope="final", acc=0.85, label="eng")
+    res = mm.certify(str(low), qref, digest_of("eng"))
+    assert not res["certified"] and all("relative" in v["failed"] for v in res["benches"].values())
+    one = make_report(env / "eng1", scope="final", benches=("mmmu",), label="eng")
+    assert not mm.certify(str(one), qref, digest_of("eng"))["certified"]
+    dev = make_report(env / "dev", scope="development", label="eng")
+    assert not mm.certify(str(dev), qref, digest_of("eng"))["certified"]
+    mps = make_report(env / "mps", scope="final", label="eng", mps="on", observed="off")
+    assert not mm.certify(str(mps), qref, digest_of("eng"))["certified"]
+    early = make_report(env / "early", scope="final", acc=0.9, label="eng", started=0.5)  # generated before the Q_ref was frozen
+    assert not mm.certify(str(early), qref, digest_of("eng"))["certified"]
     dev_ref = make_report(env / "devbase", scope="development")
-    mm.cmd_freeze(SimpleNamespace(scope="development", reference=[f"{dev_ref}={q}"], out=str(env / "qdev.json")))
-    assert not mm.certify(str(eng), str(env / "qdev.json"), "ENG")["certified"]  # development reference
+    qdev = freeze(env, [f"{dev_ref}={_qual(env, monkeypatch)}"], "qdev.json", scope="development")
+    assert not mm.certify(str(eng), qdev, digest_of("eng"))["certified"]  # development reference
+
+
+@pytest.mark.parametrize("name,fn", [
+    ("lowered values, empty references", lambda q: q.update(values={b: 0.10 for b in q["values"]}, references={})),
+    ("lowered values", lambda q: q.update(values={b: 0.85 for b in q["values"]})),
+    ("winner", lambda q: q["sources"].update(mmmu="someone")),
+    ("identity", lambda q: q["identity"]["mmmu"].update(gpu_sku="H200")),
+])
+def test_qref_rebuilt_from_its_references(env, monkeypatch, name, fn):
+    base = make_report(env / "base", scope="final", acc=0.9, started=1.0)
+    qref = freeze(env, [f"{base}={_qual(env, monkeypatch)}"])
+    low = make_report(env / "low", scope="final", acc=0.85, label="eng")
+    assert not mm.certify(str(low), qref, digest_of("eng"))["certified"]
+    q = json.loads(Path(qref).read_text())
+    fn(q)
+    Path(qref).write_text(json.dumps(q))
+    assert not mm.certify(str(low), qref, digest_of("eng"))["certified"], name
+
+
+def test_reference_sidecars_are_reverified(env, monkeypatch):
+    base = make_report(env / "base", scope="final", acc=0.9, started=1.0)
+    qref = freeze(env, [f"{base}={_qual(env, monkeypatch)}"])
+    eng = make_report(env / "eng", scope="final", acc=0.9, label="eng")
+    (base / "mmmu.per_sample.jsonl").unlink()
+    assert not mm.certify(str(eng), qref, digest_of("eng"))["certified"]
 
 
 def test_calibrated_shuffle_fixture(env):
     d = make_report(env / "clean", acc=0.9)
-    args = SimpleNamespace(report=str(d), out=str(env / "cal"))
-    assert mm.cmd_calibrate(args) == 0
+    assert mm.cmd_calibrate(SimpleNamespace(report=str(d), out=str(env / "cal"))) == 0
     cal = json.loads((env / "cal" / "calibration.json").read_text())
     for b, v in cal["benches"].items():
         assert v["selected"]["drop"] >= v["required_drop"] and v["rejected"]
-        assert Path(v["selected"]["fixture"]).exists()
+        assert v["clean_control"]["checks"]["relative"] and "relative" in v["selected"]["verdict"]["failed"]
+        assert Path(v["selected"]["fixture"], "report.json").exists()
+
+
+def test_calibration_fails_when_the_production_gate_is_disabled(env, monkeypatch):
+    d = make_report(env / "clean", acc=0.9)
+    real = mm.compare_bench
+    monkeypatch.setattr(mm, "compare_bench", lambda *a: {**real(*a), "passed": True, "failed": [], "checks": {k: True for k in real(*a)["checks"]}})
+    assert mm.cmd_calibrate(SimpleNamespace(report=str(d), out=str(env / "cal"))) == 1
 
 
 def test_request_formats_place_media_before_text(tmp_path):
