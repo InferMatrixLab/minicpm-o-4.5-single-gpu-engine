@@ -292,4 +292,8 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # ``python -m engine.server`` runs this file as ``__main__``; backends import ``engine.server``, whose event classes
+    # would then differ from these (isinstance checks fail and every event is dropped).  Run the imported module.
+    from engine.server import main as _main
+
+    raise SystemExit(_main())
