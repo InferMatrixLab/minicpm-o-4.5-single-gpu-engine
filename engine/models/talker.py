@@ -101,7 +101,8 @@ class Talker:
         self.cfg = cfg
         self.w = weights
         g, v = weights["head_code.0.parametrizations.weight.original0"], weights["head_code.0.parametrizations.weight.original1"]
-        self.head = (g.float() * v.float() / v.float().norm(dim=1, keepdim=True)).to(v.dtype)
+        # exactly what the weight_norm parametrization evaluates (torch._weight_norm in the parameters' dtype)
+        self.head = torch._weight_norm(v, g, 0)
 
     @classmethod
     def load(cls, model_dir: str | Path, device="cpu", dtype=torch.bfloat16) -> "Talker":
