@@ -64,6 +64,7 @@ class Live:
     cancelled: bool = False
     finished: bool = False
     pending_prefill: bool = True
+    prompt_embeds: torch.Tensor | None = None
 
     def emit(self, ev) -> None:
         self.loop.call_soon_threadsafe(self.out.put_nowait, ev)
@@ -91,6 +92,9 @@ class EngineBackend:
         self.trun = DecoderRunner(self.thinker.w, self.tspec, self.tkv)
         self.arun = DecoderRunner(self.talker.w, self.aspec, self.akv)
         self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow)
+        from engine.models.multimodal import MultimodalFrontend
+
+        self.frontend = MultimodalFrontend(model_dir, device=device)
         self.device, self.max_live = device, max_live
         self._DecodeState, self._TalkerSampling = DecodeState, TalkerSampling
         self.inbox: queue.Queue = queue.Queue()
@@ -107,23 +111,29 @@ class EngineBackend:
         return cls(**(json.loads(Path(path).read_text()) if path else {}))
 
     # --- request side ----------------------------------------------------------------------------
-    def _prompt(self, req: EngineRequest) -> list[int]:
-        for m in req.messages:
-            if isinstance(m["content"], list) and any(p["type"] != "text" for p in m["content"]):
-                raise BadRequest("this engine build serves text and voice-prompt requests; media parts arrive with the encoders")
-        msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else "".join(p["text"] for p in m["content"])}
-                for m in req.messages]
+    def _prompt(self, req: EngineRequest) -> tuple[list[int], torch.Tensor | None]:
+        """Prompt token IDs, and the Thinker input embeddings when the request carries media (None for text-only prompts)."""
         kw = {"use_tts_template": True, "enable_thinking": False, **req.chat_template_kwargs}
-        return self.tok(self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, **kw))["input_ids"]
+        if not any(isinstance(m["content"], list) and any(p["type"] != "text" for p in m["content"]) for m in req.messages):
+            msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else "".join(p["text"] for p in m["content"])}
+                    for m in req.messages]
+            return self.tok(self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, **kw))["input_ids"], None
+        from engine.media import parts_to_native
+
+        msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else parts_to_native(m["content"])} for m in req.messages]
+        with self._lock:
+            inputs = self.frontend.build_prompt(msgs, use_tts_template=kw["use_tts_template"], enable_thinking=kw["enable_thinking"])
+            emb = self.frontend.embed(inputs)
+        return inputs["input_ids"][0].tolist(), emb
 
     async def generate(self, req: EngineRequest):
-        prompt = self._prompt(req)
+        prompt, embeds = await asyncio.to_thread(self._prompt, req)
         with self._lock:
             if len(self.live) + self.inbox.qsize() >= self.max_live:
                 raise Overloaded(f"{self.max_live} live requests")
             seq = self._next
             self._next += 1
-        lv = Live(req=req, out=asyncio.Queue(), loop=asyncio.get_running_loop(), prompt_ids=prompt, seq=seq)
+        lv = Live(req=req, out=asyncio.Queue(), loop=asyncio.get_running_loop(), prompt_ids=prompt, seq=seq, prompt_embeds=embeds)
         self.inbox.put(lv)
         try:
             while True:
@@ -178,8 +188,13 @@ class EngineBackend:
             return
         feeds = [lv.prompt_ids if lv.pending_prefill else [lv.generated[-1]] for lv in rows]
         lay = self.tkv.layout([lv.seq for lv in rows], [len(f) for f in feeds])
-        ids = torch.tensor([t for f in feeds for t in f], device=self.device)
-        hidden = self.trun.forward(self.thinker.embed(ids), lay)
+        embs = []
+        for lv, f in zip(rows, feeds):
+            if lv.pending_prefill and lv.prompt_embeds is not None:
+                embs.append(lv.prompt_embeds.to(self.thinker.dtype))  # media states already scattered into the placeholders
+            else:
+                embs.append(self.thinker.embed(torch.tensor(f, device=self.device)))
+        hidden = self.trun.forward(torch.cat(embs), lay)
         last = hidden[lay.last_token_index]
         nxt = torch.nn.functional.linear(last, self.thinker.w["lm_head.weight"]).float().argmax(-1).tolist()
         for lv, h, tok in zip(rows, last, nxt):
