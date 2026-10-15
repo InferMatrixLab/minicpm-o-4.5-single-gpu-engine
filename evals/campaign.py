@@ -66,10 +66,35 @@ def rerun_spec(i: int, rerun: dict) -> dict:
     return spec
 
 
+#: Candidates that failed tuning qualification (UTMOS floor, campaign_qualification.json); they are measured no further.
+NOT_QUALIFIED = (("vllm-omni", "minicpmo_4_5_turn_mrv2", "mps-on"), ("vllm-omni", "minicpmo_4_5_turn_mrv2_h200", "mps-off"))
+TUNE_K = 2
+#: Each concurrency is measured on one device so the per-C winner comparison never crosses devices.
+TUNE_LANES = ({"gpu": 1, "port": 18510, "concurrencies": [1, 32]}, {"gpu": 2, "port": 18520, "concurrencies": [2, 16]},
+              {"gpu": 3, "port": 18530, "concurrencies": [4, 8]})
+CONCURRENCIES = (1, 2, 4, 8, 16, 32)
+
+
+def candidate_key(c: dict) -> tuple:
+    return (c["adapter"], Path(c["config"]).stem.removesuffix("_mps"), c["label"])
+
+
+def tuning_candidates() -> list[dict]:
+    return [c for c in candidates() if candidate_key(c) not in NOT_QUALIFIED]
+
+
+def tune_spec(lane: dict) -> dict:
+    return {"description": f"L20X tuning performance (winner selection), GPU {lane['gpu']}", "kind": "performance", "id_set": "tuning",
+            "seed_index": 0, "gpu": lane["gpu"], "port": lane["port"], "k": TUNE_K, "run_order_seed": RUN_ORDER_SEED + 100 + lane["gpu"],
+            "timeout_s": 180, "save_audio": True, "concurrencies": lane["concurrencies"], "configs": tuning_candidates()}
+
+
 def all_specs() -> dict[str, dict]:
     out = {f"qualify_seed{s['seed_index']}.json": sweep_spec(s) for s in SEEDS}
     for i, r in enumerate(RERUNS, 1):
         out[f"qualify_seed{r['seed_index']}_rerun{i}.json"] = rerun_spec(i, r)
+    for lane in TUNE_LANES:
+        out[f"tune_gpu{lane['gpu']}.json"] = tune_spec(lane)
     return out
 
 

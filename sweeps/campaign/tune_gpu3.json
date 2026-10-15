@@ -1,0 +1,66 @@
+{
+ "description": "L20X tuning performance (winner selection), GPU 3",
+ "kind": "performance",
+ "id_set": "tuning",
+ "seed_index": 0,
+ "gpu": 3,
+ "port": 18530,
+ "k": 2,
+ "run_order_seed": 20261118,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  4,
+  8
+ ],
+ "configs": [
+  {
+   "adapter": "vllm-omni",
+   "config": "minicpmo_4_5_turn.yaml",
+   "label": "mps-off",
+   "mps": "off"
+  },
+  {
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mps.yaml",
+   "label": "mps-on",
+   "mps": "on"
+  },
+  {
+   "adapter": "vllm-omni",
+   "config": "minicpmo_4_5_turn_mrv2.yaml",
+   "label": "mps-off",
+   "mps": "off"
+  },
+  {
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mrv2_h200_mps.yaml",
+   "label": "mps-on",
+   "mps": "on"
+  },
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-off",
+   "mps": "off"
+  },
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-on",
+   "mps": "on",
+   "env": {
+    "OMNI_SGLANG_MPS": "1"
+   }
+  },
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mm32k",
+   "mps": "off",
+   "env": {
+    "OMNI_SGLANG_MAX_SEQ": "32768"
+   }
+  }
+ ]
+}
