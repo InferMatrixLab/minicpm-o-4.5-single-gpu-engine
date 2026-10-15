@@ -99,6 +99,7 @@ class TrackSBackend:
                  t2w_graphs: bool = False, t2w_compile: bool = False, spk_threads: int = 8, t2w_min_batch: int = 8, t2w_max_wait_ms: float = 40.0,
                  switch_interval_s: float = 0.0002, first_chunk: int = 25, t2w_process: bool = False, feature_workers: int = 4,
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
+                 feature_processes: int = 0,
                  profile: bool = False):
         from transformers import AutoTokenizer
 
@@ -143,7 +144,7 @@ class TrackSBackend:
             self.t2wp = Token2WavProcess({"model_dir": str(model_dir), "float16_flow": float16_flow, "t2w_graphs": t2w_graphs,
                                           "t2w_compile": t2w_compile, "spk_threads": spk_threads, "t2w_min_batch": t2w_min_batch,
                                           "t2w_max_wait_ms": t2w_max_wait_ms, "feature_workers": feature_workers,
-                                          "profile_path": t2w_profile_path}, self._on_t2w)
+                                          "profile_path": t2w_profile_path, "feature_processes": feature_processes}, self._on_t2w)
         else:
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
             self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile)

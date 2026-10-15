@@ -23,6 +23,44 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 
+_FEAT = None  # per feature process: an object with what ``Token2wav._prepare_prompt`` reads
+
+
+def _feat_init(model_dir: str, spk_threads: int) -> None:
+    """Feature-process initializer: the S3 tokenizer (GPU) and CAMPPlus (CPU ONNX) only, no flow."""
+    import types
+
+    import onnxruntime
+    import s3tokenizer
+
+    global _FEAT
+    h = types.SimpleNamespace()
+    h.audio_tokenizer = s3tokenizer.load_model(f"{model_dir}/assets/token2wav/speech_tokenizer_v2_25hz.onnx").cuda().eval()
+    opt = onnxruntime.SessionOptions()
+    opt.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opt.intra_op_num_threads = spk_threads
+    h.spk_model = onnxruntime.InferenceSession(f"{model_dir}/assets/token2wav/campplus.onnx", sess_options=opt, providers=["CPUExecutionProvider"])
+    h.flow = types.SimpleNamespace(up_rate=2)  # the flow's token-to-mel rate (flow.yaml), all _prepare_prompt reads of it
+    _FEAT = h
+
+
+def _feat_job(ref: bytes):
+    """``Token2Wav.features`` in a feature process; tensors come back on the CPU."""
+    import io
+    import tempfile
+
+    import librosa
+    import soundfile as sf
+    import torch
+    from stepaudio2.token2wav import Token2wav
+
+    wav16, _ = librosa.load(io.BytesIO(ref), sr=16000, mono=True)
+    with tempfile.NamedTemporaryFile(suffix=".wav") as f, torch.inference_mode():
+        sf.write(f.name, wav16, 16000)  # PCM_16, as in init_token2wav_cache
+        out = Token2wav._prepare_prompt(_FEAT, f.name)
+    return tuple(x.cpu() for x in out)
+
+
 @dataclass
 class _Req:
     seq: int
@@ -47,7 +85,16 @@ def worker_main(inq, outq, cfg: dict) -> None:
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             bt.capture_graphs(bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav")))
-    pool = ThreadPoolExecutor(cfg.get("feature_workers", 4), thread_name_prefix="t2w-features")
+    if cfg.get("feature_processes", 0):  # features in their own processes (own GILs): parallel under load
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+
+        pool = ProcessPoolExecutor(cfg["feature_processes"], mp_context=mp.get_context("spawn"), initializer=_feat_init,
+                                   initargs=(model_dir, cfg.get("spk_threads", 8)))
+        for f in [pool.submit(_feat_job, open(f"{model_dir}/assets/HT_ref_audio.wav", "rb").read()) for _ in range(cfg["feature_processes"])]:
+            f.result()  # warm every process
+    else:
+        pool = ThreadPoolExecutor(cfg.get("feature_workers", 4), thread_name_prefix="t2w-features")
     min_batch, max_wait = cfg.get("t2w_min_batch", 8), cfg.get("t2w_max_wait_ms", 40.0) / 1000
     reqs: dict[int, _Req] = {}
     wake = threading.Event()
@@ -88,7 +135,12 @@ def worker_main(inq, outq, cfg: dict) -> None:
                 return
             if kind == "open":
                 _, seq, ref, seed = m
-                reqs[seq] = _Req(seq, seed, features=pool.submit(feats, ref))
+                if cfg.get("feature_processes", 0):
+                    fut = pool.submit(_feat_job, ref)
+                    fut.add_done_callback(lambda _f: wake.set())
+                else:
+                    fut = pool.submit(feats, ref)
+                reqs[seq] = _Req(seq, seed, features=fut)
             elif kind == "window":
                 _, seq, tokens, last, index = m
                 if seq in reqs:
@@ -102,7 +154,7 @@ def worker_main(inq, outq, cfg: dict) -> None:
             groups: dict[int, list] = {}
             for r in todo:
                 try:
-                    f = r.features.result()
+                    f = tuple(x.cuda(non_blocking=True) if x.device.type == "cpu" else x for x in r.features.result())
                 except Exception as e:
                     outq.put(("error", r.seq, f"reference audio: {type(e).__name__}: {e}"))
                     reqs.pop(r.seq, None)
@@ -165,9 +217,23 @@ class Token2WavProcess:
 
         ctx = mp.get_context("spawn")
         self.inq, self.outq = ctx.Queue(), ctx.Queue()
-        self.proc = ctx.Process(target=worker_main, args=(self.inq, self.outq, cfg), daemon=True, name="token2wav-worker")
+        # not daemonic: the worker starts its own feature processes; an exit hook stops it with the engine
+        self.proc = ctx.Process(target=worker_main, args=(self.inq, self.outq, cfg), daemon=False, name="token2wav-worker")
         self.proc.start()
-        first = self.outq.get(timeout=1800)
+        import atexit
+
+        atexit.register(self.close)
+        deadline = time.time() + 1800
+        while True:  # wait for "ready", but fail at once if the worker dies during start-up
+            try:
+                first = self.outq.get(timeout=5)
+                break
+            except queue.Empty:
+                if not self.proc.is_alive():
+                    raise RuntimeError(f"token2wav worker exited during start-up (code {self.proc.exitcode})")
+                if time.time() > deadline:
+                    self.proc.kill()
+                    raise RuntimeError("token2wav worker start-up timed out")
         if first != ("ready",):
             raise RuntimeError(f"token2wav worker failed to start: {first}")
         self.on_message = on_message
