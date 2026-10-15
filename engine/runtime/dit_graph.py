@@ -340,7 +340,7 @@ class EulerGraphs:
     Padded cache positions may hold stale finite values: they are masked.
     """
 
-    MEM_ROWS = {512: 64, 1024: 32}  # largest rows per cache bucket (arena memory)
+    MEM_ROWS = {512: 16, 1024: 8}  # largest rows per cache bucket (arena memory; larger batches use the per-step graphs)
 
     def __init__(self, cfm, est_fn, dtype, autocast_dtype, steps: int, graph_t=STEADY_T):
         self.cfm, self.est, self.est_fn = cfm, cfm.estimator, est_fn
