@@ -7,6 +7,7 @@
     python -m evals.campaign stage-specs --winners results/l20x/campaign/winners.json [--check]
     python -m evals.campaign envelope --winners W.json --sweep EVAL_DIR [--sweep ...] --out results/l20x/campaign/envelope.json
     python -m evals.campaign dref --winners W.json --role guard|truncation --sweep DIR [...] --out-dir results/l20x/campaign/dref
+    python -m evals.campaign fullq-score --sweep FULLQ_DIR [...] --concurrency 32 --d-ref DREF.json --gpu 2 --out-dir results/l20x/campaign/fullq_scored
 
 ``specs`` generates the sweeps that do not depend on measured results: one
 tuning-quality qualification sweep per seed (every baseline candidate in
@@ -651,6 +652,45 @@ def cmd_dref(a) -> int:
 DREF_SEEDS = {"guard": [0], "truncation": [0, 1, 2]}
 
 
+def cmd_fullq_score(a) -> int:
+    """Score every candidate's three full-set seeds at one C with that C's verified truncation D_ref (final scope)."""
+    inv, chosen, failed = select_cells(a.sweep)
+    out = Path(a.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    log = out / "fullq_score.log"
+    digests = sorted({dg for (dg, s, c) in inv if c == a.concurrency})
+    rc = 0
+    for dg in digests:
+        cells = [chosen.get((dg, s, a.concurrency)) for s in range(SEEDS_REQUIRED)]
+        cid = inv[(dg, 0, a.concurrency)]["candidate_id"] if (dg, 0, a.concurrency) in inv else dg
+        if any(c is None for c in cells):
+            print(f"{cid}: incomplete full-set seeds {[s for s, c in enumerate(cells) if c is None]}; failed attempts {failed.get(dg, [])[:2]}")
+            rc = 1
+            continue
+        cand = cells[0]["spec"]["candidate"]
+        dst = out / f"{_slug(cand)}_c{a.concurrency}.json"
+        if dst.exists():
+            from evals.speech.verify_report import ReportError, verify_report
+
+            try:
+                vr = verify_report(dst)
+                if vr.ok and not report_join_problems(vr, cand, {s: c["cell"] for s, c in enumerate(cells)}):
+                    print(f"{cid}: verified report exists, reused")
+                    continue
+            except ReportError:
+                pass
+            dst.unlink()
+        cmd = [sys.executable, "-m", "evals.speech.suite", "score", "--scope", "final", "--gpu", str(a.gpu), "--out", str(dst), "--d-ref", a.d_ref]
+        for c in cells:
+            cmd += ["--cell", c["cell"]]
+        if _run(cmd, log) != 0:
+            print(f"{cid}: scoring failed (see {log})")
+            rc = 1
+        else:
+            print(f"{cid}: scored -> {dst}")
+    return rc
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="evals.campaign")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -678,8 +718,14 @@ def main(argv=None) -> int:
     dr.add_argument("--role", choices=sorted(DREF_SEEDS), required=True)
     dr.add_argument("--sweep", action="append", required=True)
     dr.add_argument("--out-dir", required=True)
+    fq = sub.add_parser("fullq-score")
+    fq.add_argument("--sweep", action="append", required=True)
+    fq.add_argument("--concurrency", type=int, required=True)
+    fq.add_argument("--d-ref", required=True)
+    fq.add_argument("--gpu", type=int, required=True)
+    fq.add_argument("--out-dir", required=True)
     a = ap.parse_args(argv)
-    return {"specs": cmd_specs, "classify": cmd_classify, "qualify": cmd_qualify, "select": cmd_select, "stage-specs": cmd_stage_specs,
+    return {"fullq-score": cmd_fullq_score, "specs": cmd_specs, "classify": cmd_classify, "qualify": cmd_qualify, "select": cmd_select, "stage-specs": cmd_stage_specs,
             "envelope": cmd_envelope, "dref": cmd_dref}[a.cmd](a)
 
 
