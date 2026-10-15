@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
+from engine.runtime.fp8 import linear
+
 
 @dataclass(frozen=True)
 class DecoderSpec:
@@ -152,13 +154,15 @@ def hf_rope(q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, theta: fl
 
 
 class DecoderRunner:
-    def __init__(self, weights: dict[str, torch.Tensor], spec: DecoderSpec, kv: PagedKV, workspace_mb: int = 256, numerics: str = "hf"):
-        """``numerics="hf"`` rounds norms and RoPE as the reference does; ``"fused"`` uses FlashInfer's fused kernels."""
+    def __init__(self, weights: dict[str, torch.Tensor], spec: DecoderSpec, kv: PagedKV, workspace_mb: int = 256, numerics: str = "hf",
+                 layers: list[dict] | None = None):
+        """``numerics="hf"`` rounds norms and RoPE as the reference does; ``"fused"`` uses FlashInfer's fused kernels.
+        ``layers``: prebuilt fused (optionally FP8, ``engine.runtime.fp8``) layer weights shared with other runners."""
         import flashinfer
 
         self.numerics = numerics
         self.spec, self.kv = spec, kv
-        self.layers = fuse_weights(weights, spec)
+        self.layers = layers if layers is not None else fuse_weights(weights, spec)
         self.final_norm = weights[f"{spec.prefix}norm.weight"]
         self.workspace = torch.empty(workspace_mb << 20, dtype=torch.uint8, device=kv.k.device)
         self.prefill = flashinfer.BatchPrefillWithPagedKVCacheWrapper(self.workspace, "NHD")
@@ -179,7 +183,7 @@ class DecoderRunner:
         tables = hf_rope_tables(lay.positions, s.head_dim, s.rope_theta, x.dtype) if hf else None  # once for all layers
         for i, L in enumerate(self.layers):
             h = norm(x, L["ln1"])
-            qkv = F.linear(h, L["qkv"])
+            qkv = linear(h, L["qkv"])
             q = qkv[:, :nq].reshape(-1, s.num_heads, s.head_dim)
             k = qkv[:, nq:nq + nk].reshape(-1, s.num_kv_heads, s.head_dim)
             v = qkv[:, nq + nk:].reshape(-1, s.num_kv_heads, s.head_dim)
@@ -195,9 +199,9 @@ class DecoderRunner:
             fi.append_paged_kv_cache(k, v.contiguous(), lay.batch_indices, lay.positions, (self.kv.k[i], self.kv.v[i]), lay.kv_indices,
                                      lay.kv_indptr, lay.kv_last_page_len)
             a = self.prefill.run(q, (self.kv.k[i], self.kv.v[i]))
-            x = x + F.linear(a.reshape(-1, nq), L["o"])
+            x = x + linear(a.reshape(-1, nq), L["o"])
             h = norm(x, L["ln2"])
-            gu = F.linear(h, L["gate_up"])
+            gu = linear(h, L["gate_up"])
             g, u = gu.chunk(2, dim=-1)
-            x = x + F.linear(F.silu(g) * u, L["down"])
+            x = x + linear(F.silu(g) * u, L["down"])
         return norm(x, self.final_norm)

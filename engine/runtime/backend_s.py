@@ -100,7 +100,7 @@ class TrackSBackend:
                  t2w_graphs: bool = False, t2w_compile: bool = False, spk_threads: int = 8, t2w_min_batch: int = 8, t2w_max_wait_ms: float = 40.0,
                  switch_interval_s: float = 0.0002, first_chunk: int = 25, t2w_process: bool = False, feature_workers: int = 4,
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
-                 feature_processes: int = 0,
+                 feature_processes: int = 0, thinker_fp8: bool = False,
                  profile: bool = False):
         from transformers import AutoTokenizer
 
@@ -128,11 +128,17 @@ class TrackSBackend:
         # larger pages mean fewer FlashInfer re-plans in the graph decoders (a plan is redone when a row starts a page)
         self.tkv = PagedKV(self.tspec, thinker_pages, thinker_page_size or page_size, device=device)
         self.akv = PagedKV(self.aspec, talker_pages, talker_page_size or page_size, device=device)
-        self.trun = DecoderRunner(self.thinker.w, self.tspec, self.tkv)
+        from engine.runtime.fp8 import quantize_layers
+        from engine.runtime.paged import fuse_weights
+
+        tlayers = fuse_weights(self.thinker.w, self.tspec)  # one fused copy shared by prefill and graph decode
+        if thinker_fp8:  # approved approximation, qualified by AC-3.7
+            tlayers = quantize_layers(tlayers)
+        self.trun = DecoderRunner(self.thinker.w, self.tspec, self.tkv, layers=tlayers)
         self.arun = DecoderRunner(self.talker.w, self.aspec, self.akv)
         # Track S sampling: the canonical warpers, no minimum length, no global maximum (HF streaming path)
         self.cfg = TalkerSampling(min_new_tokens=0, max_new_tokens=1 << 30)
-        self.tdec = ThinkerDecoder(self.thinker, self.tkv, self.tspec, use_graphs=use_graphs)
+        self.tdec = ThinkerDecoder(self.thinker, self.tkv, self.tspec, use_graphs=use_graphs, layers=tlayers)
         self.adec = TalkerDecoder(self.talker, self.akv, self.aspec, self.cfg, use_graphs=use_graphs)
         self.tdec.capture_all()
         self.adec.capture_all()

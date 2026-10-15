@@ -11,6 +11,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from engine.runtime.fp8 import linear
 from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights, hf_rms_norm, hf_rope, hf_rope_tables
 
 PAD_SEQ_BASE = 1 << 41
@@ -39,9 +40,10 @@ class _Bucket:
 
 
 class ThinkerDecoder:
-    def __init__(self, thinker, kv: PagedKV, spec: DecoderSpec, buckets=(1, 2, 4, 8, 16, 32, 64), max_len: int = 8192, use_graphs: bool = True):
+    def __init__(self, thinker, kv: PagedKV, spec: DecoderSpec, buckets=(1, 2, 4, 8, 16, 32, 64), max_len: int = 8192, use_graphs: bool = True,
+                 layers: list[dict] | None = None):
         self.spec, self.kv = spec, kv
-        self.layers = fuse_weights(thinker.w, spec)
+        self.layers = layers if layers is not None else fuse_weights(thinker.w, spec)
         self.final_norm = thinker.w["model.norm.weight"]
         self.emb, self.head = thinker.w["model.embed_tokens.weight"], thinker.w["lm_head.weight"]
         self.device, self.max_len, self.use_graphs = kv.k.device, max_len, use_graphs
@@ -57,7 +59,7 @@ class ThinkerDecoder:
         tables = hf_rope_tables(bk.positions, s.head_dim, s.rope_theta, x.dtype)  # once per step, not per layer
         for i, L in enumerate(self.layers):
             h = hf_rms_norm(x, L["ln1"], s.rms_eps)
-            qkv = F.linear(h, L["qkv"])
+            qkv = linear(h, L["qkv"])
             q = hf_rms_norm(qkv[:, :nq].reshape(-1, s.head_dim), L["q_norm"], s.rms_eps).view(-1, s.num_heads, s.head_dim)
             k = hf_rms_norm(qkv[:, nq:nq + nk].reshape(-1, s.head_dim), L["k_norm"], s.rms_eps).view(-1, s.num_kv_heads, s.head_dim)
             v = qkv[:, nq + nk:].reshape(-1, s.num_kv_heads, s.head_dim).contiguous()
@@ -65,10 +67,10 @@ class ThinkerDecoder:
             q, k = q.contiguous(), k.contiguous()
             fi.append_paged_kv_cache(k, v, bk.batch_idx, bk.positions, (self.kv.k[i], self.kv.v[i]), bk.indices, bk.indptr, bk.last)
             a = bk.wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
-            x = x + F.linear(a.reshape(-1, nq), L["o"])
+            x = x + linear(a.reshape(-1, nq), L["o"])
             h = hf_rms_norm(x, L["ln2"], s.rms_eps)
-            g, u = F.linear(h, L["gate_up"]).chunk(2, dim=-1)
-            x = x + F.linear(F.silu(g) * u, L["down"])
+            g, u = linear(h, L["gate_up"]).chunk(2, dim=-1)
+            x = x + linear(F.silu(g) * u, L["down"])
         hid = hf_rms_norm(x, self.final_norm, s.rms_eps)
         bk.hidden.copy_(hid)
         bk.next.copy_(F.linear(hid, self.head).argmax(-1))

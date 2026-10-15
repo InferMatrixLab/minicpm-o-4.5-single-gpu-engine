@@ -72,3 +72,41 @@ def test_graph_decode_skipped_plans_with_changing_rows():
     for (a, ha), (b, hb) in zip(out[0], out[1]):
         assert a == b
         assert torch.equal(ha, hb)
+
+
+@torch.inference_mode()
+def test_fp8_thinker_ac37():
+    """AC-3.7: the FP8 Thinker against the BF16 engine Thinker, teacher-forced over the 64 reference prompts: top-1
+    agreement >= 98% and final-layer hidden-state cosine >= 0.99 (reported: min, p01, mean)."""
+    import json
+
+    from engine.models.thinker import Thinker
+    from engine.runtime.fp8 import quantize_layers
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV, fuse_weights
+
+    ref_path = Path(__file__).resolve().parents[2] / "results" / "engine_parity" / "thinker_ref_bf16.pt"
+    if not ref_path.exists():
+        pytest.skip("needs results/engine_parity/thinker_ref_bf16.pt")
+    th = Thinker.load(MODEL, device="cuda")
+    c = th.cfg
+    spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
+    kv = PagedKV(spec, 4096)
+    layers = fuse_weights(th.w, spec)
+    bf16, fp8 = DecoderRunner(th.w, spec, kv, layers=layers), DecoderRunner(th.w, spec, kv, layers=quantize_layers(layers))
+    cos, agree, total = [], 0, 0
+    for i, r in enumerate(torch.load(ref_path)):
+        t = r["tokens"].cuda()
+        outs = []
+        for j, run in enumerate((bf16, fp8)):
+            h = run.forward(th.embed(t), kv.layout([2 * i + j], [t.numel()]))
+            kv.release(2 * i + j)
+            outs.append(h)
+        cos.append(torch.nn.functional.cosine_similarity(outs[0].float(), outs[1].float(), dim=-1).cpu())
+        top = [torch.nn.functional.linear(h, th.w["lm_head.weight"]).argmax(-1) for h in outs]
+        agree += int((top[0] == top[1]).sum())
+        total += t.numel()
+    cat = torch.cat(cos)
+    report = {"top1_agreement": agree / total, "cos_min": float(cat.min()), "cos_p01": float(cat.quantile(0.01)), "cos_mean": float(cat.mean())}
+    (Path(__file__).resolve().parents[2] / "results" / "engine_parity" / "fp8_thinker_ac37.json").write_text(json.dumps(report, indent=1))
+    assert report["top1_agreement"] >= 0.98, report
+    assert report["cos_min"] >= 0.99, report
