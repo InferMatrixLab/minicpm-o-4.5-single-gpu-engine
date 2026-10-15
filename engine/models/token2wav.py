@@ -112,7 +112,7 @@ class Token2Wav:
         keep = p.mels.shape[1]
         c = st.flow_cache
         if c["estimator_att_cache"].shape[4] > keep + 100:
-            c["estimator_att_cache"] = torch.cat([c["estimator_att_cache"][..., :keep], c["estimator_att_cache"][..., -100:]], dim=4)
+            c["estimator_att_cache"] = torch.cat([c["estimator_att_cache"][:, :, :, :, :keep], c["estimator_att_cache"][:, :, :, :, -100:]], dim=4)
         if c["conformer_att_cache"].shape[3] > keep + 100:
             c["conformer_att_cache"] = torch.cat([c["conformer_att_cache"][:, :, :, :keep, :], c["conformer_att_cache"][:, :, :, -100:, :]], dim=3)
         h = st.hift_cache
