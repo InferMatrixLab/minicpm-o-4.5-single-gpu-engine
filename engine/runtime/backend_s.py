@@ -100,7 +100,7 @@ class TrackSBackend:
                  t2w_graphs: bool = False, t2w_compile: bool = False, spk_threads: int = 8, t2w_min_batch: int = 8, t2w_max_wait_ms: float = 40.0,
                  switch_interval_s: float = 0.0002, first_chunk: int = 25, t2w_process: bool = False, feature_workers: int = 4,
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
-                 feature_processes: int = 0, thinker_fp8: bool = False, talker_k_max: int = 4,
+                 feature_processes: int = 0, thinker_fp8: bool = False, talker_k_max: int = 4, prefill_graphs: bool = False,
                  profile: bool = False):
         from transformers import AutoTokenizer
 
@@ -140,6 +140,12 @@ class TrackSBackend:
         self.cfg = TalkerSampling(min_new_tokens=0, max_new_tokens=1 << 30)
         self.tdec = ThinkerDecoder(self.thinker, self.tkv, self.tspec, use_graphs=use_graphs, layers=tlayers)
         self.adec = TalkerDecoder(self.talker, self.akv, self.aspec, self.cfg, use_graphs=use_graphs)
+        self.tprefill = None
+        if prefill_graphs and use_graphs:
+            from engine.runtime.prefill_graph import PrefillGraphs
+
+            self.tprefill = PrefillGraphs(self.trun)
+            self.tprefill.capture_all()
         self.tdec.capture_all()
         self.adec.capture_all()
         self.t2wp = None
@@ -364,11 +370,14 @@ class TrackSBackend:
         dec = [lv for lv in rows if not lv.pending_prefill]
         results = []  # (lv, next token, hidden of the fed token or None)
         if pre:
-            lay = self.tkv.layout([lv.seq for lv in pre], [len(lv.prompt_ids) for lv in pre])
             embs = [lv.prompt_embeds.to(self.thinker.dtype) if lv.prompt_embeds is not None
                     else self.thinker.embed(torch.tensor(lv.prompt_ids, device=self.device)) for lv in pre]
-            hidden = self.trun.forward(torch.cat(embs), lay)
-            nxt = torch.nn.functional.linear(hidden[lay.last_token_index], self.thinker.w["lm_head.weight"]).float().argmax(-1).tolist()
+            if len(pre) == 1 and self.tprefill is not None and self.tprefill.supports(embs[0].shape[0]):
+                last = self.tprefill.forward(embs[0], pre[0].seq)[-1:]  # graph-captured single-request prefill
+            else:
+                lay = self.tkv.layout([lv.seq for lv in pre], [len(lv.prompt_ids) for lv in pre])
+                last = self.trun.forward(torch.cat(embs), lay)[lay.last_token_index]
+            nxt = torch.nn.functional.linear(last, self.thinker.w["lm_head.weight"]).float().argmax(-1).tolist()
             for lv, tok in zip(pre, nxt):
                 lv.pending_prefill = False
                 lv.mark("prefilled")

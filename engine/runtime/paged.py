@@ -175,12 +175,16 @@ class DecoderRunner:
 
     def forward(self, x: torch.Tensor, lay: BatchLayout) -> torch.Tensor:
         """``x`` [nnz, hidden] packed inputs -> final-norm hidden states [nnz, hidden]."""
-        s, fi = self.spec, self._fi
         self.plan(lay)
+        return self.body(x, lay.positions, lay.batch_indices, lay.kv_indices, lay.kv_indptr, lay.kv_last_page_len, self.prefill)
+
+    def body(self, x, positions, batch_indices, kv_indices, kv_indptr, kv_last_page_len, wrapper) -> torch.Tensor:
+        """The layer stack on a planned ``wrapper`` (eager, or captured by ``engine.runtime.prefill_graph``)."""
+        s, fi = self.spec, self._fi
         nq, nk = s.num_heads * s.head_dim, s.num_kv_heads * s.head_dim
         hf = self.numerics == "hf"
         norm = (lambda t, w: hf_rms_norm(t, w, s.rms_eps)) if hf else (lambda t, w: fi.rmsnorm(t, w, s.rms_eps))
-        tables = hf_rope_tables(lay.positions, s.head_dim, s.rope_theta, x.dtype) if hf else None  # once for all layers
+        tables = hf_rope_tables(positions, s.head_dim, s.rope_theta, x.dtype) if hf else None  # once for all layers
         for i, L in enumerate(self.layers):
             h = norm(x, L["ln1"])
             qkv = linear(h, L["qkv"])
@@ -192,13 +196,13 @@ class DecoderRunner:
                 k = norm(k.reshape(-1, s.head_dim), L["k_norm"]).view_as(k)
             q, k = q.contiguous(), k.contiguous()
             if hf:
-                q, k = hf_rope(q, k, lay.positions, s.rope_theta, tables)
+                q, k = hf_rope(q, k, positions, s.rope_theta, tables)
                 q, k = q.contiguous(), k.contiguous()
             else:
-                fi.apply_rope_pos_ids_inplace(q, k, lay.positions, rope_theta=s.rope_theta)
-            fi.append_paged_kv_cache(k, v.contiguous(), lay.batch_indices, lay.positions, (self.kv.k[i], self.kv.v[i]), lay.kv_indices,
-                                     lay.kv_indptr, lay.kv_last_page_len)
-            a = self.prefill.run(q, (self.kv.k[i], self.kv.v[i]))
+                fi.apply_rope_pos_ids_inplace(q, k, positions, rope_theta=s.rope_theta)
+            fi.append_paged_kv_cache(k, v.contiguous(), batch_indices, positions, (self.kv.k[i], self.kv.v[i]), kv_indices, kv_indptr,
+                                     kv_last_page_len)
+            a = wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
             x = x + linear(a.reshape(-1, nq), L["o"])
             h = norm(x, L["ln2"])
             gu = linear(h, L["gate_up"])

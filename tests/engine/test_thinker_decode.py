@@ -110,3 +110,31 @@ def test_fp8_thinker_ac37():
     (Path(__file__).resolve().parents[2] / "results" / "engine_parity" / "fp8_thinker_ac37.json").write_text(json.dumps(report, indent=1))
     assert report["top1_agreement"] >= 0.98, report
     assert report["cos_min"] >= 0.99, report
+
+
+@torch.inference_mode()
+def test_prefill_graph_matches_eager_two_sequence_batch():
+    """A graph-captured single-request prefill equals the eager forward of the same padded two-sequence batch, and the
+    graph decode that follows it is identical (KV written exactly)."""
+    from engine.models.thinker import Thinker
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+    from engine.runtime.prefill_graph import PAD_SEQ, PrefillGraphs
+
+    th = Thinker.load(MODEL, device="cuda")
+    c = th.cfg
+    spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    for n in (9, 33, 64, 200):
+        ids = torch.randint(0, 150000, (n,), device="cuda", generator=gen)
+        x = th.embed(ids)
+        kv = PagedKV(spec, 2048)
+        run = DecoderRunner(th.w, spec, kv)
+        pg = PrefillGraphs(run, buckets=(32, 64, 128, 256))
+        a = pg.forward(x, 1)
+        b_seq = 2
+        bucket = min(b for b in (32, 64, 128, 256) if b > n)
+        lay = kv.layout([b_seq, PAD_SEQ], [n, bucket - n])
+        b = run.forward(torch.cat([x, x.new_zeros(bucket - n, x.shape[1])]), lay)[:n]
+        kv.release(PAD_SEQ)
+        assert torch.equal(a, b), n
+        assert kv.lengths[1] == kv.lengths[2] == n
