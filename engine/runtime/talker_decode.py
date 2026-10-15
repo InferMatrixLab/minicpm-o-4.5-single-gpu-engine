@@ -92,10 +92,9 @@ class TalkerDecoder:
             fi.apply_rope_pos_ids_inplace(q, k, bk.positions, rope_theta=s.rope_theta)
             fi.append_paged_kv_cache(k, v, bk.batch_idx, bk.positions, (self.kv.k[i], self.kv.v[i]), bk.indices, bk.indptr, bk.last)
             a = bk.wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
-            x = x + F.linear(a.reshape(-1, nq), L["o"])
+            x = torch.addmm(x, a.reshape(-1, nq), L["o"].t())  # residual add in the GEMM epilogue
             h = fi.rmsnorm(x, L["ln2"], s.rms_eps)
-            g, u = F.linear(h, L["gate_up"]).chunk(2, dim=-1)
-            x = x + F.linear(F.silu(g) * u, L["down"])
+            x = torch.addmm(x, fi.silu_and_mul(F.linear(h, L["gate_up"])), L["down"].t())
         logits = F.linear(fi.rmsnorm(x, self.final_norm, s.rms_eps), self.head)
         tok = draw(processed_logits_static(logits, bk.history, bk.steps, self.eos, self.cfg), bk.seeds, bk.steps)
         tok = torch.where(bk.live, tok, torch.full_like(tok, PAD))
