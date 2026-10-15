@@ -33,6 +33,9 @@ def _feat_init(model_dir: str, spk_threads: int) -> None:
     import onnxruntime
     import s3tokenizer
 
+    import torch
+
+    torch.set_num_threads(2)  # torch defaults to one thread per core: a dozen such processes oversubscribe the host
     global _FEAT
     h = types.SimpleNamespace()
     h.audio_tokenizer = s3tokenizer.load_model(f"{model_dir}/assets/token2wav/speech_tokenizer_v2_25hz.onnx").cuda().eval()
@@ -62,6 +65,13 @@ def _feat_job(ref: bytes):
 
 
 SETUP_FRAME_BUDGET = 64 * 512  # rows x frames per eager batched setup call
+
+
+def _feat_warm(ref: bytes):
+    """A warm-up job that holds its process for a while, so the pool starts every process (each runs one)."""
+    _feat_job(ref)
+    time.sleep(2.0)
+    return _feat_job(ref)
 
 
 @dataclass
@@ -95,8 +105,9 @@ def worker_main(inq, outq, cfg: dict) -> None:
 
         pool = ProcessPoolExecutor(cfg["feature_processes"], mp_context=mp.get_context("spawn"), initializer=_feat_init,
                                    initargs=(model_dir, cfg.get("spk_threads", 8)))
-        for f in [pool.submit(_feat_job, open(f"{model_dir}/assets/HT_ref_audio.wav", "rb").read()) for _ in range(cfg["feature_processes"])]:
-            f.result()  # warm every process
+        ref = open(f"{model_dir}/assets/HT_ref_audio.wav", "rb").read()
+        for f in [pool.submit(_feat_warm, ref) for _ in range(cfg["feature_processes"])]:
+            f.result()  # every process started, its models loaded and its kernels warm
     else:
         pool = ThreadPoolExecutor(cfg.get("feature_workers", 4), thread_name_prefix="t2w-features")
     min_batch, max_wait = cfg.get("t2w_min_batch", 8), cfg.get("t2w_max_wait_ms", 40.0) / 1000
