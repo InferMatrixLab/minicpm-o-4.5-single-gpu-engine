@@ -61,6 +61,9 @@ def _feat_job(ref: bytes):
     return tuple(x.cpu() for x in out)
 
 
+SETUP_FRAME_BUDGET = 64 * 512  # rows x frames per eager batched setup call
+
+
 @dataclass
 class _Req:
     seq: int
@@ -161,7 +164,11 @@ def worker_main(inq, outq, cfg: dict) -> None:
                     continue
                 groups.setdefault(next((b for b in SETUP_T if b >= f[3].shape[1]), -f[3].shape[1]), []).append((r, f))
             for b, items in groups.items():
+                # small groups ride the setup graphs (row limits); larger ones run as fewer, bigger eager calls bounded
+                # by a frame budget (they are compute-bound, and one call beats many for every request's first audio)
                 per = max(1, ROW_LIMIT.get(b, 2) // 2)
+                if len(items) > per:
+                    per = max(per, SETUP_FRAME_BUDGET // (2 * max(abs(b), 1)))
                 for k in range(0, len(items), per):
                     part = items[k:k + per]
                     try:
