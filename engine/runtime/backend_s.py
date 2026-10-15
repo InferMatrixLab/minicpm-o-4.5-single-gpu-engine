@@ -44,6 +44,7 @@ class TextChunk:
     ids: list[int]
     hidden: torch.Tensor  # [n, H]
     final: bool
+    ready: object = None  # CUDA event recorded on the Thinker stream after ``hidden`` (split-thread mode)
 
 
 @dataclass
@@ -101,7 +102,7 @@ class TrackSBackend:
                  switch_interval_s: float = 0.0002, first_chunk: int = 25, t2w_process: bool = False, feature_workers: int = 4,
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
                  feature_processes: int = 0, thinker_fp8: bool = False, talker_k_max: int = 4, prefill_graphs: bool = False,
-                 t2w_euler_graphs: bool = False,
+                 t2w_euler_graphs: bool = False, split_threads: bool = False,
                  profile: bool = False):
         from transformers import AutoTokenizer
 
@@ -185,8 +186,17 @@ class TrackSBackend:
         self.t2w_live: dict[int, LiveS] = {}  # owned by the Token2Wav thread
         self.t2w_wake = threading.Event()
         self.t2w_stream = torch.cuda.Stream(device=device)
-        self.thread = threading.Thread(target=self._run, daemon=True, name="engine")
-        self.thread.start()
+        self.split_threads = split_threads
+        if split_threads:  # Thinker and Talker loops on their own threads and CUDA streams (graph replays overlap)
+            self.talker_wake = threading.Event()
+            self.thinker_stream, self.talker_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
+            self.thread = threading.Thread(target=self._run_thinker, daemon=True, name="thinker")
+            self.talker_thread = threading.Thread(target=self._run_talker, daemon=True, name="talker")
+            self.thread.start()
+            self.talker_thread.start()
+        else:
+            self.thread = threading.Thread(target=self._run, daemon=True, name="engine")
+            self.thread.start()
         if self.t2wp is None:
             self.t2w_thread = threading.Thread(target=self._run_t2w, daemon=True, name="token2wav")
             self.t2w_thread.start()
@@ -283,6 +293,77 @@ class TrackSBackend:
                 for lv in list(self.live.values()):
                     lv.emit(RuntimeError(f"engine error: {type(e).__name__}: {e}"))
                     self._release(lv)
+
+    def _run_thinker(self) -> None:
+        """Split-thread mode: admission, prefill and Thinker decode on the Thinker stream; text chunks to the Talker."""
+        torch.cuda.set_device(torch.device(self.device).index or 0)
+        while True:
+            busy = any(not lv.thinker_done for lv in list(self.live.values()))
+            try:
+                while True:
+                    lv = self.inbox.get(block=not busy, timeout=None if not busy else 0)
+                    try:
+                        self._admit(lv)
+                        busy = True
+                    except Exception as e:
+                        lv.emit(RuntimeError(f"engine admission error: {type(e).__name__}: {e}"))
+            except queue.Empty:
+                pass
+            try:
+                with torch.cuda.stream(self.thinker_stream), torch.inference_mode():
+                    for lv in list(self.live.values()):
+                        if lv.cancelled and not lv.thinker_done:
+                            lv.thinker_done = True
+                            self.tkv.release(lv.seq)
+                            if not lv.wants_audio:
+                                self.live.pop(lv.seq, None)
+                                lv.finished = True
+                    rows = [lv for lv in list(self.live.values()) if not lv.thinker_done]
+                    if rows:
+                        self._timed("thinker", self._thinker_step, rows)
+                self.talker_wake.set()
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                for lv in list(self.live.values()):
+                    if not lv.thinker_done:
+                        lv.emit(RuntimeError(f"engine error: {type(e).__name__}: {e}"))
+                        lv.cancelled = True
+
+    def _run_talker(self) -> None:
+        """Split-thread mode: Talker chunk prefills and K-frame decode on the Talker stream; windows to Token2Wav."""
+        torch.cuda.set_device(torch.device(self.device).index or 0)
+        while True:
+            try:
+                with torch.cuda.stream(self.talker_stream), torch.inference_mode():
+                    for lv in list(self.live.values()):
+                        if lv.cancelled and not lv.utterance_done and lv.wants_audio:
+                            lv.utterance_done = True
+                            self.akv.release(lv.seq)
+                            if self.t2wp is not None and self.audio_live.pop(lv.seq, None) is not None:
+                                self.t2wp.send("close", lv.seq)
+                            if lv.thinker_done:
+                                self.live.pop(lv.seq, None)
+                                lv.finished = True
+                    rows = [lv for lv in list(self.live.values()) if lv.wants_audio and not lv.utterance_done]
+                    work = [lv for lv in rows if lv.talking or lv.chunks]
+                    if work:
+                        self._timed("talker", self._talker_step, rows)
+                    for lv in [x for x in list(self.live.values()) if x.utterance_done and x.thinker_done and not x.cancelled]:
+                        self.akv.release(lv.seq)
+                        self.live.pop(lv.seq, None)
+                if not work:
+                    self.talker_wake.wait(0.002)
+                    self.talker_wake.clear()
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                for lv in list(self.live.values()):
+                    if lv.wants_audio and not lv.utterance_done:
+                        lv.emit(RuntimeError(f"engine error: {type(e).__name__}: {e}"))
+                        lv.cancelled = True
 
     def _admit(self, lv: LiveS) -> None:
         if lv.wants_audio:
@@ -414,7 +495,12 @@ class TrackSBackend:
         lv.thinker_done = True
         self.tkv.release(lv.seq)
         if not lv.wants_audio:
-            self._finish(lv)
+            if self.split_threads:  # text only: the Talker never saw it
+                lv.emit(Done("stop", {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": 0}))
+                self.live.pop(lv.seq, None)
+                lv.finished = True
+            else:
+                self._finish(lv)
 
     def _pass_chunk(self, lv: LiveS, final: bool) -> None:
         """The tokens fed since the last chunk (those with hidden states), as ``track_s.thinker_chunks`` yields them."""
@@ -422,8 +508,14 @@ class TrackSBackend:
         lv.passed = len(lv.hidden)
         if lv.wants_audio:
             h = torch.stack(hs) if hs else torch.zeros(0, self.tspec.hidden_size, device=self.device, dtype=self.thinker.dtype)
-            lv.chunks.append(TextChunk(ids, h, final))
+            ev = None
+            if self.split_threads:
+                ev = torch.cuda.Event()
+                ev.record(torch.cuda.current_stream())
+            lv.chunks.append(TextChunk(ids, h, final, ev))
             lv.mark(f"text_chunk{'_final' if final else ''}:{len(ids)}")
+            if self.split_threads:
+                self.talker_wake.set()
 
     # talker ------------------------------------------------------------------------------------
     def _talker_step(self, rows: list[LiveS]) -> None:
@@ -435,6 +527,8 @@ class TrackSBackend:
             feeds = []
             for lv in starts:
                 ch = lv.chunks[0]
+                if ch.ready is not None:  # the hidden states come from the Thinker stream
+                    torch.cuda.current_stream().wait_event(ch.ready)
                 cond = self.talker.condition(torch.tensor(ch.ids, dtype=torch.long, device=self.device), ch.hidden)
                 if not ch.final:
                     cond = torch.cat([cond[:-2], cond[-1:]], dim=0)  # text_eos only on the final chunk; audio_bos always
@@ -466,7 +560,9 @@ class TrackSBackend:
         # adaptive K: short blocks while work is waiting to join (a chunk start, a Thinker prefill) or any Thinker is
         # still generating (one text token per tick must stay ahead of ~4 codec frames per token); long blocks once all
         # text is done (fewer ticks per frame).  A row that hits EOS inside a block is rolled back exactly either way.
-        waiting = any((not lv.talking and lv.chunks) or not lv.thinker_done for lv in self.live.values()) or not self.inbox.empty()
+        # (in split-thread mode the Thinker runs beside the Talker, so only waiting chunk starts keep blocks short)
+        waiting = any((not lv.talking and lv.chunks) or (not lv.thinker_done and not self.split_threads)
+                      for lv in list(self.live.values())) or not self.inbox.empty()
         k = self.talker_k if waiting else max(self.talker_k, self.talker_k_max)
         codes = self.adec.decode_k([lv.seq for lv in active], state, k)  # [K, n] on the host
         for i, lv in enumerate(active):

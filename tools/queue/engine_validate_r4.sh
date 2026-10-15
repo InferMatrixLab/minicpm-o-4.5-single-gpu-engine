@@ -26,7 +26,7 @@ step "smoke under MPS"
 M=/tmp/cgz-mps-val$G; rm -rf $M; mkdir -p $M/pipe $M/log
 export CUDA_MPS_PIPE_DIRECTORY=$M/pipe CUDA_MPS_LOG_DIRECTORY=$M/log
 CUDA_VISIBLE_DEVICES=$UUID nvidia-cuda-mps-control -d
-for cfg in track_s_proc track_s_proc_euler; do
+for cfg in track_s_proc track_s_proc_euler track_s_proc_split; do
   for c in 1 8 32; do
     n=$((c == 1 ? 8 : 4 * c))
     CUDA_VISIBLE_DEVICES=$UUID timeout 2400 .venv-engine/bin/python tools/engine_smoke.py --config configs/engine/$cfg.json --n $n --c $c \
