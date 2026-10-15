@@ -34,6 +34,8 @@ class _Bucket:
         self.next = torch.zeros(b, dtype=torch.int64, device=dev)
         self.hidden = torch.zeros(b, dec.spec.hidden_size, dtype=dec.kv.k.dtype, device=dev)
         self.graph = None
+        self.rows: list[int] | None = None  # rows of the last plan (None: re-plan)
+        self.pads = [PAD_SEQ_BASE + 1000 * b + i for i in range(b)]  # persistent scratch rows of this bucket
 
 
 class ThinkerDecoder:
@@ -69,6 +71,7 @@ class ThinkerDecoder:
         hid = hf_rms_norm(x, self.final_norm, s.rms_eps)
         bk.hidden.copy_(hid)
         bk.next.copy_(F.linear(hid, self.head).argmax(-1))
+        bk.last.add_(1)  # the next step's last-page fill when the host does not re-plan (same rows, no new page)
 
     def _plan(self, bk: _Bucket, seqs: list[int]) -> None:
         lay = self.kv.layout(seqs, [1] * len(seqs), device=self.device)
@@ -103,25 +106,43 @@ class ThinkerDecoder:
                 if bk.graph is None:
                     self._capture(bk)
 
+    PAD_RESET = 64  # scratch rows restart (and the bucket re-plans) after this many steps: they hold at most 4 pages
+
     @torch.inference_mode()
     def step(self, seqs: list[int], tokens: list[int]) -> tuple[list[int], torch.Tensor]:
-        """Feed ``tokens[i]`` to sequence ``seqs[i]``; returns (greedy next tokens, hidden states of the fed tokens [n, H])."""
+        """Feed ``tokens[i]`` to sequence ``seqs[i]``; returns (greedy next tokens, hidden states of the fed tokens [n, H]).
+
+        The FlashInfer plan is redone only when the rows change or a row starts a new KV page (graph mode); otherwise the
+        graph's own last-page increment carries the layout forward.  Padding rows are persistent scratch sequences.
+        """
         n = len(seqs)
         bk = self.buckets[min(b for b in self.buckets if b >= n)]
         if self.use_graphs and bk.graph is None:
             self._capture(bk)
-        pads = [PAD_SEQ_BASE + i for i in range(bk.b - n)]
+        pads = bk.pads[: bk.b - n]
         for p in pads:
+            if self.kv.lengths.get(p, 0) >= self.PAD_RESET:
+                self.kv.release(p)
+                bk.rows = None
             self.kv.reserve(p, 0)
-        pos = [self.kv.lengths[s] for s in seqs] + [self.kv.lengths.get(p, 0) for p in pads]
+        rows = list(seqs) + pads
+        pos = [self.kv.lengths[r] for r in rows]
         bk.tokens[:n].copy_(torch.tensor(tokens, dtype=torch.int64))
         bk.tokens[n:].zero_()
         bk.positions.copy_(torch.tensor(pos, dtype=torch.int32))
-        self._plan(bk, list(seqs) + pads)
+        ps = self.kv.page_size
+        if not self.use_graphs or bk.rows != rows or any(L % ps == 0 for L in pos):
+            self._plan(bk, rows)
+            bk.rows = rows
+        else:
+            for r in rows:  # the same bookkeeping as kv.layout(rows, [1] * len(rows))
+                self.kv.reserve(r, 1)
+                self.kv.lengths[r] += 1
         if self.use_graphs:
             bk.graph.replay()
         else:
             self._step(bk)
-        for p in pads:
-            self.kv.release(p)
+        for other in self.buckets.values():  # another bucket may have planned rows these pads share
+            if other is not bk:
+                other.rows = None
         return bk.next[:n].tolist(), bk.hidden[:n].clone()

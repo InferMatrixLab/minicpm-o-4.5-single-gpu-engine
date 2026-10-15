@@ -105,6 +105,7 @@ class TalkerDecoder:
         bk.out.copy_(tok)
         bk.codes.copy_(tok)
         bk.positions.add_(1)
+        bk.last.add_(1)  # the next frame's last-page fill; the host re-plans whenever a row starts a new page
 
     def _plan(self, bk: _Bucket, seqs: list[int]) -> None:
         lay = self.kv.layout(seqs, [1] * len(seqs), device=self.device)
@@ -114,6 +115,21 @@ class TalkerDecoder:
         bk.last.copy_(lay.kv_last_page_len)
         s = self.spec
         bk.wrapper.plan(lay.kv_indptr, lay.kv_indices, lay.kv_last_page_len, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
+                        q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
+
+    def _plan_lengths(self, bk: _Bucket, rows: list[int], lengths: list[int]) -> None:
+        """Plan for KV lengths ``lengths`` (after this frame's append) over the rows' already reserved pages."""
+        ps = self.kv.page_size
+        npages = [-(-L // ps) for L in lengths]
+        indices = [p for r, n in zip(rows, npages) for p in self.kv.pages[r][:n]]
+        indptr = torch.tensor([0] + list(torch.tensor(npages).cumsum(0).tolist()), dtype=torch.int32)
+        last = torch.tensor([L - (n - 1) * ps for L, n in zip(lengths, npages)], dtype=torch.int32)
+        idx = torch.tensor(indices, dtype=torch.int32)
+        bk.indptr.copy_(indptr)
+        bk.indices[:idx.numel()].copy_(idx)
+        bk.last.copy_(last)
+        s = self.spec
+        bk.wrapper.plan(indptr.to(self.device), idx.to(self.device), last.to(self.device), s.num_heads, s.num_kv_heads, s.head_dim, ps,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _capture(self, bk: _Bucket) -> None:
@@ -169,14 +185,24 @@ class TalkerDecoder:
         for name in ("seeds", "steps", "history", "live"):
             getattr(bk, name)[:n].copy_(state[name])
         bk.live[n:] = False
+        start = [self.kv.lengths[r] for r in rows]
+        for r in rows:
+            self.kv.reserve(r, k)  # pages for all K frames up front
+        ps = self.kv.page_size
         outs = []
-        for _ in range(k):
-            self._plan(bk, rows)
+        for j in range(k):
+            # re-plan only when the layout's page structure changes (a row starts a new page) or on the first frame;
+            # otherwise the graph's own last-page / position increments carry the layout forward
+            # (eager mode re-plans every frame: a non-graph wrapper keeps its own copy of the layout buffers)
+            if j == 0 or not self.use_graphs or any((L + j) % ps == 0 for L in start):
+                self._plan_lengths(bk, rows, [L + j + 1 for L in start])
             if self.use_graphs:
                 bk.graph.replay()
             else:
                 self._frame(bk)
             outs.append(bk.out[:n].clone())
+        for r, L in zip(rows, start):
+            self.kv.lengths[r] = L + k
         for p in pads:
             self.kv.release(p)
         for name in ("codes", "steps", "history", "live"):

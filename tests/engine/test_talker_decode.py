@@ -11,8 +11,11 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or os.environ.get(
                                 reason="GPU test (set ENGINE_GPU_TESTS=1 on a free GPU)")
 
 
+@pytest.mark.parametrize("page_size", [16, 128])
 @torch.inference_mode()
-def test_graph_k_step_matches_eager():
+def test_graph_k_step_matches_eager(page_size):
+    """Re-planning only at page crossings (graph-side last-page increments otherwise) equals the eager path; 40 frames
+    cross 16-token pages several times and stay inside one 128-token page."""
     from engine.models.talker import Talker
     from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
     from engine.runtime.talker_decode import TalkerDecoder
@@ -23,7 +26,7 @@ def test_graph_k_step_matches_eager():
     spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, False)
     results = []
     for graphs in (False, True):
-        kv = PagedKV(spec, 2048)
+        kv = PagedKV(spec, 2048, page_size)
         pre = DecoderRunner(ta.w, spec, kv)
         gen = torch.Generator(device="cuda").manual_seed(0)
         conds = [ta.condition(torch.randint(0, 150000, (n,), device="cuda", generator=gen), torch.randn(n, 4096, device="cuda", generator=gen))

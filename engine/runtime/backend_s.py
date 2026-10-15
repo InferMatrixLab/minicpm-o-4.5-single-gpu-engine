@@ -98,7 +98,7 @@ class TrackSBackend:
                  page_size: int = 16, float16_flow: bool = False, talker_k: int = 4, use_graphs: bool = True, prepare_workers: int = 4,
                  t2w_graphs: bool = False, t2w_compile: bool = False, spk_threads: int = 8, t2w_min_batch: int = 8, t2w_max_wait_ms: float = 40.0,
                  switch_interval_s: float = 0.0002, first_chunk: int = 25, t2w_process: bool = False, feature_workers: int = 4,
-                 t2w_profile_path: str | None = None,
+                 t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
                  profile: bool = False):
         from transformers import AutoTokenizer
 
@@ -123,8 +123,9 @@ class TrackSBackend:
         c, t = self.thinker.cfg, self.talker.cfg
         self.tspec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
         self.aspec = DecoderSpec(t.num_layers, t.hidden_size, t.num_heads, t.num_kv_heads, t.head_dim, t.rope_theta, t.rms_eps, False)
-        self.tkv = PagedKV(self.tspec, thinker_pages, page_size, device=device)
-        self.akv = PagedKV(self.aspec, talker_pages, page_size, device=device)
+        # larger pages mean fewer FlashInfer re-plans in the graph decoders (a plan is redone when a row starts a page)
+        self.tkv = PagedKV(self.tspec, thinker_pages, thinker_page_size or page_size, device=device)
+        self.akv = PagedKV(self.aspec, talker_pages, talker_page_size or page_size, device=device)
         self.trun = DecoderRunner(self.thinker.w, self.tspec, self.tkv)
         self.arun = DecoderRunner(self.talker.w, self.aspec, self.akv)
         # Track S sampling: the canonical warpers, no minimum length, no global maximum (HF streaming path)
