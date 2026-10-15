@@ -384,6 +384,7 @@ class BatchedToken2Wav:
         cfm = self.flow.decoder
         w["mask"].zero_()
         w["mask"][:, :, :T] = True  # padding rows: their own new frames only
+        w["tr"].fill_(T)  # the arena is shared by every key: this window's frame count, every call
         w["cond"].zero_()
         w["mu"][H:].zero_()
         w["spks"][H:].zero_()

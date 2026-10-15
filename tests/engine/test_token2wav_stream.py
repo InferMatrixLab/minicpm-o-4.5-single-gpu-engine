@@ -295,8 +295,8 @@ def test_merged_final_windows_match_unmerged(graphs):
             assert float((x - y).norm() / y.norm()) <= 1e-4, j
 
 
-@pytest.mark.parametrize("float16", [False, True])
-def test_whole_euler_graph_matches_eager(float16):
+@pytest.mark.parametrize("float16,first_chunk", [(False, 25), (True, 25), (False, 8)])
+def test_whole_euler_graph_matches_eager(float16, first_chunk):
     """The whole-Euler graph (all steps in one replay, caches through its arenas) gives the eager batched mels
     (FP32 1e-4; FP16 within the AC-3.4 FP16 bound), for ragged prompts and staggered streams."""
     from engine.models.token2wav import Token2Wav
@@ -308,7 +308,7 @@ def test_whole_euler_graph_matches_eager(float16):
     gen = np.random.default_rng(8)
     plans = []
     for n in (120, 95, 70):
-        ch = StreamChunker()
+        ch = StreamChunker(first_chunk=first_chunk)  # 8: ramped first windows (16 frames) beside 50-frame ones
         plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
     starts = [0, 1, 2]
     mels = []
