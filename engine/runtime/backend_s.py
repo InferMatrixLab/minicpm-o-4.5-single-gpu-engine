@@ -135,6 +135,10 @@ class TrackSBackend:
         tlayers = fuse_weights(self.thinker.w, self.tspec)  # one fused copy shared by prefill and graph decode
         if thinker_fp8:  # approved approximation, qualified by AC-3.7
             tlayers = quantize_layers(tlayers)
+        # the per-projection layer weights are only read by the reference forward, which the engine never runs
+        for k in [k for k in self.thinker.w if ".layers." in k and ("_proj." in k)]:
+            del self.thinker.w[k]
+        torch.cuda.empty_cache()
         self.trun = DecoderRunner(self.thinker.w, self.tspec, self.tkv, layers=tlayers)
         self.arun = DecoderRunner(self.talker.w, self.aspec, self.akv)
         # Track S sampling: the canonical warpers, no minimum length, no global maximum (HF streaming path)
