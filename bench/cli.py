@@ -138,7 +138,9 @@ def make_cell(cand: Candidate, concurrency: int, k: int, id_set: str, seed_index
     return CellSpec(cand, concurrency, k, id_set, seed_index, timeout_s, gpu, workload)
 
 
-ADAPTER_PYTHON = {"vllm-omni": DEFAULT_PYTHONS["vllm-omni"], "sglang-omni": DEFAULT_PYTHONS["sglang-omni"], "engine": sys.executable}
+ENGINE_PYTHON = "/workspace/cgzheng/cgzheng/qwen3_omni/.venv-engine/bin/python"
+ADAPTER_PYTHON = {"vllm-omni": DEFAULT_PYTHONS["vllm-omni"], "sglang-omni": DEFAULT_PYTHONS["sglang-omni"],
+                  "engine": ENGINE_PYTHON if Path(ENGINE_PYTHON).exists() else sys.executable}
 SERVE_SCRIPTS = {"vllm-omni": "serve_vllm_omni.sh", "sglang-omni": "serve_sglang_omni.sh", "engine": "serve_engine.sh"}
 
 

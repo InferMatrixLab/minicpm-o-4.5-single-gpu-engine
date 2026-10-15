@@ -6,4 +6,6 @@ CFG=$1; PORT=$2; shift 2
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 case "$CFG" in /*|*.json) ;; *) CFG="$ROOT/configs/engine/$CFG.json" ;; esac
 cd "$ROOT"
-exec "$ROOT/.venv-engine/bin/python" -m engine.server --host 127.0.0.1 --port "$PORT" --config "$CFG" "$@"
+PY="${ENGINE_PYTHON:-$ROOT/.venv-engine/bin/python}"
+[ -x "$PY" ] || PY=/workspace/cgzheng/cgzheng/qwen3_omni/.venv-engine/bin/python  # frozen worktrees share the engine environment
+exec "$PY" -m engine.server --host 127.0.0.1 --port "$PORT" --config "$CFG" "$@"
