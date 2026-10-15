@@ -208,8 +208,12 @@ def provenance_path(dump: Path) -> Path:
     return Path(dump).with_suffix(".provenance.json")
 
 
+PRODUCER_FILES = ["bench/effective_dump.py", "bench/effective_inputs.py"]
+
+
 def _code_files(stack: str) -> list[str]:
-    files = ["bench/effective_dump.py", "bench/effective_inputs.py", "bench/workload.py", "bench/adapters/base.py"]
+    """Code that determines what a request sends (compared against today's files when a dump is used)."""
+    files = ["bench/workload.py", "bench/adapters/base.py"]
     if stack in _ADAPTER_MODULE:
         files.append(f"bench/adapters/{_ADAPTER_MODULE[stack]}.py")
     if stack == "engine":
@@ -217,9 +221,9 @@ def _code_files(stack: str) -> list[str]:
     return files
 
 
-def code_hashes(stack: str) -> dict:
+def code_hashes(stack: str, files: list[str] | None = None) -> dict:
     root = Path(__file__).resolve().parents[1]
-    return {f: hashlib.sha256((root / f).read_bytes()).hexdigest() for f in _code_files(stack)}
+    return {f: hashlib.sha256((root / f).read_bytes()).hexdigest() for f in (files if files is not None else _code_files(stack))}
 
 
 def write_provenance(dump: Path, stack: str, model: dict, server: dict | None = None) -> dict:
@@ -229,6 +233,7 @@ def write_provenance(dump: Path, stack: str, model: dict, server: dict | None = 
     doc = {"schema": PROVENANCE_SCHEMA, "stack": stack, "dump_sha256": hashlib.sha256(Path(dump).read_bytes()).hexdigest(),
            "rows": len(load_dumps(Path(dump))), "model": model,
            "stack_repo": repo_fingerprint(STACK_REPOS[stack]) if stack in STACK_REPOS else None, "code_sha256": code_hashes(stack),
+           "producer_sha256": code_hashes(stack, PRODUCER_FILES),
            "server": server}
     provenance_path(dump).write_text(json.dumps(doc, indent=1))
     return doc
@@ -251,6 +256,8 @@ def verify_provenance(dump: Path, stack: str, model: dict, stack_repo: dict | No
         rec = doc.get("stack_repo") or {}
         if stack_repo is None or rec.get("commit") != stack_repo.get("commit") or rec.get("dirty") or stack_repo.get("dirty"):
             out.append(f"{dump}: produced at {stack} {rec.get('commit')} (dirty={rec.get('dirty')}), measured at {stack_repo}")
-    if doc.get("code_sha256") != code_hashes(stack):
-        out.append(f"{dump}: request/preprocessing code changed since the dump was produced")
+    rec = doc.get("code_sha256") or {}
+    changed = [f for f, h in code_hashes(stack).items() if rec.get(f) != h]
+    if changed:
+        out.append(f"{dump}: request code changed since the dump was produced: {changed}")
     return out
