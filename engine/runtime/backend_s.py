@@ -512,6 +512,7 @@ class TrackSBackend:
             if self.split_threads:
                 ev = torch.cuda.Event()
                 ev.record(torch.cuda.current_stream())
+                h.record_stream(self.talker_stream)  # read on the Talker stream: not reused before that work is done
             lv.chunks.append(TextChunk(ids, h, final, ev))
             lv.mark(f"text_chunk{'_final' if final else ''}:{len(ids)}")
             if self.split_threads:
