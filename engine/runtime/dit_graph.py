@@ -142,14 +142,25 @@ class EstimatorGraphs:
             self._capture(key)
 
     @torch.inference_mode()
-    def __call__(self, x, mu, t, spks, cond, cnn, att, mask, tr, temb=None, same=False):
+    def stage(self, n: int, T: int, L: int):
+        """For callers that write each step's caches straight into the graph inputs (no all-steps staging tensor):
+        returns (att view [depth, rows, nh, Lb, dk2], cnn view [depth, rows, c, 2]); then call with ``cnn=att=None``
+        and ``staged_len=L``."""
+        key = (bucket(n, ROW_BUCKETS), T, l_bucket(L))
+        if key not in self.graphs:
+            self._capture(key)
+        _, s, _ = self.graphs[key]
+        return s["att"], s["cnn"]
+
+    @torch.inference_mode()
+    def __call__(self, x, mu, t, spks, cond, cnn, att, mask, tr, temb=None, same=False, staged_len=None):
         """Same contract as the eager estimator call; ``x`` etc. have ``n_rows <= rows bucket`` rows and cache length L.
 
         ``temb``: the timestep embedding [rows, 1, hidden] when the caller computed it (all steps at once).  ``same``:
         mu, spks, cond, mask and tr are the previous call's (the later Euler steps of one window): not copied again.
         """
         n, T = x.shape[0], x.shape[2]
-        L = att.shape[3]
+        L = att.shape[3] if att is not None else staged_len
         if temb is not None:
             t = temb
         else:
@@ -171,8 +182,9 @@ class EstimatorGraphs:
         self._last = (key, n, L)
         s["x"][:n].copy_(x)
         s["t"][:n].copy_(t)
-        s["cnn"][:, :n].copy_(cnn)
-        s["att"][:, :n, :, :L].copy_(att)
+        if att is not None:  # else staged by the caller (stage())
+            s["cnn"][:, :n].copy_(cnn)
+            s["att"][:, :n, :, :L].copy_(att)
         if same:  # the rest of the inputs are this window's previous step's
             g.replay()
             dphi, new_cnn, new_att = out
@@ -180,7 +192,7 @@ class EstimatorGraphs:
         s["mu"][:n].copy_(mu)
         s["spks"][:n].copy_(spks)
         s["cond"][:n].copy_(cond)
-        if Lb > L:
+        if Lb > L and att is not None:
             s["att"][:, :n, :, L:].zero_()
         s["tr"][:n].copy_(tr)
         s["tr"][n:] = T

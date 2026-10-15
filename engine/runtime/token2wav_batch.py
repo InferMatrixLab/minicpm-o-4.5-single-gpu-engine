@@ -112,7 +112,7 @@ class BatchedToken2Wav:
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.merge_finals = True
-        self.max_flow_streams = 16
+        self.max_flow_streams = 32  # the staged per-step solve keeps a 32-stream call's transient memory small
         self.profile: dict | None = None  # stage -> [calls, seconds, items] when set
         self.hift_graphs = self.enc_graphs = None
         if use_graphs:
@@ -327,6 +327,9 @@ class BatchedToken2Wav:
         if (self.euler is not None and keep_cache and cond is None and t_real is None and L > 0 and Tp == T
                 and self.euler.supports(2 * n, T, L)):
             return self._solve_euler_graph(sts, mu, spks, atts, cnns, lens, T, L)
+        if (self.graphs is not None and keep_cache and cond is None and t_real is None and L > 0 and Tp == T
+                and self.graphs.supports(2 * n, T, L)):
+            return self._solve_staged(sts, mu, spks, atts, cnns, lens, T, L)
         A = atts[0].new_zeros((steps, depth, 2 * n) + atts[0].shape[3:4] + (L, atts[0].shape[5]))
         C = cnns[0].new_empty((steps, depth, 2 * n) + cnns[0].shape[3:])
         mask = torch.zeros(2 * n, Tp, Tp + L, dtype=torch.bool, device=dev)
@@ -374,6 +377,51 @@ class BatchedToken2Wav:
                 st.flow_cache["estimator_att_cache"] = torch.stack(rows, dim=2)
                 st.flow_cache["estimator_cnn_cache"] = torch.stack([new_cnn[:, :, i], new_cnn[:, :, n + i]], dim=2)
         return x[:, :, :T].float()
+
+    def _solve_staged(self, sts, mu, spks, atts, cnns, lens, T: int, L: int) -> torch.Tensor:
+        """The per-step graph solve with each step's caches written straight into the graph inputs and its new caches
+        straight out into each request's cache (no all-steps staging tensors: at 32 streams those are ~18 GB)."""
+        cfm = self.flow.decoder
+        est = cfm.estimator
+        n, dev = len(sts), mu.device
+        steps = self.t2w.n_timesteps
+        g_att, g_cnn = self.graphs.stage(2 * n, T, L)
+        mask = torch.zeros(2 * n, T, T + L, dtype=torch.bool, device=dev)
+        for i in range(n):
+            for half in range(2):
+                mask[i + half * n, :, :T + lens[i]] = True
+        tr = torch.full((2 * n,), T, dtype=torch.int64, device=dev)
+        x = torch.stack([cfm.rand_noise[0, :, o:o + T] for o in lens]).to(mu.dtype)
+        t_span = torch.linspace(0, 1, steps + 1, device=dev, dtype=mu.dtype)
+        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        t, dt = t_span[0].unsqueeze(0), t_span[1] - t_span[0]
+        mu_in = torch.cat([mu, torch.zeros_like(mu)])
+        spks_in = torch.cat([spks, torch.zeros_like(spks)])
+        cond_in = torch.zeros_like(mu_in)
+        new_att = [atts[i].new_empty(atts[i].shape[:4] + (T + lens[i], atts[i].shape[5])) for i in range(n)]
+        new_cnn = [torch.empty_like(c) for c in cnns]
+        for step in range(1, steps + 1):
+            for i in range(n):
+                for half in range(2):
+                    r = i + half * n
+                    g_att[:, r, :, :lens[i]].copy_(atts[i][step - 1, :, half])
+                    g_cnn[:, r].copy_(cnns[i][step - 1, :, half])
+            dphi, nc, na = self.graphs(x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, None, None, mask, tr, same=step > 1,
+                                       staged_len=L)
+            for i in range(n):
+                for half in range(2):
+                    r = i + half * n
+                    new_att[i][step - 1, :, half].copy_(na[:, r, :, :T + lens[i]])
+                    new_cnn[i][step - 1, :, half].copy_(nc[:, r])
+            d, u = dphi.chunk(2, dim=0)
+            x = x + dt * ((1.0 + cfm.inference_cfg_rate) * d - cfm.inference_cfg_rate * u)
+            t = t + dt
+            if step < steps:
+                dt = t_span[step + 1] - t
+        for i, st in enumerate(sts):
+            st.flow_cache["estimator_att_cache"] = new_att[i]
+            st.flow_cache["estimator_cnn_cache"] = new_cnn[i]
+        return x.float()
 
     def _solve_euler_graph(self, sts, mu, spks, atts, cnns, lens, T: int, L: int) -> torch.Tensor:
         """A steady window's whole Euler solve in one graph replay (``EulerGraphs``): caches go straight into and come
