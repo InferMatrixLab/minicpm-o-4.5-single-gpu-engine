@@ -1,0 +1,2 @@
+{"backend": "engine.runtime.backend_s:TrackSBackend", "max_live": 64, "thinker_pages": 8192, "talker_pages": 8192, "page_size": 16,
+ "float16_flow": false, "talker_k": 4, "use_graphs": true}

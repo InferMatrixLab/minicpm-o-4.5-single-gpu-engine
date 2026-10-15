@@ -60,6 +60,12 @@ class PagedKV:
             raise MemoryError(f"KV pool exhausted: need {n} pages, {len(self.free)} free")
         self.pages[seq] += [self.free.pop() for _ in range(n)]
 
+    def truncate(self, seq: int, length: int) -> None:
+        """Drop the tail of ``seq`` beyond ``length`` tokens (its pages stay reserved and are overwritten next)."""
+        if length > self.lengths.get(seq, 0):
+            raise ValueError(f"cannot extend seq {seq} by truncation")
+        self.lengths[seq] = length
+
     def release(self, seq: int) -> None:
         self.free += reversed(self.pages.pop(seq, []))
         self.lengths.pop(seq, None)

@@ -132,3 +132,42 @@ def test_batched_decode_matches_per_stream():
         g = np.concatenate(got[j])
         assert g.shape == alone[j].shape
         assert np.linalg.norm(g - alone[j]) / np.linalg.norm(alone[j]) <= 1e-2, j
+
+
+@pytest.mark.parametrize("float16,compiled", [(False, False), (True, False), (True, True)])
+def test_graph_estimator_matches_eager(float16, compiled):
+    """CUDA-graph estimator replays give the eager batched decode's audio; inductor-compiled ones its mel within the
+    AC-3.4 FP16 bound (5e-3; fused elementwise math rounds differently, and HiFT turns any mel change into a phase
+    change, so waveforms are compared only for identical kernels)."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", float16=float16, noise_seed=7)
+    refs = [REF_WAV, MODEL / "assets" / "system_ref_audio.wav"]
+    prompts = [ours.prepare(r) for r in refs]
+    eager, graph = BatchedToken2Wav(ours), BatchedToken2Wav(ours, use_graphs=True, compile_estimator=compiled)
+    gen = np.random.default_rng(3)
+    plans = []
+    for n in (90, 70):
+        ch = StreamChunker()
+        plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
+    outs, mels = [], []
+    for bt in (eager, graph):
+        rec, flow = [], bt._flow
+        bt._flow = lambda sts, ws, last, flow=flow, rec=rec: (lambda m: rec.append([x.float().cpu() for x in m]) or m)(flow(sts, ws, last))
+        mels.append(rec)
+        sts = [ours.new_stream(p, noise_seed=j) for j, p in enumerate(prompts)]
+        got = [[], []]
+        for k in range(max(len(p) for p in plans)):
+            items = [(sts[j], *plans[j][k]) for j in range(2) if k < len(plans[j])]
+            for j, w in zip([j for j in range(2) if k < len(plans[j])], bt.decode(items)):
+                got[j].append(w)
+        outs.append([np.concatenate(g) for g in got])
+    for a, b in zip(outs[1], outs[0]):
+        assert a.shape == b.shape
+        if not compiled:
+            assert np.linalg.norm(a - b) / np.linalg.norm(b) <= 1e-4
+    for ga, ea in zip(mels[1], mels[0]):
+        for x, y in zip(ga, ea):
+            assert float((x - y).norm() / y.norm()) <= (5e-3 if compiled else 1e-4)

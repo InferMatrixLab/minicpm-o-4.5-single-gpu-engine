@@ -276,10 +276,16 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="engine.server")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--backend", default="engine.runtime.backend:EngineBackend")
+    ap.add_argument("--backend", default=None, help="module:Class (default: the config's \"backend\" key, else the Track T backend)")
     ap.add_argument("--config", default=None)
     a = ap.parse_args(argv)
-    mod, _, cls = a.backend.partition(":")
+    spec = a.backend
+    if spec is None and a.config:
+        import json
+        from pathlib import Path
+
+        spec = json.loads(Path(a.config).read_text()).get("backend")
+    mod, _, cls = (spec or "engine.runtime.backend:EngineBackend").partition(":")
     backend = getattr(__import__(mod, fromlist=[cls]), cls).from_config(a.config)
     web.run_app(EngineServer(backend).app, host=a.host, port=a.port, print=None)
     return 0

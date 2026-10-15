@@ -37,9 +37,18 @@ def _trim(cache: torch.Tensor, keep: int, dim: int) -> torch.Tensor:
 
 
 class BatchedToken2Wav:
-    def __init__(self, t2w: Token2Wav):
+    def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False):
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         self.dtype = torch.float16 if t2w.float16 else torch.float32
+        self.graphs = None
+        if use_graphs:
+            from engine.runtime.dit_graph import EstimatorGraphs
+
+            est = self.flow.decoder.estimator
+            fn = BatchedToken2Wav._estimator_temb
+            if compile_estimator:  # inductor fuses the adaLN / norm / activation chains (dynamic shapes: one compile)
+                fn = torch.compile(fn, dynamic=True)
+            self.graphs = EstimatorGraphs(est, fn, next(est.parameters()).dtype, self.dtype)
 
     @torch.inference_mode()
     def decode(self, items: list[tuple[StreamState, list[int], bool]]) -> list[np.ndarray]:
@@ -152,18 +161,18 @@ class BatchedToken2Wav:
         mu_in = torch.cat([mu, torch.zeros_like(mu)])
         spks_in = torch.cat([spks, torch.zeros_like(spks)])
         cond_in = torch.zeros_like(mu_in)
-        new_att, new_cnn = [], []
+        new_att = A.new_empty((steps, depth, 2 * n) + A.shape[3:4] + (T + L, A.shape[5]))
+        new_cnn = torch.empty_like(C)
+        call = self.graphs if self.graphs is not None else (lambda *a: self._estimator(est, *a))
         for step in range(1, steps + 1):
-            dphi, nc, na = self._estimator(est, x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, C[step - 1], A[step - 1], mask)
-            new_att.append(na)
-            new_cnn.append(nc)
+            dphi, nc, na = call(x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, C[step - 1], A[step - 1], mask)
+            new_att[step - 1].copy_(na)  # graph outputs are overwritten by the next replay
+            new_cnn[step - 1].copy_(nc)
             d, u = dphi.chunk(2, dim=0)
             x = x + dt * ((1.0 + cfm.inference_cfg_rate) * d - cfm.inference_cfg_rate * u)
             t = t + dt
             if step < steps:
                 dt = t_span[step + 1] - t
-        new_att = torch.stack(new_att)  # [steps, depth, 2n, nh, T + L, 2 dk]
-        new_cnn = torch.stack(new_cnn)
         for i, st in enumerate(sts):
             st.flow_cache["estimator_att_cache"] = torch.stack([new_att[:, :, i, :, :T + lens[i]], new_att[:, :, n + i, :, :T + lens[i]]], dim=2)
             st.flow_cache["estimator_cnn_cache"] = torch.stack([new_cnn[:, :, i], new_cnn[:, :, n + i]], dim=2)
@@ -172,9 +181,13 @@ class BatchedToken2Wav:
     @staticmethod
     def _estimator(est, x, mu, t, spks, cond, cnn_cache, att_cache, mask):
         """``DiT.forward_chunk`` (eager path) with a key mask for padded caches; returns (dphi, new cnn, new att)."""
+        return BatchedToken2Wav._estimator_temb(est, x, mu, est.t_embedder(t).unsqueeze(1), spks, cond, cnn_cache, att_cache, mask)
+
+    @staticmethod
+    def _estimator_temb(est, x, mu, t, spks, cond, cnn_cache, att_cache, mask):
+        """The estimator after the timestep embedding (``t``: [rows, 1, hidden]); this part is graph-captured."""
         from einops import pack, repeat
 
-        t = est.t_embedder(t).unsqueeze(1)
         x = pack([x, mu], "b * t")[0]
         x = pack([x, repeat(spks, "b c -> b c t", t=x.shape[-1])], "b * t")[0]
         x = pack([x, cond], "b * t")[0]

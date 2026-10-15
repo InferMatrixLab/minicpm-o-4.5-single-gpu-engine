@@ -131,11 +131,19 @@ class TalkerDecoder:
         torch.cuda.synchronize()
         bk.positions.zero_()
         bk.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(bk.graph):
+        with torch.cuda.graph(bk.graph, capture_error_mode="thread_local"):  # other threads' GPU work cannot invalidate it
             self._frame(bk)
         torch.cuda.synchronize()
         for p in pads:
             self.kv.release(p)
+
+    @torch.inference_mode()
+    def capture_all(self) -> None:
+        """Capture every bucket now (at startup, before other threads use the GPU)."""
+        if self.use_graphs:
+            for bk in self.buckets.values():
+                if bk.graph is None:
+                    self._capture(bk)
 
     def bucket_for(self, n: int) -> int:
         return min(b for b in self.buckets if b >= n)

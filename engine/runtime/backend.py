@@ -116,7 +116,9 @@ class EngineBackend:
     def from_config(cls, path: str | None) -> "EngineBackend":
         import json
 
-        return cls(**(json.loads(Path(path).read_text()) if path else {}))
+        cfg = json.loads(Path(path).read_text()) if path else {}
+        cfg.pop("backend", None)
+        return cls(**cfg)
 
     # --- request side ----------------------------------------------------------------------------
     def _prompt(self, req: EngineRequest) -> tuple[list[int], torch.Tensor | None]:
@@ -164,11 +166,15 @@ class EngineBackend:
 
     # --- engine thread ---------------------------------------------------------------------------
     def _run(self) -> None:
-        torch.cuda.set_device(self.device)
+        torch.cuda.set_device(torch.device(self.device).index or 0)  # torch >= 2.13 rejects a bare "cuda"
         while True:
             try:
                 while True:
-                    self._admit(self.inbox.get(block=not self.live, timeout=None if not self.live else 0))
+                    lv = self.inbox.get(block=not self.live, timeout=None if not self.live else 0)
+                    try:
+                        self._admit(lv)
+                    except Exception as e:  # a request that cannot be admitted fails alone
+                        lv.emit(RuntimeError(f"engine admission error: {type(e).__name__}: {e}"))
             except queue.Empty:
                 pass
             try:
