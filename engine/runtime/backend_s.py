@@ -100,7 +100,7 @@ class TrackSBackend:
                  t2w_graphs: bool = False, t2w_compile: bool = False, spk_threads: int = 8, t2w_min_batch: int = 8, t2w_max_wait_ms: float = 40.0,
                  switch_interval_s: float = 0.0002, first_chunk: int = 25, t2w_process: bool = False, feature_workers: int = 4,
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
-                 feature_processes: int = 0, thinker_fp8: bool = False,
+                 feature_processes: int = 0, thinker_fp8: bool = False, talker_k_max: int = 4,
                  profile: bool = False):
         from transformers import AutoTokenizer
 
@@ -158,7 +158,7 @@ class TrackSBackend:
             if t2w_graphs:  # a prepared default voice supplies the cache dtypes
                 self.t2w_batch.capture_graphs(self.t2w_batch.setup(self.t2w.features(model_dir / "assets" / "HT_ref_audio.wav")))
         self.frontend = MultimodalFrontend(model_dir, device=device)
-        self.device, self.max_live, self.talker_k = device, max_live, talker_k
+        self.device, self.max_live, self.talker_k, self.talker_k_max = device, max_live, talker_k, talker_k_max
         self.profile = profile
         self.timelines: dict[str, list[tuple[str, float]]] = {}  # request id -> (event, perf_counter), when profiling
         self.tick_profile: dict[str, list] = {}  # stage -> [calls, seconds], when profiling
@@ -448,7 +448,12 @@ class TrackSBackend:
             return
         starts_len = [self.akv.lengths[lv.seq] for lv in active]
         state = {name: torch.cat([lv.ts[name] for lv in active]) for name in ("codes", "seeds", "steps", "history", "live")}
-        codes = self.adec.decode_k([lv.seq for lv in active], state, self.talker_k)  # [K, n] on the host
+        # adaptive K: short blocks while work is waiting to join (a chunk start, a Thinker prefill) or any Thinker is
+        # still generating (one text token per tick must stay ahead of ~4 codec frames per token); long blocks once all
+        # text is done (fewer ticks per frame).  A row that hits EOS inside a block is rolled back exactly either way.
+        waiting = any((not lv.talking and lv.chunks) or not lv.thinker_done for lv in self.live.values()) or not self.inbox.empty()
+        k = self.talker_k if waiting else max(self.talker_k, self.talker_k_max)
+        codes = self.adec.decode_k([lv.seq for lv in active], state, k)  # [K, n] on the host
         for i, lv in enumerate(active):
             for name in ("codes", "seeds", "steps", "history", "live"):
                 lv.ts[name] = state[name][i:i + 1].clone()
