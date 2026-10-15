@@ -5,6 +5,8 @@
     python -m evals.campaign qualify --sweep DIR [--sweep ...] --gpu 2 [--gpu 3] --out results/l20x/campaign/qualification
     python -m evals.campaign select --qualification Q.json --sweep TUNE_DIR [--sweep ...] --out results/l20x/campaign/winners.json
     python -m evals.campaign stage-specs --winners results/l20x/campaign/winners.json [--check]
+    python -m evals.campaign envelope --winners W.json --sweep EVAL_DIR [--sweep ...] --out results/l20x/campaign/envelope.json
+    python -m evals.campaign dref --winners W.json --role guard|truncation --sweep DIR [...] --out-dir results/l20x/campaign/dref
 
 ``specs`` generates the sweeps that do not depend on measured results: one
 tuning-quality qualification sweep per seed (every baseline candidate in
@@ -543,6 +545,112 @@ def cmd_select(a) -> int:
     return 0
 
 
+# --- evaluation envelope and duration references --------------------------------------------------
+def _run_mean_ci(vals: np.ndarray, replicates: int = 10000, seed: int = 0) -> tuple[float, float]:
+    """Two-sided 90% interval of the mean over complete runs (runs are resampled, never requests)."""
+    rng = np.random.default_rng(seed)
+    means = vals[rng.integers(0, len(vals), size=(replicates, len(vals)))].mean(axis=1)
+    return float(np.quantile(means, 0.05)), float(np.quantile(means, 0.95))
+
+
+def compute_envelope(winners_path: str | Path, sweeps: list[str]) -> dict:
+    """The provisional class-R envelope: every (C, metric) winner measured on the evaluation IDs, from verified cells only."""
+    from bench.eligibility import ConfigClass, EnvelopeEntry, validate_envelope
+    from bench.semantics import SemanticsUnknown, class_r
+    from bench.stats import StatisticsInputError, per_run_values
+    from bench.verify import verify_cell
+    from evals.speech.verify_report import gpu_class
+
+    w = verify_winners(winners_path)
+    rows = {r["digest"]: r for r in verify_campaign(w["qualification"]["path"])["candidates"]}
+    inv, chosen, failed = select_cells(sweeps)
+    cells, extend, entries = {}, set(), []
+    for c in CONCURRENCIES:
+        cells[str(c)] = {}
+        for m, (field, _) in METRICS.items():
+            win = w["cells"][str(c)][m]
+            key = (win["candidate_digest"], 0, c)
+            if key not in chosen:
+                raise WinnerError(f"C={c} {m}: winner {win['candidate_id']} has no verified evaluation cell")
+            v = verify_cell(chosen[key]["cell"])
+            spec = v.spec
+            if spec["kind"] != "performance" or spec["id_set"] != "eval" or not EVAL_K <= int(spec["k"]) <= 10:
+                raise WinnerError(f"C={c} {m}: {chosen[key]['cell']} is not a K=5..10 evaluation performance cell")
+            if gpu_class(spec["hardware"]) != w["gpu_class"]:
+                raise WinnerError(f"C={c} {m}: evaluation hardware class differs from the tuning class")
+            try:
+                cr = class_r(spec["candidate"], bool((rows[win["candidate_digest"]].get("qualification") or {}).get("effective_inputs_eligible")))
+            except SemanticsUnknown as e:
+                raise WinnerError(f"C={c} {m}: {e}") from e
+            try:
+                vals = per_run_values(v.measured_summaries, field)
+            except StatisticsInputError as e:
+                raise WinnerError(f"C={c} {m}: {e}") from e
+            mean, (lo, hi) = float(vals.mean()), _run_mean_ci(vals)
+            wide = (hi - lo) > 0.10 * mean
+            if wide and int(spec["k"]) < 10:
+                extend.add((c, win["candidate_digest"], chosen[key]["cell"]))
+            entries.append(EnvelopeEntry(gpu=spec["hardware"]["gpu_sku"], concurrency=c, metric=m, config=cr, value=mean,
+                                         qualified=rows[win["candidate_digest"]]["status"] == "qualified", provisional=True))
+            cells[str(c)][m] = {"candidate_id": win["candidate_id"], "candidate_digest": win["candidate_digest"], "cell": chosen[key]["cell"],
+                                "experiment_digest": json.loads((Path(chosen[key]["cell"]) / "experiment.json").read_text())["experiment_digest"],
+                                "k": int(spec["k"]), "runs": [float(x) for x in vals], "mean": mean, "ci90": [lo, hi], "interval_too_wide": wide,
+                                "tuning_value": win["value"]}
+    validate_envelope(entries, w["gpu_class"]["gpu_sku"])
+    fails = [{"candidate_digest": d, **f} for d, fs in sorted(failed.items()) for f in fs]
+    return {"schema": "envelope/v1", "provisional": True, "gpu_class": w["gpu_class"], "winners": {"path": str(winners_path), "sha256": _sha(winners_path)},
+            "sweeps": [str(s) for s in sweeps], "cells": cells, "extend": sorted([list(e) for e in extend]), "failures": fails}
+
+
+def envelope_markdown(doc: dict) -> str:
+    units = {"throughput": "frames/s", "ttfa_p50": "s", "ttfa_p95": "s", "rtf_mean": ""}
+    out = [f"# Provisional class-R envelope ({doc['gpu_class']['gpu_sku']}, driver {doc['gpu_class']['gpu_driver']})", "",
+           "Winners were selected on the tuning IDs and measured on the evaluation IDs (fresh server per run, run0 discarded). "
+           "Each value is the mean over K measured runs with its 90% run-bootstrap interval.", "",
+           "| C | " + " | ".join(f"{m} ({units[m]})" if units[m] else m for m in METRICS) + " |", "|---|" + "---|" * len(METRICS)]
+    for c in CONCURRENCIES:
+        row = []
+        for m in METRICS:
+            e = doc["cells"][str(c)][m]
+            row.append(f"{e['mean']:.4g} [{e['ci90'][0]:.4g}, {e['ci90'][1]:.4g}] K={e['k']}<br>{e['candidate_id']}")
+        out.append(f"| {c} | " + " | ".join(row) + " |")
+    out += ["", f"Cells whose interval exceeds 10% of the estimate (extend to K<=10): {doc['extend'] or 'none'}", "",
+            f"Failed or superseded attempts: {len(doc['failures'])}"] + [f"- {f['cell']}: {f['reasons'][:1]}" for f in doc["failures"]]
+    return "\n".join(out) + "\n"
+
+
+def cmd_envelope(a) -> int:
+    doc = compute_envelope(a.winners, a.sweep)
+    out = Path(a.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, indent=1))
+    out.with_suffix(".md").write_text(envelope_markdown(doc))
+    print(envelope_markdown(doc))
+    return 0
+
+
+def cmd_dref(a) -> int:
+    """Duration references of each throughput winner: the guard from its evaluation cell, truncation from its full-set cells."""
+    from evals.speech.verify_report import build_dref
+
+    w = verify_winners(a.winners)
+    inv, chosen, _ = select_cells(a.sweep)
+    out = Path(a.out_dir)
+    for c in (CONCURRENCIES if a.role == "guard" else (32, 1)):
+        dg = w["cells"][str(c)]["throughput"]["candidate_digest"]
+        want = DREF_SEEDS[a.role]
+        cells = [chosen[(dg, s, c)]["cell"] for s in want if (dg, s, c) in chosen]
+        if len(cells) != len(want):
+            print(f"C={c}: throughput winner {w['cells'][str(c)]['throughput']['candidate_id']} lacks verified cells for seeds {want}")
+            continue
+        doc = build_dref(cells, out / f"dref_{a.role}_c{c}.json", a.role, a.winners)
+        print(f"C={c}: {a.role} D_ref of {doc['candidate_id']} over {len(doc['rows'])} rows")
+    return 0
+
+
+DREF_SEEDS = {"guard": [0], "truncation": [0, 1, 2]}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="evals.campaign")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -561,8 +669,18 @@ def main(argv=None) -> int:
     ss = sub.add_parser("stage-specs")
     ss.add_argument("--winners", required=True)
     ss.add_argument("--check", action="store_true")
+    ev = sub.add_parser("envelope")
+    ev.add_argument("--winners", required=True)
+    ev.add_argument("--sweep", action="append", required=True)
+    ev.add_argument("--out", required=True)
+    dr = sub.add_parser("dref")
+    dr.add_argument("--winners", required=True)
+    dr.add_argument("--role", choices=sorted(DREF_SEEDS), required=True)
+    dr.add_argument("--sweep", action="append", required=True)
+    dr.add_argument("--out-dir", required=True)
     a = ap.parse_args(argv)
-    return {"specs": cmd_specs, "classify": cmd_classify, "qualify": cmd_qualify, "select": cmd_select, "stage-specs": cmd_stage_specs}[a.cmd](a)
+    return {"specs": cmd_specs, "classify": cmd_classify, "qualify": cmd_qualify, "select": cmd_select, "stage-specs": cmd_stage_specs,
+            "envelope": cmd_envelope, "dref": cmd_dref}[a.cmd](a)
 
 
 if __name__ == "__main__":
