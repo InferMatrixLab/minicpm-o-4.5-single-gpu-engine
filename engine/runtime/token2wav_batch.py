@@ -112,6 +112,7 @@ class BatchedToken2Wav:
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.merge_finals = True
+        self.max_flow_streams = 16
         self.profile: dict | None = None  # stage -> [calls, seconds, items] when set
         self.hift_graphs = self.enc_graphs = None
         if use_graphs:
@@ -146,10 +147,13 @@ class BatchedToken2Wav:
         mels: list[torch.Tensor | None] = [None] * len(items)
         with strict_fp32():
             with torch.amp.autocast("cuda", dtype=self.dtype):
-                for (_, last), idx in groups.items():
-                    for i, m in zip(idx, self._prof("flow", len(idx), self._flow, [items[i][0] for i in idx], [items[i][1] for i in idx], last,
-                                                    [bool(items[i][2]) for i in idx])):
-                        mels[i] = m
+                for (_, last), idx_all in groups.items():
+                    # at most max_flow_streams per flow call: the padded caches of a call are staged for all Euler steps
+                    for a in range(0, len(idx_all), self.max_flow_streams):
+                        idx = idx_all[a:a + self.max_flow_streams]
+                        for i, m in zip(idx, self._prof("flow", len(idx), self._flow, [items[i][0] for i in idx], [items[i][1] for i in idx], last,
+                                                        [bool(items[i][2]) for i in idx])):
+                            mels[i] = m
             return self._prof("vocode", len(items), self._vocode, items, mels)
 
     @torch.inference_mode()

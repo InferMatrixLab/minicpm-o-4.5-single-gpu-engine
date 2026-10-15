@@ -64,7 +64,7 @@ def _feat_job(ref: bytes):
     return tuple(x.cpu() for x in out)
 
 
-SETUP_FRAME_BUDGET = 64 * 512  # rows x frames per eager batched setup call
+SETUP_FRAME_BUDGET = 16 * 512  # rows x frames per eager batched setup call (its new caches: ~2.7 GB in FP16)
 
 
 def _feat_warm(ref: bytes):
