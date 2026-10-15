@@ -118,10 +118,32 @@ def fuse_weights(w: dict[str, torch.Tensor], spec: DecoderSpec) -> list[dict[str
     return out
 
 
+def hf_rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
+    """The reference rounding: normalise in fp32, cast to the activation dtype, then scale by the weight in that dtype."""
+    xf = x.float()
+    return w * (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)).to(x.dtype)
+
+
+def hf_rope(q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, theta: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate-half RoPE with cos/sin computed in fp32 and cast to the activation dtype (the reference rounding)."""
+    d = q.shape[-1]
+    inv = 1.0 / (theta ** (torch.arange(0, d, 2, device=q.device, dtype=torch.int64).float() / d))
+    freqs = positions.float()[:, None] * inv[None]
+    emb = torch.cat([freqs, freqs], dim=-1)
+    cos, sin = emb.cos().to(q.dtype)[:, None], emb.sin().to(q.dtype)[:, None]
+
+    def rot(x):
+        return torch.cat([-x[..., d // 2:], x[..., : d // 2]], dim=-1)
+
+    return q * cos + rot(q) * sin, k * cos + rot(k) * sin
+
+
 class DecoderRunner:
-    def __init__(self, weights: dict[str, torch.Tensor], spec: DecoderSpec, kv: PagedKV, workspace_mb: int = 256):
+    def __init__(self, weights: dict[str, torch.Tensor], spec: DecoderSpec, kv: PagedKV, workspace_mb: int = 256, numerics: str = "hf"):
+        """``numerics="hf"`` rounds norms and RoPE as the reference does; ``"fused"`` uses FlashInfer's fused kernels."""
         import flashinfer
 
+        self.numerics = numerics
         self.spec, self.kv = spec, kv
         self.layers = fuse_weights(weights, spec)
         self.final_norm = weights[f"{spec.prefix}norm.weight"]
@@ -139,24 +161,29 @@ class DecoderRunner:
         s, fi = self.spec, self._fi
         self.plan(lay)
         nq, nk = s.num_heads * s.head_dim, s.num_kv_heads * s.head_dim
+        hf = self.numerics == "hf"
+        norm = (lambda t, w: hf_rms_norm(t, w, s.rms_eps)) if hf else (lambda t, w: fi.rmsnorm(t, w, s.rms_eps))
         for i, L in enumerate(self.layers):
-            h = fi.rmsnorm(x, L["ln1"], s.rms_eps)
+            h = norm(x, L["ln1"])
             qkv = F.linear(h, L["qkv"])
             q = qkv[:, :nq].reshape(-1, s.num_heads, s.head_dim)
             k = qkv[:, nq:nq + nk].reshape(-1, s.num_kv_heads, s.head_dim)
             v = qkv[:, nq + nk:].reshape(-1, s.num_kv_heads, s.head_dim)
             if s.qk_norm:
-                q = fi.rmsnorm(q.reshape(-1, s.head_dim), L["q_norm"], s.rms_eps).view_as(q)
-                k = fi.rmsnorm(k.reshape(-1, s.head_dim), L["k_norm"], s.rms_eps).view_as(k)
-            else:
+                q = norm(q.reshape(-1, s.head_dim), L["q_norm"]).view_as(q)
+                k = norm(k.reshape(-1, s.head_dim), L["k_norm"]).view_as(k)
+            q, k = q.contiguous(), k.contiguous()
+            if hf:
+                q, k = hf_rope(q, k, lay.positions, s.rope_theta)
                 q, k = q.contiguous(), k.contiguous()
-            fi.apply_rope_pos_ids_inplace(q, k, lay.positions, rope_theta=s.rope_theta)
+            else:
+                fi.apply_rope_pos_ids_inplace(q, k, lay.positions, rope_theta=s.rope_theta)
             fi.append_paged_kv_cache(k, v.contiguous(), lay.batch_indices, lay.positions, (self.kv.k[i], self.kv.v[i]), lay.kv_indices,
                                      lay.kv_indptr, lay.kv_last_page_len)
             a = self.prefill.run(q, (self.kv.k[i], self.kv.v[i]))
             x = x + F.linear(a.reshape(-1, nq), L["o"])
-            h = fi.rmsnorm(x, L["ln2"], s.rms_eps)
+            h = norm(x, L["ln2"])
             gu = F.linear(h, L["gate_up"])
             g, u = gu.chunk(2, dim=-1)
             x = x + F.linear(F.silu(g) * u, L["down"])
-        return fi.rmsnorm(x, self.final_norm, s.rms_eps)
+        return norm(x, self.final_norm)

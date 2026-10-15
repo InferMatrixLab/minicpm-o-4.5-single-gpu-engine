@@ -45,7 +45,7 @@ def test_condition_and_teacher_forced_logits():
         shifted = ta.condition(reply[1:], h[0][:-1])  # hidden states one position early relative to the tokens
         shifted_worst = min(shifted_worst, float((shifted.float() - want[1:]).norm() / want[1:].norm()))
         tcache = ta.new_cache(1, cond.shape[0] + r["codes"].numel() + 4)
-        lg = [ta.forward(cond[None], tcache, row)]
+        lg = [ta.forward(want.to(ta.dtype)[None], tcache, row)]  # HF's condition: the logits check isolates the Talker
         codes = r["codes"].cuda()
         for c in codes[:-1]:
             lg.append(ta.forward(ta.code_embed(c.view(1, 1)), tcache, row))
