@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights
-from engine.talker_sampler import PAD, TalkerSampling, draw, repetition_penalty, top_k_filter, top_p_filter
+from engine.talker_sampler import PAD, TalkerSampling, draw, repetition_penalty, top_p_top_k_filter
 
 PAD_SEQ_BASE = 1 << 40  # scratch sequence ids for bucket padding rows
 
@@ -28,7 +28,7 @@ PAD_SEQ_BASE = 1 << 40  # scratch sequence ids for bucket padding rows
 def processed_logits_static(logits, history, steps, eos, cfg: TalkerSampling):
     """``talker_sampler.processed_logits`` without data-dependent host branches (graph-safe)."""
     x = logits.float() / cfg.temperature
-    y = top_k_filter(top_p_filter(repetition_penalty(x, history, cfg.repetition_penalty), cfg.top_p, cfg.min_keep), cfg.top_k, cfg.min_keep)
+    y = top_p_top_k_filter(repetition_penalty(x, history, cfg.repetition_penalty), cfg.top_p, cfg.top_k, cfg.min_keep)
     x = torch.where((steps > 0)[:, None], y, x)
     col = torch.arange(x.size(-1), device=x.device)[None, :] == eos
     x = x.masked_fill(col & (steps < cfg.min_new_tokens)[:, None], float("-inf"))

@@ -126,3 +126,18 @@ def test_padded_and_cancelled_rows_never_change_valid_rows():
     got = torch.stack([ts.step(s, noisy[i], EOS, CFG) for i in range(30)])
     assert torch.equal(got[:, [0, 1, 3]], want[:, [0, 1, 3]]) and (got[:, 2] == ts.PAD).all()
     assert int(s.steps[2]) == 0 and (s.history[2] == ts.PAD).all()
+
+
+def test_fused_top_p_top_k_equals_two_pass():
+    """top_p_top_k_filter keeps exactly what top_k_filter(top_p_filter(.)) keeps (random, peaked and flat logits)."""
+    from engine.talker_sampler import top_k_filter, top_p_filter, top_p_top_k_filter
+
+    g = torch.Generator().manual_seed(0)
+    mism = total = 0
+    for scale in (0.3, 1.0, 3.0, 8.0):
+        x = torch.randn(64, 6562, generator=g) * scale
+        a = top_k_filter(top_p_filter(x, 0.85, 3), 25, 3)
+        b = top_p_top_k_filter(x, 0.85, 25, 3)
+        mism += int((torch.isinf(a) != torch.isinf(b)).any(dim=-1).sum())
+        total += x.shape[0]
+    assert mism == 0, (mism, total)

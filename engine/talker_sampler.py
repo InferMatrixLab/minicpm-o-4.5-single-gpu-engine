@@ -81,12 +81,30 @@ def top_k_filter(x: torch.Tensor, top_k: int, min_keep: int) -> torch.Tensor:
     return x.masked_fill(x < kth, float("-inf"))
 
 
+def top_p_top_k_filter(x: torch.Tensor, top_p: float, top_k: int, min_keep: int) -> torch.Tensor:
+    """``top_k_filter(top_p_filter(x))`` without sorting the vocabulary.
+
+    Top-p keeps a prefix of the descending order: rank ``j`` survives when the mass ranked above it is below ``top_p``
+    (equivalently its ascending cumulative mass exceeds ``1 - top_p``), plus ``min_keep``; top-k then keeps the
+    ``max(top_k, min_keep)`` largest of those.  Both are a value threshold at the last kept rank, which lies within the
+    top ``k`` ranks, so ``topk`` and the full-vocabulary normaliser suffice.  The masses are summed over the top ranks
+    instead of the tail, so a token within float rounding of the top-p boundary can fall the other way.
+    """
+    k = min(max(top_k, min_keep), x.size(-1))
+    vals = torch.topk(x, k, dim=-1).values  # descending
+    p = torch.exp(vals - torch.logsumexp(x, dim=-1, keepdim=True))
+    above = p.cumsum(dim=-1) - p
+    kept = (above < top_p).sum(dim=-1).clamp(min=min(min_keep, k), max=k)
+    thr = vals.gather(1, (kept - 1)[:, None])
+    return x.masked_fill(x < thr, float("-inf"))
+
+
 def processed_logits(logits: torch.Tensor, history: torch.Tensor, steps: torch.Tensor, eos: int, cfg: TalkerSampling) -> torch.Tensor:
     """Steps 1-4 for every row; rows at frame 0 skip the penalty and the warpers."""
     x = logits.float() / cfg.temperature
     later = steps > 0
     if bool(later.any()):
-        y = top_k_filter(top_p_filter(repetition_penalty(x, history, cfg.repetition_penalty), cfg.top_p, cfg.min_keep), cfg.top_k, cfg.min_keep)
+        y = top_p_top_k_filter(repetition_penalty(x, history, cfg.repetition_penalty), cfg.top_p, cfg.top_k, cfg.min_keep)
         x = torch.where(later[:, None], y, x)
     col = torch.arange(x.size(-1), device=x.device)[None, :] == eos
     x = x.masked_fill(col & (steps < cfg.min_new_tokens)[:, None], float("-inf"))
