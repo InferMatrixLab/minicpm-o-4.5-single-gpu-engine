@@ -23,6 +23,7 @@ construction makes it reproducible across processes.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import tempfile
 from dataclasses import dataclass
@@ -30,11 +31,41 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 SAMPLE_RATE = 24000
 MEL_CACHE = 8
 SOURCE_CACHE = MEL_CACHE * 480
 SILENCE_TOKEN = 4218
+
+
+@contextlib.contextmanager
+def strict_fp32():
+    """cuDNN convolutions in true FP32 (no TF32) for the duration.
+
+    HiFT's source integrates f0 over every sample and its output phase is ``sin`` of a conv output, so TF32 rounding
+    (torch's cuDNN default) moves the waveform by ~30% relative L2 against FP32 and makes it depend on the batch size
+    through cuDNN's algorithm choice.  AC-3.4 compares against FP32, so Token2Wav runs with TF32 off.
+    """
+    prev = torch.backends.cudnn.allow_tf32
+    torch.backends.cudnn.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.allow_tf32 = prev
+
+
+def own_flow_cache(cache: dict, n_timesteps: int) -> dict:
+    """A stream's copy of the flow caches the reference returns.
+
+    The reference returns its model-wide scratch buffers (``cnn_cache_buffer``, ``att_cache_buffer`` slices of the DiT
+    and the flow-matching solver, sized for 16 Euler steps); the next request's chunk overwrites them.  Only the first
+    ``n_timesteps`` step entries are ever read, so a stream keeps just those.
+    """
+    out = {k: v.clone() for k, v in cache.items()}
+    for k in ("estimator_cnn_cache", "estimator_att_cache"):
+        out[k] = cache[k][:n_timesteps].clone()
+    return out
 
 
 def clone_tree(x):
@@ -71,6 +102,46 @@ class StreamState:
     flow_cache: dict
     hift_cache: dict
     chunks: int = 0
+    noise_seed: int = 0  # HiFT source noise of chunk k is drawn from chunk_noise_seed(noise_seed, k)
+
+
+def chunk_noise_seed(noise_seed: int, chunk: int) -> int:
+    return (noise_seed * 1_000_003 + chunk) & ((1 << 63) - 1)
+
+
+def hift_forward(hift, mel: torch.Tensor, cache_source: torch.Tensor, seeds: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+    """``HiFTGenerator.forward`` with the source noise of row ``i`` drawn from its own generator seeded ``seeds[i]``.
+
+    Each row draws what a batch-1 reference call draws from the global generator right after
+    ``torch.manual_seed(seeds[i])`` (``SineGen2``: initial harmonic phases ``rand``, then the additive noise
+    ``randn``; the discarded noise branch of ``SourceModuleHnNSF2`` is not drawn), so a batched call equals
+    per-stream calls and either equals the reference under that seeding.
+    """
+    f0 = hift.f0_predictor(mel)
+    s = hift.f0_upsamp(f0[:, None]).transpose(1, 2)  # [b, n, 1]
+    src = hift.m_source
+    gen = src.l_sin_gen
+    assert type(src).__name__ == "SourceModuleHnNSF2" and not gen.flag_for_pulse, type(src)
+    dev = s.device
+    fn = torch.multiply(s, torch.arange(1, gen.harmonic_num + 2, device=dev, dtype=torch.float32)[None, None, :])
+    rad = (fn / gen.sampling_rate) % 1
+    gens = [torch.Generator(device=dev).manual_seed(int(x)) for x in seeds]
+    rand_ini = torch.cat([torch.rand(1, gen.dim, device=dev, generator=g) for g in gens])
+    # the reference fills ``randn_like(sine)`` and ``sine`` is a transposed (channel-major) view, so draw [1, dim, n]
+    noise = torch.cat([torch.randn(1, gen.dim, s.shape[1], device=dev, generator=g) for g in gens]).transpose(1, 2)
+    rand_ini[:, 0] = 0
+    rad[:, 0, :] = rad[:, 0, :] + rand_ini
+    rad = F.interpolate(rad.transpose(1, 2), scale_factor=1 / gen.upsample_scale, mode="linear").transpose(1, 2)
+    phase = torch.cumsum(rad, dim=1) * 2 * np.pi
+    phase = F.interpolate(phase.transpose(1, 2) * gen.upsample_scale, scale_factor=gen.upsample_scale, mode="linear").transpose(1, 2)
+    sine = torch.sin(phase) * gen.sine_amp
+    uv = gen._f02uv(fn[..., :1])
+    noise = (uv * gen.noise_std + (1 - uv) * gen.sine_amp / 3) * noise
+    sine = sine * uv + noise
+    s = src.l_tanh(src.l_linear(sine)).transpose(1, 2)
+    if cache_source.shape[2] != 0:
+        s[:, :, :cache_source.shape[2]] = cache_source
+    return hift.decode(x=mel, s=s), s
 
 
 class Token2Wav:
@@ -94,21 +165,28 @@ class Token2Wav:
             sf.write(f.name, wav16, 16000)  # PCM_16, as in init_token2wav_cache
             tokens, tokens_len, spk, mels, mels_len = self.ref._prepare_prompt(f.name)
         pad = torch.full((1, 3), SILENCE_TOKEN, device=tokens.device, dtype=tokens.dtype)
-        flow_cache = self.flow.setup_cache(torch.cat([tokens, pad], dim=1), mels, spk, n_timesteps=self.n_timesteps)
+        with torch.inference_mode(), strict_fp32(), torch.amp.autocast("cuda", dtype=torch.float16 if self.float16 else torch.float32):
+            flow_cache = own_flow_cache(self.flow.setup_cache(torch.cat([tokens, pad], dim=1), mels, spk, n_timesteps=self.n_timesteps),
+                                        self.n_timesteps)
         hift_cache = dict(mel=torch.zeros(1, mels.shape[2], 0, device="cuda"), source=torch.zeros(1, 1, 0, device="cuda"),
                           speech=torch.zeros(1, 0, device="cuda"))
         return Prompt(tokens, tokens_len, spk, mels, mels_len, flow_cache, hift_cache)
 
-    def new_stream(self, prompt: Prompt) -> StreamState:
-        return StreamState(prompt, clone_tree(prompt.flow_cache), clone_tree(prompt.hift_cache))
+    def new_stream(self, prompt: Prompt, noise_seed: int = 0) -> StreamState:
+        return StreamState(prompt, clone_tree(prompt.flow_cache), clone_tree(prompt.hift_cache), noise_seed=noise_seed)
 
     @torch.inference_mode()
     def decode(self, st: StreamState, window: list[int], last: bool) -> np.ndarray:
         """One window of codec tokens -> float32 waveform samples (the reference ``stream(..., return_waveform=True)``)."""
+        with strict_fp32():
+            return self._decode(st, window, last)
+
+    def _decode(self, st: StreamState, window: list[int], last: bool) -> np.ndarray:
         p = st.prompt
         tok = torch.tensor([window], dtype=torch.int32, device="cuda")
         with torch.amp.autocast("cuda", dtype=torch.float16 if self.float16 else torch.float32):
-            mel, st.flow_cache = self.flow.inference_chunk(token=tok, spk=p.spk, cache=st.flow_cache, last_chunk=last, n_timesteps=self.n_timesteps)
+            mel, cache = self.flow.inference_chunk(token=tok, spk=p.spk, cache=st.flow_cache, last_chunk=last, n_timesteps=self.n_timesteps)
+        st.flow_cache = own_flow_cache(cache, self.n_timesteps)
         keep = p.mels.shape[1]
         c = st.flow_cache
         if c["estimator_att_cache"].shape[4] > keep + 100:
@@ -117,7 +195,7 @@ class Token2Wav:
             c["conformer_att_cache"] = torch.cat([c["conformer_att_cache"][:, :, :, :keep, :], c["conformer_att_cache"][:, :, :, -100:, :]], dim=3)
         h = st.hift_cache
         mel = torch.concat([h["mel"], mel], dim=2)
-        speech, source = self.hift(mel, h["source"])
+        speech, source = hift_forward(self.hift, mel, h["source"], [chunk_noise_seed(st.noise_seed, st.chunks)])
         if h["speech"].shape[-1] > 0:
             speech = fade_in_out(speech, h["speech"], self.window)
         first = h["speech"].shape[-1] == 0
