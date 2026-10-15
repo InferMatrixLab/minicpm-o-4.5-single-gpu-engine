@@ -211,6 +211,8 @@ class EngineServer:
             first = await events.__anext__()
         except Overloaded as e:
             return _err(503, str(e) or "engine at its admission limit", "server_overloaded")
+        except BadRequest as e:  # media or prompt problems found while preparing the request
+            return _err(400, str(e), "invalid_request_error")
         except StopAsyncIteration:
             first = Done()
         await resp.prepare(request)
@@ -254,6 +256,8 @@ class EngineServer:
                     done = ev
         except Overloaded as e:
             return _err(503, str(e) or "engine at its admission limit", "server_overloaded")
+        except BadRequest as e:
+            return _err(400, str(e), "invalid_request_error")
         msg = {"role": "assistant", "content": "".join(text)}
         if "audio" in req.modalities:
             wav = np.concatenate(audio) if audio else np.zeros(0, dtype=np.float32)
