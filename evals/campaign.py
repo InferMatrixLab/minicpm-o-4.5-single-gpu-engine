@@ -226,8 +226,11 @@ def inventory(sweeps: list[str]) -> dict[tuple, dict]:
             cand = make_candidate(c)
             for conc in spec["concurrencies"]:
                 key = (cand.digest, int(spec.get("seed_index", 0)), int(conc))
-                inv.setdefault(key, {"candidate_id": cand.candidate_id, "sweeps": [], "kind": spec.get("kind", "performance"),
-                                     "id_set": spec.get("id_set", "eval"), "gpu": int(spec["gpu"]), "k": int(spec["k"])})["sweeps"].append(str(sw))
+                e = inv.setdefault(key, {"candidate_id": cand.candidate_id, "sweeps": [], "kind": spec.get("kind", "performance"),
+                                         "id_set": spec.get("id_set", "eval"), "declared": {}})
+                e["sweeps"].append(str(sw))
+                e["declared"][str(sw)] = {"gpu": int(spec["gpu"]), "k": int(spec["k"]), "kind": spec.get("kind", "performance"),
+                                          "id_set": spec.get("id_set", "eval")}
     return inv
 
 
@@ -257,10 +260,11 @@ def select_cells(sweeps: list[str]) -> tuple[dict, dict[tuple, dict], dict]:
     failed: dict[str, list[dict]] = {}
     for a in attempts(sweeps):
         key = (a["digest"], a["seed_index"], a["concurrency"])
-        declared = inv.get(key)
+        entry = inv.get(key)
+        declared = (entry or {}).get("declared", {}).get(a["sweep"])  # the attempt's own sweep declaration
         schedule_ok = declared is not None and (a["k"] == declared["k"] or (a["k_updates"] and declared["k"] < a["k"] <= 10
                                                                             and a["k_updates"][0].get("from") == declared["k"]))
-        if a["ok"] and declared is not None and a["sweep"] in declared["sweeps"] and a["kind"] == declared["kind"] and a["id_set"] == declared["id_set"] \
+        if a["ok"] and declared is not None and a["kind"] == declared["kind"] and a["id_set"] == declared["id_set"] \
                 and a["gpu"] == declared["gpu"] and schedule_ok:
             chosen.setdefault(key, []).append(a)
             continue
