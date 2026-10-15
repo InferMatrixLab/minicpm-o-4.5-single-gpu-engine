@@ -1,7 +1,7 @@
 """Archive abandoned sglang-omni MPS state dirs (sglang's own documented cleanup), only when provably abandoned.
 
 Abandoned: every owner marker PID is dead, the recorded control/server PIDs (if any) are dead, and no live process has
-CUDA_MPS_PIPE_DIRECTORY pointing at the dir.  The dir is moved (not deleted) under results/l20x/mps_probe/abandoned/.
+CUDA_MPS_PIPE_DIRECTORY pointing at the dir.  Its logs and owner markers are copied under results/l20x/mps_probe/abandoned/, then the dir is removed.
 """
 import json, os, shutil, sys, time
 from pathlib import Path
@@ -54,8 +54,13 @@ def main():
                 ok, info = abandoned(d)  # re-check: a new server may have just claimed it
             if ok:
                 dst = DEST / f"{d.name}.{time.strftime('%Y%m%d-%H%M%S')}"
-                shutil.move(str(d), str(dst))
+                dst.mkdir(parents=True, exist_ok=True)
+                for sub in ("log", "owners"):  # regular files only: the pipe dir holds FIFOs and sockets
+                    if (d / sub).is_dir():
+                        shutil.copytree(d / sub, dst / sub, dirs_exist_ok=True)
+                (dst / "pipe_listing.txt").write_text("\n".join(sorted(x.name for x in (d / "pipe").iterdir())) if (d / "pipe").is_dir() else "")
                 (dst / "archived.json").write_text(json.dumps({"unix": time.time(), **info}, indent=1))
+                shutil.rmtree(d)
                 print(f"[{time.strftime('%F %T')}] archived abandoned {d.name} -> {dst} {info}", flush=True)
         time.sleep(2.0)
 
