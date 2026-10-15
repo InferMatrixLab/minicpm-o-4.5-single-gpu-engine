@@ -191,3 +191,24 @@ def test_batched_setup_matches_reference_setup_cache():
     a = np.concatenate([bt.decode([(sa, *w)])[0] for w in ws])
     b = np.concatenate([bt.decode([(sb, *w)])[0] for w in ws])
     assert np.linalg.norm(a - b) / np.linalg.norm(b) <= 1e-4
+
+
+def test_hift_graphs_match_eager():
+    """Graph-replayed HiFT (first-window and steady shapes, several rows) equals the eager seeded HiFT (same mel)."""
+    from engine.models.token2wav import SOURCE_CACHE, Token2Wav, hift_forward
+    from engine.runtime.hift_graph import HiFTGraphs
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav")
+    hg = HiFTGraphs(ours.hift, rows=(1, 2, 4))
+    g = torch.Generator(device="cuda").manual_seed(0)
+    with torch.inference_mode():
+        for F, src in ((50, 0), (58, SOURCE_CACHE)):
+            for n in (1, 3):
+                mel = torch.randn(n, 80, F, device="cuda", generator=g)
+                cs = torch.randn(n, 1, src, device="cuda", generator=g) * 0.01
+                a, sa = hg(mel, cs, list(range(n)))
+                with __import__("engine.models.token2wav", fromlist=["strict_fp32"]).strict_fp32():
+                    b, sb = hift_forward(ours.hift, mel, cs, list(range(n)))
+                assert a.shape == b.shape and sa.shape == sb.shape
+                assert float((a - b).norm() / b.norm()) <= 1e-4, (F, n)
+    assert hg.counts["graph"] == 4

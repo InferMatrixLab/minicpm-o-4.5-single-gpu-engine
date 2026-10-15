@@ -36,6 +36,39 @@ def _trim(cache: torch.Tensor, keep: int, dim: int) -> torch.Tensor:
     return cache
 
 
+def _encoder_core(enc, xs, cnns, A1, mask1, A2, mask2, last: bool, out=None):
+    """The flow encoder's chunk forward after the token embedding, on padded caches (graph-capturable): embed, pre-lookahead
+    conv, the first conformer stack, the 2x upsampling, the second stack and the final norm.  Returns
+    ``(xs, new first-stack att caches, new second-stack att caches, new cnn cache)`` (into ``out`` when given)."""
+    L1, L2 = A1.shape[3], A2.shape[3]
+    xs, _, _ = enc.embed(xs, None)
+    if last:
+        xs = F.pad(xs, (0, 0, 0, enc.pre_lookahead_layer.pre_lookahead_len))
+    xs, new_cnn1 = enc.pre_lookahead_layer.forward_chunk(xs, cache=cnns[:, :, :2])
+    pos = enc.embed.position_encoding(offset=None, size=L1 + xs.shape[1])
+    new1 = []
+    for idx, layer in enumerate(enc.encoders):
+        xs, _, c, _ = layer(xs, mask1, pos, att_cache=A1[idx])
+        new1.append(c)
+    xs = xs.transpose(1, 2).contiguous()
+    xs, _, new_cnn2 = enc.up_layer.forward_chunk(xs, None, cache=cnns[:, :, 2:])
+    xs = xs.transpose(1, 2).contiguous()
+    xs, _, _ = enc.up_embed(xs, None)
+    pos = enc.embed.position_encoding(offset=None, size=L2 + xs.shape[1])
+    new2 = []
+    for idx, layer in enumerate(enc.up_encoders):
+        xs, _, c, _ = layer(xs, mask2, pos, att_cache=A2[idx])
+        new2.append(c)
+    if enc.normalize_before:
+        xs = enc.after_norm(xs)
+    res = (xs, torch.stack(new1), torch.stack(new2), torch.cat([new_cnn1, new_cnn2], dim=2))
+    if out is None:
+        return res
+    for o, r in zip(out, res):
+        o.copy_(r)
+    return out
+
+
 def _conv_chunk(conv, x: torch.Tensor, cache: torch.Tensor, tr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``CausalConv1d.forward_chunk`` whose new cache is the 2 frames ending at each row's real length ``tr``."""
     full = torch.cat([cache, x], dim=2)  # [b, c, 2 + T]
@@ -70,7 +103,15 @@ def _block_chunk(block, x, c, cnn_cache, att_cache, mask, tr):
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False):
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
+        self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.profile: dict | None = None  # stage -> [calls, seconds, items] when set
+        self.hift_graphs = self.enc_graphs = None
+        if use_graphs:
+            from engine.runtime.dit_graph import EncoderGraphs
+            from engine.runtime.hift_graph import HiFTGraphs
+
+            self.hift_graphs = HiFTGraphs(self.hift)
+            self.enc_graphs = EncoderGraphs(self.flow.encoder, _encoder_core, self.dtype)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.graphs = None
         if use_graphs:
@@ -95,6 +136,21 @@ class BatchedToken2Wav:
                     for i, m in zip(idx, self._prof("flow", len(idx), self._flow, [items[i][0] for i in idx], [items[i][1] for i in idx], last)):
                         mels[i] = m
             return self._prof("vocode", len(items), self._vocode, items, mels)
+
+    @torch.inference_mode()
+    def capture_graphs(self, prompt) -> dict:
+        """Capture every Token2Wav graph now (startup); ``prompt`` (any prepared one) supplies the cache dtypes."""
+        n = {}
+        if self.graphs is not None:
+            n["estimator"] = self.graphs.capture_all()
+        if self.hift_graphs is not None:
+            n["hift"] = self.hift_graphs.capture_all()
+        if self.enc_graphs is not None:
+            emb_dtype = self.flow.input_embedding.weight.dtype
+            with strict_fp32():
+                n["encoder"] = self.enc_graphs.capture_all(emb_dtype, prompt.flow_cache["conformer_cnn_cache"].dtype,
+                                                           prompt.flow_cache["conformer_att_cache"].dtype)
+        return n
 
     def _prof(self, name, n, fn, *a):
         if self.profile is None:
@@ -129,57 +185,38 @@ class BatchedToken2Wav:
         return out
 
     def _encoder(self, sts: list[StreamState], xs: torch.Tensor, last: bool) -> torch.Tensor:
-        """``UpsampleConformerEncoderV2.forward_chunk`` over a batch with left-padded caches; updates each stream's caches."""
+        """``UpsampleConformerEncoderV2.forward_chunk`` over a batch with left-padded caches; updates each stream's caches.
+
+        The cache length is padded to a graph bucket for steady windows (``EncoderGraphs``), else to the batch maximum.
+        """
         enc = self.flow.encoder
         n, dev = len(sts), xs.device
         atts = [st.flow_cache["conformer_att_cache"] for st in sts]  # [depth1 + depth2, 1, nh, 2 * t1, 2 dk]
         cnns = torch.cat([st.flow_cache["conformer_cnn_cache"] for st in sts])  # [n, c, 2 + 2 * stride]
-        d1 = len(enc.encoders)
+        d1, d2, s = len(enc.encoders), len(enc.up_encoders), enc.up_layer.stride
         off1 = [a.shape[3] // 2 for a in atts]
-        L1 = max(off1)
-        xs, _, _ = enc.embed(xs, None)
-        if last:
-            xs = F.pad(xs, (0, 0, 0, enc.pre_lookahead_layer.pre_lookahead_len))
-        xs, new_cnn1 = enc.pre_lookahead_layer.forward_chunk(xs, cache=cnns[:, :, :2])
-        T1 = xs.shape[1]
-        A1 = atts[0].new_zeros((d1, n) + atts[0].shape[2:3] + (L1, atts[0].shape[4]))
+        graphs = self.enc_graphs if self.enc_graphs is not None and self.enc_graphs.supports(n, xs.shape[1], max(off1), last) else None
+        L1 = graphs.l_bucket(max(off1)) if graphs is not None else max(off1)
+        T1 = xs.shape[1] if last else xs.shape[1] - enc.pre_lookahead_layer.pre_lookahead_len
+        T2, L2 = T1 * s, L1 * s
+        nh, dk2 = atts[0].shape[2], atts[0].shape[4]
+        A1 = atts[0].new_zeros((d1, n, nh, L1, dk2))
+        A2 = atts[0].new_zeros((d2, n, nh, L2, dk2))
         mask1 = torch.ones(n, T1, L1 + T1, dtype=torch.bool, device=dev)
+        mask2 = torch.ones(n, T2, L2 + T2, dtype=torch.bool, device=dev)
         for i, a in enumerate(atts):
             A1[:, i, :, L1 - off1[i]:] = a[:d1, 0, :, :off1[i]]
             mask1[i, :, :L1 - off1[i]] = False
-        pos = enc.embed.position_encoding(offset=None, size=L1 + T1)
-        new1 = []
-        for idx, layer in enumerate(enc.encoders):
-            xs, _, c, _ = layer(xs, mask1, pos, att_cache=A1[idx])
-            new1.append(c)
-        new1 = torch.stack(new1)  # [d1, n, nh, L1 + T1, 2 dk]
-        xs = xs.transpose(1, 2).contiguous()
-        xs, _, new_cnn2 = enc.up_layer.forward_chunk(xs, None, cache=cnns[:, :, 2:])
-        xs = xs.transpose(1, 2).contiguous()
-        xs, _, _ = enc.up_embed(xs, None)
-        T2, s = xs.shape[1], enc.up_layer.stride
-        L2 = L1 * s
-        A2 = atts[0].new_zeros((len(enc.up_encoders), n) + atts[0].shape[2:3] + (L2, atts[0].shape[4]))
-        mask2 = torch.ones(n, T2, L2 + T2, dtype=torch.bool, device=dev)
-        for i, a in enumerate(atts):
-            o2 = off1[i] * s
-            A2[:, i, :, L2 - o2:] = a[d1:, 0]
-            mask2[i, :, :L2 - o2] = False
-        pos = enc.embed.position_encoding(offset=None, size=L2 + T2)
-        new2 = []
-        for idx, layer in enumerate(enc.up_encoders):
-            xs, _, c, _ = layer(xs, mask2, pos, att_cache=A2[idx])
-            new2.append(c)
-        new2 = torch.stack(new2)
-        if enc.normalize_before:
-            xs = enc.after_norm(xs)
-        new_cnn = torch.cat([new_cnn1, new_cnn2], dim=2)
+            A2[:, i, :, L2 - off1[i] * s:] = a[d1:, 0]
+            mask2[i, :, :L2 - off1[i] * s] = False
+        core = graphs if graphs is not None else (lambda *a: _encoder_core(enc, *a))
+        xs, new1, new2, new_cnn = core(xs, cnns, A1, mask1, A2, mask2, last)
         for i, st in enumerate(sts):
             c1 = new1[:, i:i + 1, :, L1 - off1[i]:]
             c2 = new2[:, i:i + 1, :, L2 - off1[i] * s:]
             st.flow_cache["conformer_att_cache"] = torch.cat([c1.repeat(1, 1, 1, 2, 1), c2], dim=0)
             st.flow_cache["conformer_cnn_cache"] = new_cnn[i:i + 1].clone()
-        return xs
+        return xs.clone() if graphs is not None else xs
 
     @torch.inference_mode()
     def setup(self, feats: tuple):
@@ -318,26 +355,36 @@ class BatchedToken2Wav:
 
     # --- vocoder ------------------------------------------------------------------------------------------------------
     def _vocode(self, items, mels) -> list[np.ndarray]:
-        out: list[np.ndarray | None] = [None] * len(items)
+        """HiFT per group of equal mel / source-cache length, then the reference cross-fade, cache update and trimming on
+        the whole group, and one device-to-host copy for the call."""
         groups = defaultdict(list)
         full = []
         for i, (st, _, _) in enumerate(items):
             m = torch.concat([st.hift_cache["mel"], mels[i]], dim=2)
             full.append(m)
             groups[(m.shape[2], st.hift_cache["source"].shape[2])].append(i)
-        for _, idx in groups.items():
-            speech, source = hift_forward(self.hift, torch.cat([full[i] for i in idx]), torch.cat([items[i][0].hift_cache["source"] for i in idx]),
-                                          [chunk_noise_seed(items[i][0].noise_seed, items[i][0].chunks) for i in idx])
+        pieces: list[tuple[int, torch.Tensor]] = []
+        voc = self.hift_graphs if self.hift_graphs is not None else (lambda *a: hift_forward(self.hift, *a))
+        for (_, src_len), idx in groups.items():
+            M = torch.cat([full[i] for i in idx])
+            speech, source = voc(M, torch.cat([items[i][0].hift_cache["source"] for i in idx]),
+                                 [chunk_noise_seed(items[i][0].noise_seed, items[i][0].chunks) for i in idx])
+            first = src_len == 0  # a stream's first window has no source / speech cache yet
+            if not first:
+                speech = fade_in_out(speech, torch.cat([items[i][0].hift_cache["speech"] for i in idx]), self.t2w.window)
+            mel_c, src_c, sp_c = M[..., -MEL_CACHE:].clone(), source[:, :, -SOURCE_CACHE:].clone(), speech[:, -SOURCE_CACHE:].clone()
             for j, i in enumerate(idx):
                 st, _, last = items[i]
-                sp, h = speech[j:j + 1], st.hift_cache
-                first = h["speech"].shape[-1] == 0
-                if not first:
-                    sp = fade_in_out(sp, h["speech"], self.t2w.window)
-                st.hift_cache = dict(mel=full[i][..., -MEL_CACHE:].clone(), source=source[j:j + 1, :, -SOURCE_CACHE:].clone(),
-                                     speech=sp[:, -SOURCE_CACHE:].clone())
-                if not last:
-                    sp = torch.cat([torch.zeros(1, SOURCE_CACHE, device=sp.device), sp[:, :-SOURCE_CACHE]], dim=1) if first else sp[:, :-SOURCE_CACHE]
+                st.hift_cache = dict(mel=mel_c[j:j + 1], source=src_c[j:j + 1], speech=sp_c[j:j + 1])
                 st.chunks += 1
-                out[i] = sp.float().cpu().numpy()[0]
+                sp = speech[j]
+                if not last:
+                    sp = torch.cat([torch.zeros(SOURCE_CACHE, device=sp.device, dtype=sp.dtype), sp[:-SOURCE_CACHE]]) if first else sp[:-SOURCE_CACHE]
+                pieces.append((i, sp))
+        flat = torch.cat([p for _, p in pieces]).float().cpu().numpy() if pieces else np.zeros(0, np.float32)
+        out: list[np.ndarray | None] = [None] * len(items)
+        o = 0
+        for i, p in pieces:
+            out[i] = flat[o:o + p.numel()]
+            o += p.numel()
         return out

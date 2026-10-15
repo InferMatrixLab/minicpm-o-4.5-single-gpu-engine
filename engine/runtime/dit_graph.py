@@ -175,3 +175,124 @@ class EstimatorGraphs:
         g.replay()
         dphi, new_cnn, new_att = out
         return dphi[:n], new_cnn[:, :n], new_att[:, :n, :, :T + L]  # new frames then the real cache (padding after)
+
+
+class EncoderGraphs:
+    """CUDA graphs of the flow encoder's chunk forward (``token2wav_batch._encoder_core``) for steady windows.
+
+    Keys ``(rows, L1)``: rows padded to a bucket, the first-stack cache length padded (on the left, masked) to a bucket;
+    the window is 28 tokens (25 plus 3 lookahead), not final.  Inputs and outputs share arenas across graphs.
+    """
+
+    ROWS = (1, 2, 4, 8, 16, 32)
+    L1 = (128, 256, 384, 512)
+    TOKENS = 28
+
+    def __init__(self, enc, core_fn, autocast_dtype):
+        self.enc, self.core_fn, self.autocast_dtype = enc, core_fn, autocast_dtype
+        self.graphs: dict[tuple[int, int], tuple] = {}
+        self.pool = torch.cuda.graph_pool_handle()
+        p = next(enc.parameters())
+        self.device = p.device
+        self.dtype = p.dtype  # caches are stored in the module dtype
+        self.d1, self.d2 = len(enc.encoders), len(enc.up_encoders)
+        a = enc.encoders[0].self_attn
+        self.nh, self.dk2, self.c = a.h, 2 * a.d_k, enc._output_size
+        self.s, self.look = enc.up_layer.stride, enc.pre_lookahead_layer.pre_lookahead_len
+        self.cnn_t = 2 + 2 * self.s
+        self._arena: dict[str, torch.Tensor] = {}
+
+    def l_bucket(self, n: int) -> int:
+        return bucket(n, self.L1)
+
+    def supports(self, rows: int, tokens: int, off1: int, last: bool) -> bool:
+        return not last and tokens == self.TOKENS and rows <= self.ROWS[-1] and off1 <= self.L1[-1]
+
+    def _dims(self, rows, L1):
+        T1 = self.TOKENS - self.look
+        T2, L2 = T1 * self.s, L1 * self.s
+        return {"xs": ((rows, self.TOKENS, self.c), None), "cnn": ((rows, self.c, self.cnn_t), torch.float32),
+                "A1": ((self.d1, rows, self.nh, L1, self.dk2), self.dtype), "m1": ((rows, T1, L1 + T1), torch.bool),
+                "A2": ((self.d2, rows, self.nh, L2, self.dk2), self.dtype), "m2": ((rows, T2, L2 + T2), torch.bool),
+                "o_xs": ((rows, T2, self.c), None), "o_new1": ((self.d1, rows, self.nh, L1 + T1, self.dk2), None),
+                "o_new2": ((self.d2, rows, self.nh, L2 + T2, self.dk2), None), "o_cnn": ((rows, self.c, self.cnn_t), torch.float32)}
+
+    def _view(self, name, shape, dtype):
+        n = 1
+        for d in shape:
+            n *= d
+        buf = self._arena.get((name, dtype))
+        if buf is None or buf.numel() < n:
+            raise RuntimeError(f"encoder arena {name} too small")
+        return buf[:n].view(shape)
+
+    def _alloc(self, dtypes: dict) -> None:
+        sizes = {}
+        for rows in self.ROWS:
+            for L1 in self.L1:
+                for name, (shape, _) in self._dims(rows, L1).items():
+                    n = 1
+                    for d in shape:
+                        n *= d
+                    key = (name, dtypes[name])
+                    sizes[key] = max(sizes.get(key, 0), n)
+        for (name, dt), n in sizes.items():
+            self._arena[(name, dt)] = torch.zeros(n, dtype=dt, device=self.device)
+
+    @torch.inference_mode()
+    def _capture(self, rows: int, L1: int, dtypes: dict):
+        if not self._arena:
+            self._alloc(dtypes)
+        st = {name: self._view(name, shape, dtypes[name]) for name, (shape, _) in self._dims(rows, L1).items()}
+        st["m1"].fill_(True)
+        st["m2"].fill_(True)
+        args = (st["xs"], st["cnn"], st["A1"], st["m1"], st["A2"], st["m2"], False)
+        out = (st["o_xs"], st["o_new1"], st["o_new2"], st["o_cnn"])
+        with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
+            self.core_fn(self.enc, *args, out=out)
+            torch.cuda.synchronize()
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g, pool=self.pool, capture_error_mode="thread_local"):
+                self.core_fn(self.enc, *args, out=out)
+        torch.cuda.synchronize()
+        self.graphs[(rows, L1)] = (g, st, out)
+
+    @torch.inference_mode()
+    def capture_all(self, xs_dtype, cnn_dtype, att_dtype) -> int:
+        """Capture every key with dummy inputs of the dtypes real calls use."""
+        T1 = self.TOKENS - self.look
+        for rows in self.ROWS:
+            for L1 in self.L1:
+                if (rows, L1) in self.graphs:
+                    continue
+                z = lambda shape, dt: torch.zeros(shape, dtype=dt, device=self.device)  # noqa: E731
+                self(z((rows, self.TOKENS, self.c), xs_dtype), z((rows, self.c, self.cnn_t), cnn_dtype),
+                     z((self.d1, rows, self.nh, L1, self.dk2), att_dtype), torch.ones(rows, T1, L1 + T1, dtype=torch.bool, device=self.device),
+                     z((self.d2, rows, self.nh, L1 * self.s, self.dk2), att_dtype),
+                     torch.ones(rows, T1 * self.s, (L1 + T1) * self.s, dtype=torch.bool, device=self.device), False)
+        return len(self.graphs)
+
+    @torch.inference_mode()
+    def __call__(self, xs, cnns, A1, mask1, A2, mask2, last):
+        n, L1 = xs.shape[0], A1.shape[3]
+        rows = bucket(n, self.ROWS)
+        if (rows, L1) not in self.graphs:
+            # output dtypes follow the eager run (autocast): learn them once from an eager call
+            with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
+                ref = self.core_fn(self.enc, xs, cnns, A1, mask1, A2, mask2, last)
+            dtypes = {"xs": xs.dtype, "cnn": cnns.dtype, "A1": A1.dtype, "m1": torch.bool, "A2": A2.dtype, "m2": torch.bool,
+                      "o_xs": ref[0].dtype, "o_new1": ref[1].dtype, "o_new2": ref[2].dtype, "o_cnn": ref[3].dtype}
+            self._capture(rows, L1, dtypes)
+            return ref
+        g, st, out = self.graphs[(rows, L1)]
+        st["xs"][:n].copy_(xs)
+        st["cnn"][:n].copy_(cnns)
+        st["A1"][:, :n].copy_(A1)
+        st["A2"][:, :n].copy_(A2)
+        st["m1"][:n].copy_(mask1)
+        st["m2"][:n].copy_(mask2)
+        if rows > n:
+            st["m1"][n:] = True
+            st["m2"][n:] = True
+        g.replay()
+        return out[0][:n], out[1][:, :n], out[2][:, :n], out[3][:n]

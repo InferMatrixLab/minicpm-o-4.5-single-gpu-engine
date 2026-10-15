@@ -133,8 +133,8 @@ class TrackSBackend:
         self.adec.capture_all()
         self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
         self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile)
-        if self.t2w_batch.graphs is not None:
-            self.t2w_batch.graphs.capture_all()
+        if t2w_graphs:  # a prepared default voice supplies the cache dtypes
+            self.t2w_batch.capture_graphs(self.t2w_batch.setup(self.t2w.features(model_dir / "assets" / "HT_ref_audio.wav")))
         self.frontend = MultimodalFrontend(model_dir, device=device)
         self.device, self.max_live, self.talker_k = device, max_live, talker_k
         self.profile = profile

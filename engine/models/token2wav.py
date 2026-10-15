@@ -109,26 +109,72 @@ def chunk_noise_seed(noise_seed: int, chunk: int) -> int:
     return (noise_seed * 1_000_003 + chunk) & ((1 << 63) - 1)
 
 
-def hift_forward(hift, mel: torch.Tensor, cache_source: torch.Tensor, seeds: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-    """``HiFTGenerator.forward`` with the source noise of row ``i`` drawn from its own generator seeded ``seeds[i]``.
+def hift_noise(hift, seeds: list[int], n_samples: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+    """The HiFT source noise of a batch: row ``i`` draws what a batch-1 reference call draws from the global generator
+    right after ``torch.manual_seed(seeds[i])`` (``SineGen2``: initial harmonic phases ``rand``, then the additive noise
+    ``randn``; the discarded noise branch of ``SourceModuleHnNSF2`` is not drawn)."""
+    gen = hift.m_source.l_sin_gen
+    gens = [torch.Generator(device=device).manual_seed(int(x)) for x in seeds]
+    rand_ini = torch.cat([torch.rand(1, gen.dim, device=device, generator=g) for g in gens])
+    # the reference fills ``randn_like(sine)`` and ``sine`` is a transposed (channel-major) view, so draw [1, dim, n]
+    noise = torch.cat([torch.randn(1, gen.dim, n_samples, device=device, generator=g) for g in gens]).transpose(1, 2)
+    return rand_ini, noise
 
-    Each row draws what a batch-1 reference call draws from the global generator right after
-    ``torch.manual_seed(seeds[i])`` (``SineGen2``: initial harmonic phases ``rand``, then the additive noise
-    ``randn``; the discarded noise branch of ``SourceModuleHnNSF2`` is not drawn), so a batched call equals
-    per-stream calls and either equals the reference under that seeding.
-    """
+
+def hift_samples(hift, mel_frames: int) -> int:
+    return int(mel_frames * hift.f0_upsamp.scale_factor)
+
+
+def istft_overlap_add(spec: torch.Tensor, n_fft: int, hop: int, window: torch.Tensor) -> torch.Tensor:
+    """``torch.istft(spec, n_fft, hop, n_fft, window, center=True)`` without its host-synchronising window check (so it
+    can be graph-captured): per-frame inverse real FFT, windowing, overlap-add, division by the summed squared window,
+    and the ``center`` trim of ``n_fft // 2`` samples at both ends."""
+    frames = torch.fft.irfft(spec, n=n_fft, dim=1) * window[None, :, None]  # [B, n_fft, T]
+    T = frames.shape[2]
+    total = (T - 1) * hop + n_fft
+    y = F.fold(frames, output_size=(1, total), kernel_size=(1, n_fft), stride=(1, hop))[:, 0, 0]
+    env = F.fold((window ** 2)[None, :, None].expand(1, n_fft, T), output_size=(1, total), kernel_size=(1, n_fft), stride=(1, hop))[0, 0, 0]
+    half = n_fft // 2
+    return (y / env)[:, half:total - half]
+
+
+def _hift_decode(hift, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+    """``HiFTGenerator.decode`` with ``istft_overlap_add`` in place of ``torch.istft``."""
+    import torch.nn.functional as Fn
+
+    s_stft_real, s_stft_imag = hift._stft(s.squeeze(1))
+    s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
+    x = hift.conv_pre(x)
+    for i in range(hift.num_upsamples):
+        x = Fn.leaky_relu(x, hift.lrelu_slope)
+        x = hift.ups[i](x)
+        if i == hift.num_upsamples - 1:
+            x = hift.reflection_pad(x)
+        si = hift.source_resblocks[i](hift.source_downs[i](s_stft))
+        x = x + si
+        xs = None
+        for j in range(hift.num_kernels):
+            xs = hift.resblocks[i * hift.num_kernels + j](x) if xs is None else xs + hift.resblocks[i * hift.num_kernels + j](x)
+        x = xs / hift.num_kernels
+    x = Fn.leaky_relu(x)
+    x = hift.conv_post(x)
+    nf = hift.istft_params["n_fft"]
+    magnitude = torch.clip(torch.exp(x[:, :nf // 2 + 1, :]), max=1e2)
+    phase = torch.sin(x[:, nf // 2 + 1:, :])
+    y = istft_overlap_add(torch.complex(magnitude * torch.cos(phase), magnitude * torch.sin(phase)), nf, hift.istft_params["hop_len"],
+                          hift.stft_window)
+    return torch.clamp(y, -hift.audio_limit, hift.audio_limit)
+
+
+def hift_forward_noise(hift, mel: torch.Tensor, cache_source: torch.Tensor, rand_ini: torch.Tensor, noise: torch.Tensor):
+    """``HiFTGenerator.forward`` with the source noise given (graph-capturable: no host work)."""
     f0 = hift.f0_predictor(mel)
     s = hift.f0_upsamp(f0[:, None]).transpose(1, 2)  # [b, n, 1]
     src = hift.m_source
     gen = src.l_sin_gen
-    assert type(src).__name__ == "SourceModuleHnNSF2" and not gen.flag_for_pulse, type(src)
-    dev = s.device
-    fn = torch.multiply(s, torch.arange(1, gen.harmonic_num + 2, device=dev, dtype=torch.float32)[None, None, :])
+    fn = torch.multiply(s, torch.arange(1, gen.harmonic_num + 2, device=s.device, dtype=torch.float32)[None, None, :])
     rad = (fn / gen.sampling_rate) % 1
-    gens = [torch.Generator(device=dev).manual_seed(int(x)) for x in seeds]
-    rand_ini = torch.cat([torch.rand(1, gen.dim, device=dev, generator=g) for g in gens])
-    # the reference fills ``randn_like(sine)`` and ``sine`` is a transposed (channel-major) view, so draw [1, dim, n]
-    noise = torch.cat([torch.randn(1, gen.dim, s.shape[1], device=dev, generator=g) for g in gens]).transpose(1, 2)
+    rand_ini = rand_ini.clone()
     rand_ini[:, 0] = 0
     rad[:, 0, :] = rad[:, 0, :] + rand_ini
     rad = F.interpolate(rad.transpose(1, 2), scale_factor=1 / gen.upsample_scale, mode="linear").transpose(1, 2)
@@ -136,12 +182,20 @@ def hift_forward(hift, mel: torch.Tensor, cache_source: torch.Tensor, seeds: lis
     phase = F.interpolate(phase.transpose(1, 2) * gen.upsample_scale, scale_factor=gen.upsample_scale, mode="linear").transpose(1, 2)
     sine = torch.sin(phase) * gen.sine_amp
     uv = gen._f02uv(fn[..., :1])
-    noise = (uv * gen.noise_std + (1 - uv) * gen.sine_amp / 3) * noise
-    sine = sine * uv + noise
+    sine = sine * uv + (uv * gen.noise_std + (1 - uv) * gen.sine_amp / 3) * noise
     s = src.l_tanh(src.l_linear(sine)).transpose(1, 2)
     if cache_source.shape[2] != 0:
         s[:, :, :cache_source.shape[2]] = cache_source
-    return hift.decode(x=mel, s=s), s
+    return _hift_decode(hift, mel, s), s
+
+
+def hift_forward(hift, mel: torch.Tensor, cache_source: torch.Tensor, seeds: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+    """``HiFTGenerator.forward`` with the source noise of row ``i`` drawn from its own generator seeded ``seeds[i]``, so a
+    batched call equals per-stream calls and either equals the reference under that seeding."""
+    src = hift.m_source
+    assert type(src).__name__ == "SourceModuleHnNSF2" and not src.l_sin_gen.flag_for_pulse, type(src)
+    rand_ini, noise = hift_noise(hift, seeds, hift_samples(hift, mel.shape[2]), mel.device)
+    return hift_forward_noise(hift, mel, cache_source, rand_ini, noise)
 
 
 class Token2Wav:
@@ -158,6 +212,7 @@ class Token2Wav:
             opt.intra_op_num_threads = spk_threads
             self.ref.spk_model = onnxruntime.InferenceSession(f"{model_dir}/campplus.onnx", sess_options=opt, providers=["CPUExecutionProvider"])
         self.flow, self.hift = self.ref.flow, self.ref.hift
+        self.hift.stft_window = self.hift.stft_window.cuda()  # a plain CPU tensor copied to the GPU on every call otherwise
         self.float16, self.n_timesteps = float16, n_timesteps
         self.window = torch.from_numpy(np.hamming(2 * SOURCE_CACHE)).cuda()
 
