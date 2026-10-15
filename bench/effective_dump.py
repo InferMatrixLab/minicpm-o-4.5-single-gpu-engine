@@ -177,9 +177,42 @@ def dump_sglang_omni(n: int) -> list[EffectiveInput]:
     return out
 
 
+def dump_engine(n: int) -> list[EffectiveInput]:
+    """The engine's own preprocessing: its chat rendering and ``engine.models.token2wav.Token2Wav.prepare`` (run in .venv-engine)."""
+    import soundfile as sf
+    from transformers import AutoTokenizer
+
+    import io
+
+    from engine.models.token2wav import Token2Wav
+
+    tok = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    t2w = Token2Wav(T2W_DIR)
+    out = []
+    for req in _rows(n):
+        ids = _canonical_prompt_ids(tok, req)
+        p = t2w.prepare(req.ref_audio_bytes())
+        import librosa
+
+        wav16, _ = librosa.load(io.BytesIO(req.ref_audio_bytes()), sr=16000, mono=True)
+        out.append(
+            EffectiveInput(
+                row_id=req.request_id,
+                prompt_token_ids=ids,
+                ref_source_sha256=hashlib.sha256(req.ref_audio_bytes()).hexdigest(),
+                ref_waveform_hash=array_hash(wav16.astype(np.float32)),
+                ref_waveform_sample_rate=16000,
+                speech_tokens=_tolist(p.tokens),
+                speaker_embedding=_tolist(p.spk),
+                extra={"prompt_mel_frames": int(p.mels.shape[1]), "ref_samples_16k": int(wav16.shape[0])},
+            )
+        )
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("stack", choices=["canonical", "vllm-omni", "sglang-omni"])
+    ap.add_argument("stack", choices=["canonical", "vllm-omni", "sglang-omni", "engine"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=32)
     ap.add_argument("--url", default=None)
@@ -188,6 +221,8 @@ def main() -> int:
         dumps = dump_canonical(a.n)
     elif a.stack == "vllm-omni":
         dumps = dump_vllm_omni(a.n, a.url)
+    elif a.stack == "engine":
+        dumps = dump_engine(a.n)
     else:
         dumps = dump_sglang_omni(a.n)
     save_dumps(Path(a.out), dumps)

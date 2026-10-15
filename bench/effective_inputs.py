@@ -201,7 +201,7 @@ def save_dumps(path: Path, dumps: list[EffectiveInput]) -> None:
 # --- provenance: which execution produced a dump -------------------------------------------------
 PROVENANCE_SCHEMA = "effective_dump/v1"
 STACK_REPOS = {"vllm-omni": "/workspace/cgzheng/cgzheng/vllm-omni", "sglang-omni": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main"}
-_ADAPTER_MODULE = {"vllm-omni": "vllm_omni", "sglang-omni": "sglang_omni"}
+_ADAPTER_MODULE = {"vllm-omni": "vllm_omni", "sglang-omni": "sglang_omni", "engine": "engine"}
 
 
 def provenance_path(dump: Path) -> Path:
@@ -212,6 +212,8 @@ def _code_files(stack: str) -> list[str]:
     files = ["bench/effective_dump.py", "bench/effective_inputs.py", "bench/workload.py", "bench/adapters/base.py"]
     if stack in _ADAPTER_MODULE:
         files.append(f"bench/adapters/{_ADAPTER_MODULE[stack]}.py")
+    if stack == "engine":
+        files += ["engine/models/token2wav.py", "engine/runtime/backend.py"]
     return files
 
 
