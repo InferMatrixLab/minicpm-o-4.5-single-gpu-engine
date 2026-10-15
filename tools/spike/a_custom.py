@@ -58,7 +58,23 @@ def run(w: Workload, out: Path) -> SpikeResult:
     r.talker_decode_step_ms = timed(lambda: torch.nn.functional.linear(
         ar.forward(ta.code_embed(torch.randint(0, 6561, (w.batch,), device="cuda")), akv.layout(tal, [1] * w.batch)), ta.head), w.iters)
     r.token2wav_window_ms = token2wav_window_ms(w)
-    r.notes.append("eager (no CUDA graphs); graphs/K-step decode come with the performance tasks")
+    r.notes.append("thinker/talker step times above are eager; graph-captured times below")
+    from engine.runtime.talker_decode import TalkerDecoder
+    from engine.runtime.thinker_decode import ThinkerDecoder
+    from engine.talker_sampler import PAD
+
+    td = ThinkerDecoder(th, tkv, ts, buckets=(w.batch,))
+    toks = [1] * w.batch
+    r.notes.append({"thinker_graph_decode_step_ms": timed(lambda: td.step(dec, toks), w.iters)})
+    adec = TalkerDecoder(ta, akv, as_, buckets=(w.batch,))
+    st = {"codes": torch.zeros(w.batch, dtype=torch.int64, device="cuda"), "seeds": torch.arange(w.batch, device="cuda"),
+          "steps": torch.ones(w.batch, dtype=torch.int64, device="cuda"), "history": torch.full((w.batch, 16), PAD, dtype=torch.int64, device="cuda"),
+          "live": torch.ones(w.batch, dtype=torch.bool, device="cuda")}
+    k = 8
+    r.notes.append({"talker_graph_frame_ms": timed(lambda: adec.decode_k(tal, st, k), max(3, w.iters // 4)) / k})
+    graph_path = r.thinker_prefill_ms + w.reply * r.notes[-2]["thinker_graph_decode_step_ms"] + r.handoff_ms + r.talker_prefill_ms + \
+        28 * r.notes[-1]["talker_graph_frame_ms"] + r.token2wav_window_ms
+    r.notes.append({"first_audio_critical_path_graphs_ms": graph_path})
     return r.finish(w)
 
 
