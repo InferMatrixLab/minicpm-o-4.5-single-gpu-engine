@@ -180,10 +180,16 @@ class EngineServer:
         self.app.router.add_get("/health", self.health)
         self.app.router.add_get("/v1/models", self.models)
         self.app.router.add_post("/v1/chat/completions", self.chat)
+        self.app.router.add_get("/metrics", self.metrics)
         self.cancelled = 0
 
     async def health(self, _):
         return web.Response(text="ok")
+
+    async def metrics(self, _):
+        """Engine counters for the robustness suite: live requests, KV pages, memory; {} for backends without counters."""
+        stats = getattr(self.backend, "stats", None)
+        return web.json_response({**(stats() if callable(stats) else {}), "cancelled_streams": self.cancelled})
 
     async def models(self, _):
         return web.json_response({"object": "list", "data": [{"id": self.model_name, "object": "model"}]})

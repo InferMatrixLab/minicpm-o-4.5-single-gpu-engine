@@ -16,6 +16,8 @@ for job in "$@"; do
     xcheck) bash "$S/xcheck.sh" "$G" "$W" "$a" "$b" "$c" ;;
     score) $Q/.venv/bin/python -m evals.speech.suite score --gpu "$G" $c ;;
     main) (cd $Q && bash -c "$a") ;;
+    trace) (cd $Q && .venv/bin/python tools/trace_baselines.py run --stack "$a" --gpu "$G" --port $((18800 + $b)) --concurrency "$b"               --out "$Q/results/l20x/traces/${a}_c$b" && .venv/bin/python tools/trace_baselines.py extract --trace-dir "$Q/results/l20x/traces/${a}_c$b") ;;
+    engine) bash "$S/engine_gpu.sh" "$G" ;;
   esac
   echo "[$(date +%F' '%T)] end $job rc=$?"
 done
