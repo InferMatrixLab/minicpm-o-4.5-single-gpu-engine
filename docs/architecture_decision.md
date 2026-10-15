@@ -33,3 +33,27 @@ process and CUDA context.
   statically between the processes.
 - Performance work follows the trace order (task14 onward). The Token2Wav reference path (about 160 ms per window,
   fp32, batch 1) dominates the first-audio critical path. The Thinker and Talker graph decode come next.
+
+## Revision (round 4, measured on the Track S engine): Token2Wav in its own process
+
+The single-process layout was built first (`engine/runtime/backend_s.py`, Token2Wav on its own thread and CUDA stream).
+Under load the engine loop is launch-bound Python on both sides, and the two threads share one GIL:
+
+| Track S smoke, L20X, C=8, 24 requests | Thinker step | Talker tick (K=4) | Token2Wav call | frames/s | TTFA p50 |
+|---|---|---|---|---|---|
+| one process, Token2Wav thread | 7-8 ms | 11-12 ms | 230-300 ms (about 6 windows) | 374-419 | 0.83-0.95 s |
+| Token2Wav worker process, no MPS | 18 ms | 49 ms | (time-sliced contexts) | 296 | 1.22 s |
+| Token2Wav worker process, MPS | 8.7-10 ms | 12-14.5 ms | 85-126 ms | 525-699 | 0.62-0.70 s |
+
+- Thinker and Talker stay in one process (layout (a)): paged FlashInfer, CUDA-graph decode, the Talker conditioned in
+  place from the Thinker's hidden states.
+- Token2Wav (reference-voice features, prompt setups, batched window decodes) runs in a worker process
+  (`engine/runtime/t2w_worker.py`). The engine sends token windows (small integer lists) and receives audio. No
+  tensors cross the process boundary.
+- The worker and the engine must run under CUDA MPS. Without it the two contexts time-slice, and the engine loop slows
+  2-4x. The launch starts a private MPS daemon (short pipe path, GPU addressed by UUID).
+- Remaining contention is inside each process: feature extraction threads in the worker. These move to their own
+  processes (`feature_processes`).
+
+These numbers are indicative only. They were measured on a GPU shared with a scoring job. The baseline-equivalent
+measurement is the harness sweep (task13/task17).
