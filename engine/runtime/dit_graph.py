@@ -48,6 +48,7 @@ class EstimatorGraphs:
         self.graph_t, self.max_rows, self.max_l = tuple(graph_t), max_rows, max_l
         self._arena: dict[str, torch.Tensor] = {}
         self.counts = {"graph": 0, "eager": 0, "eager_reasons": {}}
+        self._last = None  # (key, rows, L) of the previous replay: its non-step inputs are still in place
         p = next(est.parameters())
         self.depth, self.nh = len(est.blocks), est.blocks[0].attn.num_heads
         self.dk2 = 2 * est.blocks[0].attn.head_dim
@@ -138,12 +139,19 @@ class EstimatorGraphs:
             self._capture(key)
 
     @torch.inference_mode()
-    def __call__(self, x, mu, t, spks, cond, cnn, att, mask, tr):
-        """Same contract as the eager estimator call; ``x`` etc. have ``n_rows <= rows bucket`` rows and cache length L."""
+    def __call__(self, x, mu, t, spks, cond, cnn, att, mask, tr, temb=None, same=False):
+        """Same contract as the eager estimator call; ``x`` etc. have ``n_rows <= rows bucket`` rows and cache length L.
+
+        ``temb``: the timestep embedding [rows, 1, hidden] when the caller computed it (all steps at once).  ``same``:
+        mu, spks, cond, mask and tr are the previous call's (the later Euler steps of one window): not copied again.
+        """
         n, T = x.shape[0], x.shape[2]
         L = att.shape[3]
-        with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
-            t = self.est.t_embedder(t).unsqueeze(1)
+        if temb is not None:
+            t = temb
+        else:
+            with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
+                t = self.est.t_embedder(t).unsqueeze(1)
         if not self.supports(n, T, L):
             self.counts["eager"] += 1
             r = f"rows={n} T={T} L={L}"
@@ -156,13 +164,19 @@ class EstimatorGraphs:
         self.counts["graph"] += 1
         g, s, out = self.graphs[key]
         rows, _, Lb = key
+        same = same and self._last == (key, n, L)
+        self._last = (key, n, L)
         s["x"][:n].copy_(x)
-        s["mu"][:n].copy_(mu)
         s["t"][:n].copy_(t)
-        s["spks"][:n].copy_(spks)
-        s["cond"][:n].copy_(cond)
         s["cnn"][:, :n].copy_(cnn)
         s["att"][:, :n, :, :L].copy_(att)
+        if same:  # the rest of the inputs are this window's previous step's
+            g.replay()
+            dphi, new_cnn, new_att = out
+            return dphi[:n], new_cnn[:, :n], new_att[:, :n, :, :T + L]
+        s["mu"][:n].copy_(mu)
+        s["spks"][:n].copy_(spks)
+        s["cond"][:n].copy_(cond)
         if Lb > L:
             s["att"][:, :n, :, L:].zero_()
         s["tr"][:n].copy_(tr)

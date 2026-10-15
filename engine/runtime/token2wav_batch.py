@@ -342,7 +342,10 @@ class BatchedToken2Wav:
         else:
             call = lambda x, mu, t, *a: self._estimator_temb(est, x, mu, est.t_embedder(t).unsqueeze(1), *a)  # noqa: E731
         for step in range(1, steps + 1):
-            dphi, nc, na = call(x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, C[step - 1], A[step - 1], mask, tr)
+            if self.graphs is not None:  # later steps reuse the window's mu / spks / cond / mask / tr already in place
+                dphi, nc, na = call(x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, C[step - 1], A[step - 1], mask, tr, same=step > 1)
+            else:
+                dphi, nc, na = call(x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, C[step - 1], A[step - 1], mask, tr)
             if keep_cache:
                 new_att[step - 1].copy_(na)  # graph outputs are overwritten by the next replay
                 new_cnn[step - 1].copy_(nc)
