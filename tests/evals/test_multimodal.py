@@ -44,6 +44,9 @@ def env(tmp_path, monkeypatch):
         return exp_doc
 
     CONSUMED.clear()
+    import bench.semantics as sem
+
+    monkeypatch.setattr(sem, "check_deploy_binding", lambda c: None)  # fixture candidates have no deploy files; see test_real_deploy_binding
     monkeypatch.setattr(mm, "_worker", fake_worker)
     monkeypatch.setattr(mm, "check_consumed", fake_consumed)
     monkeypatch.setattr(mm, "verify_mm_evaluator", lambda: EVAL)
@@ -62,17 +65,22 @@ def digest_of(label):
 
 
 def make_report(d, *, acc=0.9, scope="development", subset="full", benches=mm.BENCHES, mps="off", observed="off", label="base", n=None,
-                started=None):
+                started=None, frozen=None):
     from bench.cli import server_spec
 
     d.mkdir(parents=True, exist_ok=True)
     c, cd = candidate(label, mps)
-    gen = {"candidate": cd, "model": {"repo": "openbmb/MiniCPM-o-4_5", "revision": "r"}, "fingerprints": {}, "adapter_python": "py", "repos_checked": [],
-           "port": 18101, "hardware": dict(GPU), "requests": {b: mm.request_policy("vllm-omni", b, 16) for b in benches}, "evaluator_digest": EVAL["digest"]}
+    from bench.cli import ADAPTER_PYTHON, DEFAULT_REPOS
+
+    gen = {"candidate": cd, "model": {"repo": "openbmb/MiniCPM-o-4_5", "revision": "r"},
+           "fingerprints": {"repos": {"vllm-omni": {"commit": "c", "dirty": False}}}, "adapter_python": ADAPTER_PYTHON["vllm-omni"],
+           "repos_checked": sorted(DEFAULT_REPOS), "port": 18101, "hardware": dict(GPU),
+           "requests": {b: mm.request_policy("vllm-omni", b, 16) for b in benches}, "evaluator_digest": EVAL["digest"], "frozen_refs": dict(frozen or {})}
     gen["digest"] = hashlib.sha256(json.dumps(gen, sort_keys=True).encode()).hexdigest()
     rep = {"scope": scope, "subset": subset, "concurrency": 16, "candidate": cd, "generation": gen, "gpu": dict(GPU), "evaluator": EVAL,
            "started_unix": started if started is not None else time.time(), "benches": {},
-           "server_evidence": {"mps": {"observed": observed}, "gpu": dict(GPU), "launch_argv": server_spec(c, 18101, 1).cmd, "launch_env": {}}}
+           "server_evidence": {"mps": {"observed": observed}, "gpu": dict(GPU), "launch_argv": server_spec(c, 18101, 1).cmd, "launch_env": {},
+                               "process_tree": [10, 11], "gpu_workers": [{"pid": 11}]}}
     for b in benches:
         k = n if n is not None else BENCH_N[b]
         good = int(round(acc * k))
@@ -82,6 +90,7 @@ def make_report(d, *, acc=0.9, scope="development", subset="full", benches=mm.BE
         rep["benches"][b] = {"accuracy": good / k, "per_sample_sha256": hashlib.sha256(side.read_bytes()).hexdigest(),
                              "expected_sha256": hashlib.sha256((mm.EXPECTED_DIR / f"{subset}_{b}.json").read_bytes()).hexdigest()}
     (d / "report.json").write_text(json.dumps(rep))
+    (d / "generation.json").write_text(json.dumps(gen))
     return d
 
 
@@ -116,10 +125,43 @@ def test_verified_report_and_tampering(env):
     ("evaluator digest", lambda r: r["evaluator"].update(digest="FOREIGN")),
     ("request policy", lambda r: r.update(concurrency=4)),
     ("launch", lambda r: r["server_evidence"].update(launch_argv=["bash", "other.sh"])),
+    ("frozen generation", lambda r: r["generation"].update(port=1)),
+    ("dirty checkout", lambda r: r["generation"]["fingerprints"]["repos"]["vllm-omni"].update(dirty=True)),
+    ("foreign interpreter", lambda r: r["generation"].update(adapter_python="/foreign/python")),
+    ("no workers", lambda r: r["server_evidence"].update(gpu_workers=[], process_tree=[])),
+    ("consumption record", lambda r: r["benches"]["mmmu"].update(consumed=[{"repo": "foreign"}])),
 ])
 def test_identity_relabelling_rejected(env, name, fn):
-    d = edit(make_report(env / name.replace(" ", "_")), fn)
+    d = make_report(env / name.replace(" ", "_"))
+    if name == "consumption record":
+        doc = json.loads((mm.EXPECTED_DIR / "full_mmmu.json").read_text())
+        doc["consumed"] = [{"repo": "MMMU/MMMU"}]
+        (mm.EXPECTED_DIR / "full_mmmu.json").write_text(json.dumps(doc))
+        d = make_report(env / "consumption_record2")
+        edit(d, lambda r: r["benches"]["mmmu"].update(consumed=[{"repo": "MMMU/MMMU"}]))
+        assert not any("consumption" in p for p in mm.verify_mm_report(d)[2])
+    if name.startswith("frozen generation"):
+        edit(d, fn)  # report and generation.json now disagree
+    else:
+        edit(d, fn)
+        if "generation" in str(fn.__code__.co_names) or name in ("dirty checkout", "foreign interpreter"):
+            g = json.loads((d / "report.json").read_text())["generation"]
+            body = {k: v for k, v in g.items() if k != "digest"}
+            g["digest"] = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+            edit(d, lambda r: r.update(generation=g))
+            (d / "generation.json").write_text(json.dumps(g))  # a consistent frozen declaration of the foreign execution
     assert mm.verify_mm_report(d)[2], name
+
+
+def test_real_deploy_binding(tmp_path):
+    from bench.cli import make_candidate
+    from bench.semantics import SemanticsUnknown, check_deploy_binding
+
+    c = make_candidate({"adapter": "vllm-omni", "config": "minicpmo_4_5_turn.yaml", "mps": "off"})
+    ident = {**c.identity(), "candidate_id": c.candidate_id, "digest": c.digest}
+    check_deploy_binding(ident)
+    with pytest.raises(SemanticsUnknown):
+        check_deploy_binding({**ident, "deploy_files_sha256": ["FOREIGN"]})
 
 
 def test_rescorer_and_content_must_match_the_recorded_evaluator(env, monkeypatch):
@@ -186,11 +228,11 @@ def test_freeze_requires_verified_qualified_full_references(env, monkeypatch):
 def test_certification_rules(env, monkeypatch):
     base = make_report(env / "base", scope="final", acc=0.9, started=1.0)
     qref = freeze(env, [f"{base}={_qual(env, monkeypatch)}"])
-    eng = make_report(env / "eng", scope="final", acc=0.9, label="eng")
+    eng = make_report(env / "eng", scope="final", acc=0.9, label="eng", frozen={"mm_qref": mm._sha(Path(qref))})
     assert mm.certify(str(eng), qref, digest_of("eng"))["certified"]
     assert not mm.certify(str(eng), qref, digest_of("other"))["certified"]  # wrong headline
     assert not mm.certify(str(eng), qref, None)["certified"]
-    low = make_report(env / "low", scope="final", acc=0.85, label="eng")
+    low = make_report(env / "low", scope="final", acc=0.85, label="eng", frozen={"mm_qref": mm._sha(Path(qref))})
     res = mm.certify(str(low), qref, digest_of("eng"))
     assert not res["certified"] and all("relative" in v["failed"] for v in res["benches"].values())
     one = make_report(env / "eng1", scope="final", benches=("mmmu",), label="eng")
@@ -199,8 +241,12 @@ def test_certification_rules(env, monkeypatch):
     assert not mm.certify(str(dev), qref, digest_of("eng"))["certified"]
     mps = make_report(env / "mps", scope="final", label="eng", mps="on", observed="off")
     assert not mm.certify(str(mps), qref, digest_of("eng"))["certified"]
-    early = make_report(env / "early", scope="final", acc=0.9, label="eng", started=0.5)  # generated before the Q_ref was frozen
-    assert not mm.certify(str(early), qref, digest_of("eng"))["certified"]
+    undeclared = make_report(env / "early", scope="final", acc=0.9, label="eng")  # its generation never named this Q_ref
+    assert not mm.certify(str(undeclared), qref, digest_of("eng"))["certified"]
+    q = json.loads(Path(qref).read_text())
+    q["frozen_unix"] = -1  # an editable timestamp is not the binding
+    Path(qref).write_text(json.dumps(q))
+    assert not mm.certify(str(undeclared), qref, digest_of("eng"))["certified"]
     dev_ref = make_report(env / "devbase", scope="development")
     qdev = freeze(env, [f"{dev_ref}={_qual(env, monkeypatch)}"], "qdev.json", scope="development")
     assert not mm.certify(str(eng), qdev, digest_of("eng"))["certified"]  # development reference
@@ -226,7 +272,7 @@ def test_qref_rebuilt_from_its_references(env, monkeypatch, name, fn):
 def test_reference_sidecars_are_reverified(env, monkeypatch):
     base = make_report(env / "base", scope="final", acc=0.9, started=1.0)
     qref = freeze(env, [f"{base}={_qual(env, monkeypatch)}"])
-    eng = make_report(env / "eng", scope="final", acc=0.9, label="eng")
+    eng = make_report(env / "eng", scope="final", acc=0.9, label="eng", frozen={"mm_qref": mm._sha(Path(qref))})
     (base / "mmmu.per_sample.jsonl").unlink()
     assert not mm.certify(str(eng), qref, digest_of("eng"))["certified"]
 

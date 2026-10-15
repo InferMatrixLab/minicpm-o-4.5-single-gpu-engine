@@ -217,7 +217,7 @@ def inventory(sweeps: list[str]) -> dict[tuple, dict]:
             for conc in spec["concurrencies"]:
                 key = (cand.digest, int(spec.get("seed_index", 0)), int(conc))
                 inv.setdefault(key, {"candidate_id": cand.candidate_id, "sweeps": [], "kind": spec.get("kind", "performance"),
-                                     "id_set": spec.get("id_set", "eval")})["sweeps"].append(str(sw))
+                                     "id_set": spec.get("id_set", "eval"), "gpu": int(spec["gpu"]), "k": int(spec["k"])})["sweeps"].append(str(sw))
     return inv
 
 
@@ -235,6 +235,7 @@ def attempts(sweeps: list[str]) -> list[dict]:
             out.append({"cell": str(d), "sweep": str(sw), "archived": d.parent.name == "attempts", "digest": (spec.get("candidate") or {}).get("digest"),
                         "candidate_id": (spec.get("candidate") or {}).get("candidate_id"), "seed_index": spec.get("seed_index"),
                         "concurrency": spec.get("concurrency"), "kind": spec.get("kind"), "id_set": spec.get("id_set"), "ok": v.ok,
+                        "gpu": (spec.get("hardware") or {}).get("gpu_index"), "k": spec.get("k"), "k_updates": spec.get("k_updates") or [],
                         "problems": v.problems[:3], "spec": v.spec if v.ok else None})
     return out
 
@@ -247,10 +248,13 @@ def select_cells(sweeps: list[str]) -> tuple[dict, dict[tuple, dict], dict]:
     for a in attempts(sweeps):
         key = (a["digest"], a["seed_index"], a["concurrency"])
         declared = inv.get(key)
-        if a["ok"] and declared is not None and a["sweep"] in declared["sweeps"] and a["kind"] == declared["kind"] and a["id_set"] == declared["id_set"]:
+        schedule_ok = declared is not None and (a["k"] == declared["k"] or (a["k_updates"] and declared["k"] < a["k"] <= 10
+                                                                            and a["k_updates"][0].get("from") == declared["k"]))
+        if a["ok"] and declared is not None and a["sweep"] in declared["sweeps"] and a["kind"] == declared["kind"] and a["id_set"] == declared["id_set"] \
+                and a["gpu"] == declared["gpu"] and schedule_ok:
             chosen.setdefault(key, []).append(a)
             continue
-        reason = a["problems"] if not a["ok"] else ["cell is not declared by its sweep"]
+        reason = a["problems"] if not a["ok"] else ["cell does not match its sweep's declaration (candidate, seed, C, kind, ID set, GPU, K)"]
         failed.setdefault(a["digest"], []).append({k: a[k] for k in ("cell", "archived", "seed_index", "concurrency")} | {"reasons": reason})
     for key, cs in chosen.items():
         if len(cs) > 1:
@@ -370,23 +374,47 @@ def campaign_rows(sweeps: list[str], out: Path) -> list[dict]:
 
 
 ROW_DECISIVE = ("candidate_id", "digest", "cells", "status", "quality", "qualification", "failed_attempts")
-_VERIFIED: dict[tuple, dict] = {}
+_VERIFIED: dict[tuple, tuple] = {}
+
+
+def _stamp(paths) -> str:
+    """Content-change stamp of every file below ``paths`` (path, size, mtime): a cached verification is reused only if it is unchanged."""
+    import os
+
+    h = hashlib.sha256()
+    for root in sorted(str(Path(p).resolve()) for p in paths):
+        if os.path.isfile(root):
+            st = os.stat(root)
+            h.update(f"{root}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+            continue
+        for d, dirs, files in os.walk(root):
+            dirs.sort()
+            for f in sorted(files):
+                fp = os.path.join(d, f)
+                try:
+                    st = os.stat(fp)
+                except FileNotFoundError:
+                    continue
+                h.update(f"{fp}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()
 
 
 def verify_campaign(path: str | Path) -> dict:
     """Recompute every campaign row from the recorded sweeps; decisive fields must agree."""
     path = Path(path)
-    key = (str(path.resolve()), _sha(path))
-    if key in _VERIFIED:
-        return _VERIFIED[key]
     doc = json.loads(path.read_text())
+    deps = list(doc["sweeps"]) + [path.parent, EFFECTIVE_DIR]
+    key = (str(path.resolve()), _sha(path))
+    if key in _VERIFIED and _VERIFIED[key][0] == _stamp(deps):
+        return _VERIFIED[key][1]
+    stamp = _stamp(deps)
     rows = json.loads(json.dumps(campaign_rows(doc["sweeps"], path.parent)))
     want = {r["digest"]: {k: r.get(k) for k in ROW_DECISIVE} for r in rows}
     got = {r["digest"]: {k: r.get(k) for k in ROW_DECISIVE} for r in doc.get("candidates", [])}
     if want != got:
         bad = sorted(d for d in set(want) | set(got) if want.get(d) != got.get(d))
         raise CampaignError(f"{path}: recorded rows differ from the recomputed campaign for {bad[:3]}")
-    _VERIFIED[key] = doc
+    _VERIFIED[key] = (stamp, doc)
     return doc
 
 
@@ -470,6 +498,9 @@ def compute_winners(qualification: str | Path, sweeps: list[str]) -> dict:
             continue
         a = chosen[(dg, seed, c)]
         v = verify_cell(a["cell"])
+        if int(v.spec["k"]) != TUNE_K:
+            failures.append({"candidate_id": meta["candidate_id"], "concurrency": c, "reason": f"tuning cell K={v.spec['k']}, the tuning schedule is K={TUNE_K}"})
+            continue
         classes.add(json.dumps(gpu_class(v.spec["hardware"]), sort_keys=True))
         entry = {"candidate_id": meta["candidate_id"], "cell": a["cell"], "k": int(v.spec["k"]),
                  "experiment_digest": json.loads((Path(a["cell"]) / "experiment.json").read_text())["experiment_digest"]}
@@ -506,16 +537,19 @@ def compute_winners(qualification: str | Path, sweeps: list[str]) -> dict:
             "failures": failures}
 
 
-_WINNERS: dict[tuple, dict] = {}
+_WINNERS: dict[tuple, tuple] = {}
 
 
 def verify_winners(path: str | Path, check_sources: bool = True) -> dict:
     """Recompute the winner declaration from its recorded qualification and tuning sweeps."""
     path = Path(path)
-    key = (str(path.resolve()), _sha(path))
-    if key in _WINNERS:
-        return _WINNERS[key]
     doc = json.loads(path.read_text())
+    key = (str(path.resolve()), _sha(path))
+    q0 = (doc.get("qualification") or {}).get("path")
+    deps = list(doc.get("sweeps") or []) + ([q0, Path(q0).parent] if q0 else []) + [EFFECTIVE_DIR]
+    if key in _WINNERS and _WINNERS[key][0] == _stamp(deps):
+        return _WINNERS[key][1]
+    stamp = _stamp(deps)
     if doc.get("schema") != "winners/v1":
         raise WinnerError(f"{path} is not a winners/v1 declaration")
     q = doc.get("qualification") or {}
@@ -528,7 +562,7 @@ def verify_winners(path: str | Path, check_sources: bool = True) -> dict:
     bad = [k for k in ("gpu_class", "eligible", "excluded", "values", "cells", "failures") if again[k] != doc.get(k)]
     if bad:
         raise WinnerError(f"{path}: recorded {bad} differ from the recomputed winners")
-    _WINNERS[key] = doc
+    _WINNERS[key] = (stamp, doc)
     return doc
 
 
@@ -637,16 +671,18 @@ def cmd_dref(a) -> int:
     w = verify_winners(a.winners)
     inv, chosen, _ = select_cells(a.sweep)
     out = Path(a.out_dir)
-    for c in (CONCURRENCIES if a.role == "guard" else (32, 1)):
+    rc = 0
+    for c in (a.concurrency or (CONCURRENCIES if a.role == "guard" else (32, 1))):
         dg = w["cells"][str(c)]["throughput"]["candidate_digest"]
         want = DREF_SEEDS[a.role]
         cells = [chosen[(dg, s, c)]["cell"] for s in want if (dg, s, c) in chosen]
         if len(cells) != len(want):
             print(f"C={c}: throughput winner {w['cells'][str(c)]['throughput']['candidate_id']} lacks verified cells for seeds {want}")
+            rc = 1
             continue
         doc = build_dref(cells, out / f"dref_{a.role}_c{c}.json", a.role, a.winners)
         print(f"C={c}: {a.role} D_ref of {doc['candidate_id']} over {len(doc['rows'])} rows")
-    return 0
+    return rc
 
 
 DREF_SEEDS = {"guard": [0], "truncation": [0, 1, 2]}
@@ -674,7 +710,8 @@ def cmd_fullq_score(a) -> int:
 
             try:
                 vr = verify_report(dst)
-                if vr.ok and not report_join_problems(vr, cand, {s: c["cell"] for s, c in enumerate(cells)}):
+                same_ref = (vr.report.get("d_ref") or {}).get("sha256") == _sha(a.d_ref) if Path(a.d_ref).exists() else False
+                if vr.ok and vr.report.get("scope") == "final" and same_ref and not report_join_problems(vr, cand, {s: c["cell"] for s, c in enumerate(cells)}):
                     print(f"{cid}: verified report exists, reused")
                     continue
             except ReportError:
@@ -718,6 +755,7 @@ def main(argv=None) -> int:
     dr.add_argument("--role", choices=sorted(DREF_SEEDS), required=True)
     dr.add_argument("--sweep", action="append", required=True)
     dr.add_argument("--out-dir", required=True)
+    dr.add_argument("--concurrency", type=int, action="append", default=None)
     fq = sub.add_parser("fullq-score")
     fq.add_argument("--sweep", action="append", required=True)
     fq.add_argument("--concurrency", type=int, required=True)

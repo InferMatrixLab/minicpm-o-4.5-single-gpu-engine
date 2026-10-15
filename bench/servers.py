@@ -55,7 +55,9 @@ def gpu_memory_used_mib(gpu: int) -> float | None:
         return None
 
 
-RELEVANT_ENV_PREFIXES = ("CUDA_", "HF_", "VLLM", "SGLANG", "OMNI_", "PYTORCH_", "NCCL_", "TORCH")
+RELEVANT_ENV_PREFIXES = ("CUDA_", "HF_", "VLLM", "SGLANG", "OMNI_", "PYTORCH_", "NCCL_", "TORCH", "MINICPMO", "ENGINE_")
+#: Inherited variables that could change a server's semantics are never passed through; a launch sets them explicitly.
+SCRUBBED_ENV_PREFIXES = ("MINICPMO", "VLLM", "SGLANG", "OMNI_", "TORCHINDUCTOR", "PYTORCH_", "ENGINE_", "NCCL_")
 
 
 def gpu_processes(gpu: int) -> list[dict] | None:
@@ -155,7 +157,7 @@ class Server:
     def start(self) -> "Server":
         if _healthy(self.spec.url + self.spec.health_path):
             raise RuntimeError(f"port {self.spec.port} already serves a healthy server")
-        env = os.environ.copy()
+        env = {k: v for k, v in os.environ.items() if not k.startswith(SCRUBBED_ENV_PREFIXES)}
         env.update(self.spec.env)
         env["CUDA_VISIBLE_DEVICES"] = str(self.spec.gpu)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

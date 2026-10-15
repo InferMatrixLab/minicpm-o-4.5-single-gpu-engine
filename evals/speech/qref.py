@@ -15,14 +15,17 @@
   when they are unknown.
 * verify_qualification re-runs qualify on the recorded, hash-checked inputs.
 * freeze accepts only verified reports and verified qualifications of the same
-  candidate, hardware class and evaluator.  A final Q_ref is frozen from
-  full-set reports of every scored concurrency (all qualified candidates at
-  C=32, the C=1 throughput winner at C=1); its identity is rows, seeds,
-  evaluator, model, dataset and hardware class, and each gate also binds C.
+  candidate, hardware class and evaluator.  A final Q_ref names the campaign
+  qualification and the frozen winners, and must hold exactly the required
+  full-set references: every tuning-qualified class-R candidate at C=32 and the
+  C=1 throughput winner at C=1.  Its identity is rows, seeds, seed policy,
+  evaluator, model, dataset and hardware class; each gate also binds C.
 * verify_qref rebuilds the Q_ref from its recorded sources (re-verifying every
-  report, sidecar, source cell and qualification) and compares every decisive
-  field; gate uses only a verified Q_ref, and a final gate rejects a Q_ref
-  frozen after the engine cells were declared.
+  report, sidecar, source cell and qualification, the campaign and the winners)
+  and compares every decisive field.  gate uses only a verified Q_ref; a final
+  gate requires every engine source cell to have been declared against this
+  Q_ref's content hash (``frozen_refs.speech_qref`` in its experiment
+  declaration, written before the cell ran).
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ REQUIRED_SEEDS = 3
 DECISIVE = ("candidate_digest", "gpu_sku", "gpu_driver", "evaluator_digest", "floors", "effective_inputs_eligible", "effective_inputs_problems",
             "class_r", "qualified")
 FINAL_GATE_C = (1, 32)
-QREF_DECISIVE = ("scope", "gpu", "rows_sha256", "seed_indices", "values", "per_seed", "sources", "identity", "references")
+QREF_DECISIVE = ("scope", "gpu", "rows_sha256", "seed_indices", "values", "per_seed", "sources", "identity", "references", "campaign", "winners")
 
 
 class QRefError(ValueError):
@@ -72,6 +75,17 @@ def _source_spec(vr) -> dict:
     return json.loads((Path(cell) / "experiment.json").read_text())["experiment"]
 
 
+def launch_env_problems(vr, cand: dict) -> None:
+    """Every scored run's recorded launch environment holds only the device selection, caches and the candidate's own overlay."""
+    allowed = {k for k, _ in cand.get("env", [])} | {"CUDA_VISIBLE_DEVICES"}
+    for s, src in vr.report["seeds"].items():
+        summ = json.loads((Path(src["cell"]) / src["run"] / "summary.json").read_text())
+        env = ((summ.get("runtime_evidence") or {}).get("launch_env")) or {}
+        extra = sorted(k for k in env if k not in allowed and not k.startswith("HF_"))
+        if extra:
+            raise SemanticsUnknown(f"seed {s}: the measured launch carried environment {extra} with unknown effect on reference semantics")
+
+
 def qualify(quality_path: str, effective_dir: str, check_sources: bool = True) -> dict:
     vr = _verified(quality_path, check_sources)
     gen = vr.report["generation"]
@@ -88,11 +102,20 @@ def qualify(quality_path: str, effective_dir: str, check_sources: bool = True) -
 
         repo = repo_fingerprint(STACK_REPOS[cand["adapter"]]) if cand["adapter"] in STACK_REPOS else None
     if canon_p.exists() and cand_p.exists():
-        prov = verify_provenance(canon_p, "canonical", gen["model"], None) + verify_provenance(cand_p, cand["adapter"], gen["model"], repo)
+        try:
+            from bench.semantics import preprocessing_identity
+
+            prep = preprocessing_identity(cand["adapter"], cand["config"])
+        except SemanticsUnknown as e:
+            prep = {"unknown": str(e)}
+        prov = (verify_provenance(canon_p, "canonical", gen["model"], None, preprocessing_identity("canonical", "")) +
+                verify_provenance(cand_p, cand["adapter"], gen["model"], repo, prep))
         elig = eligible(compare_sets(load_dumps(cand_p), load_dumps(canon_p), strict_reference=False)) and not prov
     else:
         prov, elig = [f"no effective-input dumps for {cand['adapter']} in {d}"], False
     try:
+        if check_sources:
+            launch_env_problems(vr, cand)
         cr = class_r(cand, elig, check_binding=check_sources).to_json()
         cr_ok, reason = cr["class_r"], None
     except SemanticsUnknown as e:
@@ -155,10 +178,25 @@ def _match_identity(vr, scope: str) -> dict:
     return ident
 
 
-def build_qref(scope: str, gpu: str, refs: list[tuple[str, str]], check_sources: bool = True) -> dict:
+def required_references(campaign: str, winners: str) -> set[str]:
+    """A final Q_ref covers every tuning-qualified class-R candidate at C=32 and the C=1 throughput winner at C=1."""
+    from evals.campaign import verify_campaign, verify_winners
+
+    w = verify_winners(winners)
+    if Path(w["qualification"]["path"]).resolve() != Path(campaign).resolve():
+        raise QRefError("the winners were selected from another campaign qualification")
+    rows = verify_campaign(campaign)["candidates"]
+    req = {f"{r['candidate_id']}@C32" for r in rows if r["status"] == "qualified" and (r.get("qualification") or {}).get("class_r") is True}
+    return req | {f"{w['cells']['1']['throughput']['candidate_id']}@C1"}
+
+
+def build_qref(scope: str, gpu: str, refs: list[tuple[str, str]], check_sources: bool = True, campaign: str | None = None,
+               winners: str | None = None) -> dict:
     """The Q_ref document (without the freeze time) computed from verified references."""
     if not refs:
         raise QRefError("no references")
+    if scope == "final" and not (campaign and winners):
+        raise QRefError("a final Q_ref names the campaign qualification and the frozen winners that define its required references")
     cands, inputs, ident = {}, {}, None
     for qpath, qualpath in refs:
         vr = _verified(qpath, check_sources)
@@ -189,15 +227,22 @@ def build_qref(scope: str, gpu: str, refs: list[tuple[str, str]], check_sources:
         raise QRefError(f"references were generated on {ident['gpu_sku']}, not {gpu}")
     if not cands:
         raise QRefError("no qualified reference")
+    if scope == "final":
+        req = required_references(campaign, winners)
+        if set(cands) != req:
+            raise QRefError(f"final references must be exactly the required qualified set: missing {sorted(req - set(cands))}, "
+                            f"unexpected {sorted(set(cands) - req)}")
     q = freeze_qref(cands, gpu, 0.0).to_json()
     q.pop("frozen_unix")
-    return {**q, "scope": scope, "identity": ident, "references": inputs}
+    bind = {"campaign": {"path": str(campaign), "sha256": _sha(campaign)}, "winners": {"path": str(winners), "sha256": _sha(winners)}} if scope == "final" else {}
+    return {**q, "scope": scope, "identity": ident, "references": inputs, **bind}
 
 
-def freeze(scope: str, gpu: str, refs: list[tuple[str, str]], out: Path, check_sources: bool = True) -> dict:
+def freeze(scope: str, gpu: str, refs: list[tuple[str, str]], out: Path, check_sources: bool = True, campaign: str | None = None,
+           winners: str | None = None) -> dict:
     if out.exists():
         raise QRefError(f"{out} exists: a frozen Q_ref is never rewritten")
-    doc = {**build_qref(scope, gpu, refs, check_sources), "frozen_unix": time.time()}
+    doc = {**build_qref(scope, gpu, refs, check_sources, campaign, winners), "frozen_unix": time.time()}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=1))
     return doc
@@ -213,7 +258,11 @@ def verify_qref(qref_path: str, check_sources: bool = True) -> dict:
         for f, h in (("quality", "quality_sha256"), ("qualification", "qualification_sha256")):
             if not Path(inp[f]).exists() or _sha(inp[f]) != inp[h]:
                 raise QRefError(f"{qref_path}: reference {key} {f} is missing or changed")
-    again = json.loads(json.dumps(build_qref(qd.get("scope"), qd.get("gpu"), [(v["quality"], v["qualification"]) for v in refs.values()], check_sources)))
+    for k in ("campaign", "winners"):
+        if qd.get(k) and (not Path(qd[k]["path"]).exists() or _sha(qd[k]["path"]) != qd[k]["sha256"]):
+            raise QRefError(f"{qref_path}: the {k} record changed since freezing")
+    again = json.loads(json.dumps(build_qref(qd.get("scope"), qd.get("gpu"), [(v["quality"], v["qualification"]) for v in refs.values()], check_sources,
+                                             (qd.get("campaign") or {}).get("path"), (qd.get("winners") or {}).get("path"))))
     bad = [k for k in QREF_DECISIVE if again.get(k) != qd.get(k)]
     if bad:
         raise QRefError(f"{qref_path}: recorded {bad} differ from the Q_ref rebuilt from its references")
@@ -242,9 +291,11 @@ def gate(qref_path: str, quality_path: str, headline_digest: str | None, check_s
         if headline_digest is None or vr.report["generation"]["candidate"]["digest"] != headline_digest:
             raise QRefError("final gates apply only to the declared headline configuration")
         if check_sources:
-            declared = [json.loads((Path(s["cell"]) / "experiment.json").read_text()).get("declared_unix") for s in vr.report["seeds"].values()]
-            if any(d is None for d in declared) or qd["frozen_unix"] >= min(declared):
-                raise QRefError("the Q_ref was not frozen before the engine cells were declared")
+            sha = _sha(qref_path)
+            for s in vr.report["seeds"].values():
+                decl = json.loads((Path(s["cell"]) / "experiment.json").read_text())
+                if ((decl.get("frozen_refs") or {}).get("speech_qref") or {}).get("sha256") != sha:
+                    raise QRefError(f"{s['cell']} was not declared against this frozen Q_ref (frozen_refs.speech_qref)")
     res = comparative_gates(vr.summary["per_seed"], vr.report["rows_sha256"], tuple(vr.summary["seed_indices"]), q)
     res["absolute_floors_passed"] = bool(vr.summary["absolute_floors_pooled"]["passed"])
     res["scope"] = scope
@@ -264,6 +315,8 @@ def main(argv=None) -> int:
     fz.add_argument("--gpu", required=True, help="asserted GPU SKU; must equal the references' generation GPU")
     fz.add_argument("--reference", action="append", required=True, help="QUALITY_JSON=QUALIFICATION_JSON")
     fz.add_argument("--out", required=True)
+    fz.add_argument("--campaign", default=None, help="campaign qualification record (final scope)")
+    fz.add_argument("--winners", default=None, help="frozen winners (final scope)")
     vf = sub.add_parser("verify")
     vf.add_argument("--qref", required=True)
     gt = sub.add_parser("gate")
@@ -281,7 +334,7 @@ def main(argv=None) -> int:
         return 0
     if a.cmd == "freeze":
         refs = [tuple(r.split("=", 1)) for r in a.reference]
-        doc = freeze(a.scope, a.gpu, refs, Path(a.out))
+        doc = freeze(a.scope, a.gpu, refs, Path(a.out), campaign=a.campaign, winners=a.winners)
         print(json.dumps({"values": doc["values"], "sources": doc["sources"]}, indent=1))
         return 0
     if a.cmd == "verify":

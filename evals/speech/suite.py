@@ -108,6 +108,7 @@ def collect(cells: list[Path], run_label: str | None = None) -> Collection:
             "measured_ids_sha256": hashlib.sha256("\n".join(spec["measured_ids"]).encode()).hexdigest(),
             "dataset": spec["dataset"],
             "model": spec["model"],
+            "seed_policy": spec["sampling"].get("seed_policy"),
         }
         if gen is None:
             gen = ident
@@ -279,7 +280,7 @@ def load_dref(path: str, col: Collection) -> dict[str, float]:
 
     g = col.generation
     expect = {"role": "truncation", "concurrency": g["concurrency"], "gpu_class": {k: g[k] for k in ("gpu_sku", "gpu_driver", "gpu_memory_mib")},
-              "model": g["model"], "dataset": g["dataset"], "rows": sorted({r.row_id for r in col.rows})}
+              "model": g["model"], "dataset": g["dataset"], "seed_policy": g["seed_policy"], "rows": sorted({r.row_id for r in col.rows})}
     problems, rows = verify_dref(path, expect)
     if problems:
         raise CoverageError(f"duration reference {path} does not verify: {problems[:4]}")

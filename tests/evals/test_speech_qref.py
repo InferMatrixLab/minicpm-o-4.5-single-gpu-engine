@@ -74,9 +74,11 @@ def eff(tmp_path):
     d = tmp_path / "eff"
     d.mkdir()
     model = {"repo": "openbmb/MiniCPM-o-4_5", "revision": "503e754207c94da6bb26850b4469f367c9ea3582"}
-    for stack in ("canonical", "vllm-omni", "sglang-omni"):
+    from bench.semantics import preprocessing_identity
+
+    for stack, cfg in (("canonical", ""), ("vllm-omni", "minicpmo_4_5_turn.yaml"), ("sglang-omni", "speech")):
         shutil.copy(EFF / f"{stack}.jsonl", d / f"{stack}.jsonl")
-        write_provenance(d / f"{stack}.jsonl", stack, model)
+        write_provenance(d / f"{stack}.jsonl", stack, model, preprocessing=preprocessing_identity(stack, cfg))
     return d
 
 

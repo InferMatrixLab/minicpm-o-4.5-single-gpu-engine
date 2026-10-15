@@ -202,12 +202,15 @@ def sglang_semantics(extra: list[str], env: dict) -> dict:
 def check_deploy_binding(candidate: dict) -> None:
     """Today's deploy files must be the bytes the measured candidate recorded."""
     recorded = list(candidate.get("deploy_files_sha256") or [])
-    if candidate["adapter"] == "vllm-omni":
-        now = [c["sha256"] for c in deploy_chain(candidate["config"])]
-    elif candidate["adapter"] == "sglang-omni":
-        now = [v for _, v in sorted(sglang_files().items())]
-    else:
-        raise SemanticsUnknown(f"{candidate['adapter']} is not a baseline")
+    try:
+        if candidate["adapter"] == "vllm-omni":
+            now = [c["sha256"] for c in deploy_chain(candidate["config"])]
+        elif candidate["adapter"] == "sglang-omni":
+            now = [v for _, v in sorted(sglang_files().items())]
+        else:
+            raise SemanticsUnknown(f"{candidate['adapter']} is not a baseline")
+    except OSError as e:
+        raise SemanticsUnknown(f"deploy files of {candidate.get('candidate_id', candidate['config'])} are not readable: {e}") from None
     if now != recorded:
         raise SemanticsUnknown(f"deploy files of {candidate.get('candidate_id', candidate['config'])} differ from the measured candidate's")
 
@@ -236,3 +239,23 @@ def class_r(candidate: dict, canonical_inputs: bool, check_binding: bool = True)
     return ConfigClass(engine=candidate["adapter"], config=candidate["config"], track=s["track"], audio_output=s["audio_output"],
                        chunk_tokens=s["chunk_tokens"], precision=s["precision"], euler_steps=s["euler_steps"], session_mode=s["session_mode"],
                        canonical_inputs=canonical_inputs, mps=s["mps"])
+
+
+def preprocessing_identity(adapter: str, config: str) -> dict:
+    """Settings of a launch that change what a request's prompt and voice reference become (the effective inputs).
+
+    vllm-omni: the resolved Code2Wav reference window (``ref_audio_max_seconds``, default 6 s) and the prompt rendering
+    path (stage-0 ``interleave_mm_strings``); the chat template and tokenizer come from the model revision, checked
+    separately.  sglang-omni: its model config and serve script (``sglang_files``).
+    """
+    if adapter == "vllm-omni":
+        r = resolve_vllm_config(config)
+        conn = ((r.get("connectors") or {}).get("connector_of_shared_memory") or {}).get("extra") or {}
+        st0 = next(st for st in r["stages"] if int(st["stage_id"]) == 0)["engine_args"]
+        return {"adapter": adapter, "ref_audio_max_seconds": float(conn.get("ref_audio_max_seconds", 6.0)),
+                "interleave_mm_strings": bool(st0.get("interleave_mm_strings", False))}
+    if adapter == "sglang-omni":
+        return {"adapter": adapter, **sglang_files()}
+    if adapter == "canonical":
+        return {"adapter": adapter}
+    raise SemanticsUnknown(f"{adapter} has no preprocessing identity")

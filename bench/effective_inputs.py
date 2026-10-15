@@ -226,21 +226,21 @@ def code_hashes(stack: str, files: list[str] | None = None) -> dict:
     return {f: hashlib.sha256((root / f).read_bytes()).hexdigest() for f in (files if files is not None else _code_files(stack))}
 
 
-def write_provenance(dump: Path, stack: str, model: dict, server: dict | None = None) -> dict:
-    """Record the execution that produced ``dump``: stack commit, model revision, request/preprocessing code."""
+def write_provenance(dump: Path, stack: str, model: dict, server: dict | None = None, preprocessing: dict | None = None) -> dict:
+    """Record the execution that produced ``dump``: stack commit, model revision, request code, preprocessing settings."""
     from bench.fingerprint import repo_fingerprint
 
     doc = {"schema": PROVENANCE_SCHEMA, "stack": stack, "dump_sha256": hashlib.sha256(Path(dump).read_bytes()).hexdigest(),
            "rows": len(load_dumps(Path(dump))), "model": model,
            "stack_repo": repo_fingerprint(STACK_REPOS[stack]) if stack in STACK_REPOS else None, "code_sha256": code_hashes(stack),
            "producer_sha256": code_hashes(stack, PRODUCER_FILES),
-           "server": server}
+           "server": server, "preprocessing": preprocessing}
     provenance_path(dump).write_text(json.dumps(doc, indent=1))
     return doc
 
 
-def verify_provenance(dump: Path, stack: str, model: dict, stack_repo: dict | None) -> list[str]:
-    """Problems binding ``dump`` to the measured execution (model revision, stack commit, current request code)."""
+def verify_provenance(dump: Path, stack: str, model: dict, stack_repo: dict | None, preprocessing: dict | None = None) -> list[str]:
+    """Problems binding ``dump`` to the measured execution (model revision, stack commit, request code, preprocessing settings)."""
     p = provenance_path(dump)
     if not p.exists():
         return [f"{dump}: no provenance record"]
@@ -256,6 +256,8 @@ def verify_provenance(dump: Path, stack: str, model: dict, stack_repo: dict | No
         rec = doc.get("stack_repo") or {}
         if stack_repo is None or rec.get("commit") != stack_repo.get("commit") or rec.get("dirty") or stack_repo.get("dirty"):
             out.append(f"{dump}: produced at {stack} {rec.get('commit')} (dirty={rec.get('dirty')}), measured at {stack_repo}")
+    if preprocessing is not None and doc.get("preprocessing") != preprocessing:
+        out.append(f"{dump}: produced under preprocessing {doc.get('preprocessing')}, the measured launch has {preprocessing}")
     rec = doc.get("code_sha256") or {}
     changed = [f for f, h in code_hashes(stack).items() if rec.get(f) != h]
     if changed:

@@ -23,8 +23,8 @@ Evidence boundaries:
   scorers.  It is used by ``freeze``, ``certify`` and ``calibrate``;
 * ``verify_mm_qref`` rebuilds a frozen Q_ref from its recorded references; a
   final Q_ref needs full-set coverage of every benchmark;
-* ``certify`` is the only final multimodal verdict: a verified final Q_ref frozen
-  before the report was generated, a final full-set report of all three
+* ``certify`` is the only final multimodal verdict: a verified final Q_ref whose
+  hash the report's generation declared before it ran, a final full-set report of all three
   benchmarks, the declared headline candidate, and ``compare_bench`` (the
   production comparison, also used by ``calibrate``) for every benchmark.
 
@@ -118,7 +118,7 @@ def request_policy(adapter: str, bench: str, concurrency: int) -> dict:
             "max_tokens": MAX_TOKENS.get(bench, 512), "extra_body": extra}
 
 
-def generation_identity(cand, gpu: dict, benches: list[str], concurrency: int, port: int, evaluator_digest: str) -> dict:
+def generation_identity(cand, gpu: dict, benches: list[str], concurrency: int, port: int, evaluator_digest: str, frozen_refs: dict | None = None) -> dict:
     """The frozen multimodal generation declaration: candidate, model, code/environment fingerprints, request policy, hardware."""
     from bench.cli import ADAPTER_PYTHON, DEFAULT_REPOS, execution_fingerprints
     from bench.workload import MODEL_REPO, MODEL_REVISION
@@ -127,14 +127,15 @@ def generation_identity(cand, gpu: dict, benches: list[str], concurrency: int, p
            "model": {"repo": MODEL_REPO, "revision": MODEL_REVISION}, "fingerprints": execution_fingerprints(cand.adapter),
            "adapter_python": ADAPTER_PYTHON[cand.adapter], "repos_checked": sorted(DEFAULT_REPOS), "port": port,
            "hardware": {k: gpu.get(k) for k in ("gpu_sku", "gpu_uuid", "driver", "memory_mib", "gpu_index")},
-           "requests": {b: request_policy(cand.adapter, b, concurrency) for b in benches}, "evaluator_digest": evaluator_digest}
+           "requests": {b: request_policy(cand.adapter, b, concurrency) for b in benches}, "evaluator_digest": evaluator_digest,
+           "frozen_refs": frozen_refs or {}}
     doc["digest"] = hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
     return doc
 
 
-def generation_problems(rep: dict) -> list[str]:
-    """Recompute the generation identity's digests and reconcile it with the report and the observed server."""
-    from bench.cli import server_spec
+def generation_problems(rep: dict, report_dir: Path | None = None) -> list[str]:
+    """Recompute the generation identity's digests and reconcile it with its frozen file, the report and the observed server."""
+    from bench.cli import ADAPTER_PYTHON, DEFAULT_REPOS, server_spec
     from bench.experiment import Candidate
     from evals.speech.verify_report import candidate_problems
 
@@ -142,6 +143,15 @@ def generation_problems(rep: dict) -> list[str]:
     if not gen:
         return ["report has no frozen generation declaration"]
     out = []
+    if report_dir is not None:
+        gp = Path(report_dir) / "generation.json"
+        if not gp.exists() or json.loads(gp.read_text()) != gen:
+            out.append("report generation differs from the generation.json frozen before the server started")
+    fp = gen.get("fingerprints") or {}
+    if any((r or {}).get("dirty") for r in (fp.get("repos") or {}).values()) or not fp.get("repos"):
+        out.append("generation ran from a dirty or unrecorded stack checkout")
+    if gen.get("repos_checked") != sorted(DEFAULT_REPOS) or gen.get("adapter_python") != ADAPTER_PYTHON.get(gen["candidate"]["adapter"]):
+        out.append("generation environment record is not the harness's (repositories / adapter interpreter)")
     body = {k: v for k, v in gen.items() if k != "digest"}
     if hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest() != gen.get("digest"):
         out.append("generation declaration does not match its digest")
@@ -151,7 +161,16 @@ def generation_problems(rep: dict) -> list[str]:
         out.append("report candidate differs from the generation declaration")
     cand = Candidate(adapter=c["adapter"], config=c["config"], extra=tuple(c["extra"]), env=tuple(tuple(x) for x in c["env"]), label=c.get("label", ""),
                      deploy_files_sha256=tuple(c["deploy_files_sha256"]), mps=c["mps"])
+    if c["adapter"] in ("vllm-omni", "sglang-omni"):
+        from bench.semantics import SemanticsUnknown, check_deploy_binding
+
+        try:
+            check_deploy_binding(c)
+        except SemanticsUnknown as e:
+            out.append(str(e))
     ev = rep.get("server_evidence") or {}
+    if not ev.get("gpu_workers") or not ev.get("process_tree") or not {w.get("pid") for w in ev["gpu_workers"]} <= set(ev["process_tree"]):
+        out.append("server evidence has no GPU workers of the launched process tree")
     hw = gen.get("hardware") or {}
     if ev.get("launch_argv") != server_spec(cand, gen["port"], hw.get("gpu_index")).cmd:
         out.append("observed launch arguments are not the declared candidate's")
@@ -240,7 +259,7 @@ def verify_mm_report(report_dir: str | Path, rescore: bool = True) -> tuple[dict
     problems, derived = [], {}
     if not evaluator_consistent(rep.get("evaluator") or {}):
         problems.append("evaluator record does not match its digest")
-    problems += generation_problems(rep)
+    problems += generation_problems(rep, d)
     if rescore:
         try:  # the rescorer must be the pinned evaluator the report recorded (sources, environments, manifests, workers)
             if verify_mm_evaluator()["digest"] != rep["evaluator"].get("digest"):
@@ -259,6 +278,8 @@ def verify_mm_report(report_dir: str | Path, rescore: bool = True) -> tuple[dict
             continue
         if _sha(expected_path(rep["subset"], bench)) != r.get("expected_sha256"):
             problems.append(f"{bench}: the frozen expected manifest changed since the run")
+        if exp.get("consumed") is not None and r.get("consumed") != exp.get("consumed"):
+            problems.append(f"{bench}: the run's consumption record differs from the frozen manifest's")
         per = _jsonl(side)
         exp_ids = [i for i, _ in exp["items"]]
         cov = coverage([p["id"] for p in per], per, exp_ids)
@@ -316,7 +337,8 @@ def cmd_run(a) -> int:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     gpu = gpu_identity(a.gpu)
-    gen = generation_identity(cand, gpu, benches, a.concurrency, a.port, evaluator["digest"])
+    frozen = {k: _sha(Path(v)) for k, v in (kv.split("=", 1) for kv in a.frozen_ref)}
+    gen = generation_identity(cand, gpu, benches, a.concurrency, a.port, evaluator["digest"], frozen)
     (out / "generation.json").write_text(json.dumps(gen, indent=1))  # frozen before the server starts
     report = {"scope": a.scope, "subset": a.subset, "concurrency": a.concurrency, "candidate": gen["candidate"], "generation": gen,
               "gpu": gpu, "evaluator": evaluator, "started_unix": time.time(), "benches": {}}
@@ -445,8 +467,8 @@ def certify(report_dir: str, qref_path: str, headline_digest: str | None) -> dic
         problems.append(f"certification needs all benchmarks; report has {sorted(derived)}")
     if headline_digest is None or rep["candidate"]["digest"] != headline_digest:
         problems.append("report is not the declared headline configuration")
-    if not isinstance(rep.get("started_unix"), (int, float)) or q["frozen_unix"] >= rep["started_unix"]:
-        problems.append("the multimodal Q_ref was not frozen before the report was generated")
+    if ((rep.get("generation") or {}).get("frozen_refs") or {}).get("mm_qref") != _sha(qref_path):
+        problems.append("the report's generation was not declared against this frozen multimodal Q_ref (frozen_refs.mm_qref)")
     verdicts = {}
     for bench in BENCHES:
         d, ref = derived.get(bench), q["values"].get(bench)
@@ -473,6 +495,8 @@ def _write_fixture(clean_dir: Path, rep: dict, bench: str, per: list[dict], out:
     fixture["benches"] = {bench: {**rep["benches"][bench], "accuracy": res["accuracy"], "per_sample_sha256": _sha(side)}}
     fixture["fixture_of"] = {"report": str(clean_dir / "report.json"), "report_sha256": _sha(clean_dir / "report.json")}
     (out / "report.json").write_text(json.dumps(fixture, indent=1))
+    if (clean_dir / "generation.json").exists():  # the fixture keeps the clean run's frozen generation declaration
+        (out / "generation.json").write_bytes((clean_dir / "generation.json").read_bytes())
     return out
 
 
@@ -555,6 +579,7 @@ def main(argv=None) -> int:
     r.add_argument("--scope", choices=["development", "final"], required=True)
     r.add_argument("--concurrency", type=int, default=16)
     r.add_argument("--out", required=True)
+    r.add_argument("--frozen-ref", action="append", default=[], help="NAME=PATH of a reference frozen before this run (mm_qref=...)")
     r.add_argument("extra", nargs="*")
     f = sub.add_parser("freeze")
     f.add_argument("--scope", choices=["development", "final"], required=True)

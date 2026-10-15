@@ -219,7 +219,7 @@ async def _smoke(args) -> int:
 async def run_one_cell(
     *, cell: CellSpec, out: Path, port: int, url: str | None, cache_policy: str, run_order_seed: int, save_audio: bool, strict: bool,
     sglang_stream: bool = False, kind: str = "performance", spec: dict | None = None, run_indices: list[int] | None = None,
-    recovery: list[dict] | None = None,
+    recovery: list[dict] | None = None, frozen_refs: dict | None = None,
 ) -> dict:
     """Run (or extend) one cell.  The frozen experiment spec is written before any run executes."""
     cand = cell.candidate
@@ -255,6 +255,8 @@ async def run_one_cell(
     header = {"experiment": spec, "experiment_digest": spec_digest(spec), "experiment_base_digest": base_digest, "manifest": manifest}
     prev_decl = json.loads((out / "experiment.json").read_text()) if (out / "experiment.json").exists() else {}
     declare(out, {**header, "declared_unix": prev_decl.get("declared_unix", time.time()),
+                  # references frozen before this cell executes (Q_refs it will be gated against), bound by content hash
+                  "frozen_refs": prev_decl.get("frozen_refs", frozen_refs or {}),
                   "recoveries": prev_decl.get("recoveries", []) + list(recovery or [])})  # frozen before execution
     gpu_name = spec["hardware"].get("gpu_sku", "")
     meta = RunMeta(gpu=gpu_name, engine=cand.adapter, config=cand.config, candidate_id=cand.candidate_id, config_digest=cand.digest,
@@ -290,10 +292,21 @@ async def _cell(args) -> int:
                            "env": dict(kv.split("=", 1) for kv in args.env)})
     cell = make_cell(cand, args.concurrency, args.k, args.id_set, args.seed_index, args.timeout, args.gpu)
     res = await run_one_cell(cell=cell, out=Path(args.out), port=args.port, url=url, cache_policy=args.cache_policy, kind=args.kind,
-                             run_order_seed=args.run_order_seed, save_audio=not args.no_audio, strict=not args.loose, sglang_stream=args.sglang_stream)
+                             run_order_seed=args.run_order_seed, save_audio=not args.no_audio, strict=not args.loose, sglang_stream=args.sglang_stream,
+                             frozen_refs=frozen_ref_hashes(dict(kv.split("=", 1) for kv in args.frozen_ref)))
     print(json.dumps({k: res[k] for k in ("cell_valid", "cell_compliant", "manifest_errors")} | {"problems": res["verification"]["problems"][:5],
                                                                                                   "out": args.out}))
     return 0 if res["cell_compliant"] else 1
+
+
+def frozen_ref_hashes(refs: dict) -> dict:
+    """{name: path} -> {name: {path, sha256}} for the declaration of the cells that will be gated against them."""
+    out = {}
+    for name, path in (refs or {}).items():
+        out[name] = {"path": str(Path(path).resolve()), "sha256": file_sha256(path)}
+        if out[name]["sha256"] is None:
+            raise SystemExit(f"frozen reference {name} ({path}) does not exist")
+    return out
 
 
 def declare(out: Path, header: dict) -> None:
@@ -404,6 +417,7 @@ async def _sweep(args) -> int:
         record = {"spec": spec, "spec_digest": spec_d, "cells": {}, "attempts": []}
     seed = int(spec["run_order_seed"])
     kind = spec.get("kind", "performance")
+    frozen = frozen_ref_hashes(spec.get("frozen_refs") or {})
     cands = unique_candidates([make_candidate(c) for c in spec["configs"]])
     cells = [make_cell(c, conc, int(spec["k"]), spec.get("id_set", "eval"), int(spec.get("seed_index", 0)), float(spec.get("timeout_s", 180.0)),
                        int(spec["gpu"])) for c in cands for conc in spec["concurrencies"]]
@@ -423,7 +437,8 @@ async def _sweep(args) -> int:
         else:
             try:
                 res = await run_one_cell(cell=cell, out=cell_dir, port=int(spec.get("port", 18100)), url=None, cache_policy="restart",
-                                         run_order_seed=seed, save_audio=bool(spec.get("save_audio", True)), strict=True, kind=kind, spec=current)
+                                         run_order_seed=seed, save_audio=bool(spec.get("save_audio", True)), strict=True, kind=kind, spec=current,
+                                         frozen_refs=frozen)
             except Exception as e:  # a failed cell (e.g. server startup) is recorded and the sweep continues
                 record["cells"][cell.digest] = {"index": i, "candidate_id": cell.candidate.candidate_id, "concurrency": cell.concurrency,
                                                 "dir": str(cell_dir), "cell_compliant": False, "failure": f"{type(e).__name__}: {e}"[:500]}
@@ -471,6 +486,7 @@ def main(argv=None) -> int:
     cp.add_argument("--sglang-stream", action="store_true")
     cp.add_argument("--label", default="", help="variant label, e.g. mps-on")
     cp.add_argument("--env", action="append", default=[], help="KEY=VALUE added to the server environment")
+    cp.add_argument("--frozen-ref", action="append", default=[], help="NAME=PATH of a reference frozen before this cell (e.g. speech_qref=...)")
     cp.add_argument("extra", nargs="*", help="extra server args after --")
     ex = sub.add_parser("extend", help="declared development K extension of a verified cell")
     ex.add_argument("--cell", required=True)

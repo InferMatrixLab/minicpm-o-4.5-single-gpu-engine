@@ -199,7 +199,8 @@ def verify_report(path: str | Path, check_sources: bool = True, check_audio: boo
                 problems.append(f"seed {s}: sidecar rows differ from the source cell's declared IDs")
             want = {"candidate": spec["candidate"], "candidate_digest": spec["candidate"]["digest"], "candidate_id": spec["candidate"]["candidate_id"],
                     **gpu_class(spec["hardware"]), "concurrency": spec["concurrency"], "id_set": spec["id_set"], "dataset": spec["dataset"],
-                    "model": spec["model"], "measured_ids_sha256": measured_ids_sha256(spec["measured_ids"])}
+                    "model": spec["model"], "measured_ids_sha256": measured_ids_sha256(spec["measured_ids"]),
+                    "seed_policy": spec["sampling"].get("seed_policy")}
             for k, w in want.items():
                 if gen.get(k) != w:
                     problems.append(f"generation.{k}={gen.get(k)!r} contradicts source cell ({w!r})")
@@ -222,7 +223,7 @@ def verify_report(path: str | Path, check_sources: bool = True, check_audio: boo
             problems.append("duration reference file is missing or changed")
         else:
             expect = {"role": "truncation", "concurrency": gen.get("concurrency"), "gpu_class": {k: gen.get(k) for k in ("gpu_sku", "gpu_driver", "gpu_memory_mib")},
-                      "model": gen.get("model"), "dataset": gen.get("dataset"), "rows": sorted({r.row_id for r in rows})}
+                      "model": gen.get("model"), "dataset": gen.get("dataset"), "seed_policy": gen.get("seed_policy"), "rows": sorted({r.row_id for r in rows})}
             dproblems, verified = verify_dref(dpath, expect, check_sources=check_sources)
             problems += [f"d_ref: {p}" for p in dproblems]
             if not dproblems:
@@ -242,6 +243,7 @@ def verify_report(path: str | Path, check_sources: bool = True, check_audio: boo
     identity = {"gpu_sku": gen.get("gpu_sku"), "gpu_driver": gen.get("gpu_driver"), "gpu_memory_mib": gen.get("gpu_memory_mib"),
                 "concurrency": gen.get("concurrency"), "id_set": gen.get("id_set"),
                 "measured_ids_sha256": gen.get("measured_ids_sha256"), "dataset": gen.get("dataset"), "model": gen.get("model"),
+                "seed_policy": gen.get("seed_policy"),
                 "seeds": seeds, "rows_per_seed": {str(s): len(v) for s, v in by_seed.items()}, "evaluator_digest": (rep.get("evaluator") or {}).get("digest"),
                 "scope": rep.get("scope")}
     return VerifiedReport(path=path, report=rep, rows=rows, summary=summary, identity=identity, problems=problems)
@@ -291,6 +293,14 @@ def _winner_problems(winners_path: str, winners_sha: str, spec: dict, check_sour
         return [f"winner declaration does not verify: {e}"]
     out = []
     cell = (w["cells"].get(str(spec["concurrency"])) or {}).get("throughput") or {}
+    try:
+        wspec = json.loads((Path(cell["cell"]) / "experiment.json").read_text())["experiment"]
+        for k, a, b in (("model", wspec["model"], spec["model"]), ("dataset", wspec["dataset"], spec["dataset"]),
+                        ("seed policy", wspec["sampling"].get("seed_policy"), spec["sampling"].get("seed_policy"))):
+            if a != b:
+                out.append(f"the winner's tuning cell and the reference sources differ in {k}")
+    except (KeyError, OSError, json.JSONDecodeError):
+        out.append("the winner declaration does not name a readable tuning cell")
     if cell.get("candidate_digest") != spec["candidate"]["digest"]:
         out.append(f"C={spec['concurrency']} throughput winner is {cell.get('candidate_id')}, not {spec['candidate']['candidate_id']}")
     if w["gpu_class"] != gpu_class(spec["hardware"]):
@@ -373,7 +383,7 @@ def verify_dref(path: str | Path, expect: dict | None = None, check_sources: boo
     if recomputed != doc.get("rows"):
         problems.append("per-row durations do not match the source cells")
     if expect:
-        for k in ("role", "concurrency", "gpu_class", "model", "dataset"):
+        for k in ("role", "concurrency", "gpu_class", "model", "dataset", "seed_policy"):
             if k in expect and doc.get(k) != expect[k]:
                 problems.append(f"reference {k}={doc.get(k)!r}, required {expect[k]!r}")
         missing = sorted(set(expect.get("rows") or []) - set(doc.get("rows") or {}))

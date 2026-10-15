@@ -216,6 +216,7 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=32)
     ap.add_argument("--url", default=None)
+    ap.add_argument("--server-config", default=None, help="deploy config of the server at --url (vllm-omni)")
     a = ap.parse_args()
     if a.stack == "canonical":
         dumps = dump_canonical(a.n)
@@ -229,7 +230,17 @@ def main() -> int:
     from bench.effective_inputs import write_provenance
     from bench.workload import MODEL_REPO, MODEL_REVISION
 
-    write_provenance(Path(a.out), a.stack, {"repo": MODEL_REPO, "revision": MODEL_REVISION}, {"url": a.url} if a.url else None)
+    from bench.semantics import deploy_chain, preprocessing_identity
+
+    server, prep = None, None
+    if a.stack == "vllm-omni":
+        if not a.server_config:
+            raise SystemExit("--server-config is required for vllm-omni dumps")
+        server = {"url": a.url, "config": a.server_config, "deploy_files_sha256": [c["sha256"] for c in deploy_chain(a.server_config)]}
+        prep = preprocessing_identity("vllm-omni", a.server_config)
+    elif a.stack in ("sglang-omni", "canonical"):
+        prep = preprocessing_identity(a.stack, "speech")
+    write_provenance(Path(a.out), a.stack, {"repo": MODEL_REPO, "revision": MODEL_REVISION}, server, prep)
     print(f"wrote {len(dumps)} rows to {a.out}")
     return 0
 

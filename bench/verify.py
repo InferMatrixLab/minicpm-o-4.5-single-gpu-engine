@@ -151,6 +151,8 @@ def reconcile_manifest(m: dict, spec: dict) -> list[str]:
             out.append(f"deploy.candidate.{k}={got!r} != spec {want!r}")
     if [list(x) for x in mc.get("env", [])] != [list(x) for x in c["env"]] or list(mc.get("extra", [])) != list(c["extra"]):
         out.append("deploy.candidate launch arguments/environment differ from the spec")
+    if list(mc.get("deploy_files_sha256", [])) != list(c["deploy_files_sha256"]) or mc.get("label", "") != c.get("label", ""):
+        out.append("deploy.candidate deploy-file hashes or label differ from the spec")
     cand = Candidate(adapter=c["adapter"], config=c["config"], extra=tuple(c["extra"]), env=tuple(tuple(x) for x in c["env"]), label=c.get("label", ""),
                      deploy_files_sha256=tuple(c["deploy_files_sha256"]), mps=c["mps"])
     from bench.protocol import ids_sha256 as _ids
@@ -168,9 +170,12 @@ def reconcile_manifest(m: dict, spec: dict) -> list[str]:
         out.append("deploy.cell candidate/workload differ from the spec")
     if (m.get("model") or {}).get("revision") != spec["model"]["revision"] or (m.get("model") or {}).get("repo") != spec["model"]["repo"]:
         out.append("manifest model differs from the spec")
+    from bench.cli import DEFAULT_REPOS
+
     for name, want in (spec["fingerprints"].get("repos") or {}).items():
         got = (m.get("repos") or {}).get(name) or {}
-        if got.get("commit") != want.get("commit") or bool(got.get("dirty")) != bool(want.get("dirty")):
+        if got.get("commit") != want.get("commit") or bool(got.get("dirty")) != bool(want.get("dirty")) \
+                or (name in DEFAULT_REPOS and got.get("path") != str(DEFAULT_REPOS[name])):
             out.append(f"manifest repo {name} differs from the spec fingerprint")
     ds = m.get("datasets") or [{}]
     if ds[0].get("repo") != spec["dataset"]["repo"] or ds[0].get("revision") != spec["dataset"]["revision"]:

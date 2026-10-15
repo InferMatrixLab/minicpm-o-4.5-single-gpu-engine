@@ -120,8 +120,8 @@ def test_report_identity_mutations_fail(tmp_path):
 
 
 # --- B8a: structured duration references ----------------------------------------------------------
-def _winners_stub(monkeypatch, digest, c, hardware):
-    doc = {"gpu_class": vrm.gpu_class(hardware), "cells": {str(c): {"throughput": {"candidate_digest": digest, "candidate_id": "w"}}}}
+def _winners_stub(monkeypatch, digest, c, hardware, cell_dir):
+    doc = {"gpu_class": vrm.gpu_class(hardware), "cells": {str(c): {"throughput": {"candidate_digest": digest, "candidate_id": "w", "cell": str(cell_dir)}}}}
     monkeypatch.setattr(campaign, "verify_winners", lambda path, check_sources=True: doc)
 
 
@@ -130,7 +130,7 @@ def test_structured_dref_end_to_end(tmp_path, monkeypatch):
     spec = json.loads((full[0] / "experiment.json").read_text())["experiment"]
     winners = tmp_path / "winners.json"
     winners.write_text("{}")
-    _winners_stub(monkeypatch, spec["candidate"]["digest"], 1, spec["hardware"])
+    _winners_stub(monkeypatch, spec["candidate"]["digest"], 1, spec["hardware"], full[0])
     dref = tmp_path / "dref.json"
     vrm.build_dref(full, dref, "truncation", winners)
     rep = score(full, tmp_path / "final.json", scope="final", d_ref=dref)
@@ -154,9 +154,9 @@ def test_structured_dref_end_to_end(tmp_path, monkeypatch):
         assert vrm.verify_dref(p)[0], name
     problems, _ = vrm.verify_dref(dref, {"concurrency": 32})
     assert problems  # wrong C for the consumer
-    _winners_stub(monkeypatch, "another-candidate", 1, spec["hardware"])
+    _winners_stub(monkeypatch, "another-candidate", 1, spec["hardware"], full[0])
     assert any("throughput winner" in p for p in vrm.verify_dref(dref)[0])
-    _winners_stub(monkeypatch, spec["candidate"]["digest"], 1, {**spec["hardware"], "gpu_sku": "H200"})
+    _winners_stub(monkeypatch, spec["candidate"]["digest"], 1, {**spec["hardware"], "gpu_sku": "H200"}, full[0])
     assert any("selected on" in p for p in vrm.verify_dref(dref)[0])
 
 
@@ -259,28 +259,103 @@ def test_speech_qref_verified_at_consumption(tmp_path, monkeypatch):
         sq.gate(str(qref), str(eng), None)
 
 
-def test_final_qref_freeze_to_gate(tmp_path, monkeypatch):
-    full = [cell(tmp_path, seed=s, id_set="full") for s in range(3)]
-    spec = json.loads((full[0] / "experiment.json").read_text())["experiment"]
+def _sweep_spec(tmp_path, name, *, seed, kind, id_set, k, concurrencies, labels, frozen_refs=None):
+    spec = {"description": name, "kind": kind, "id_set": id_set, "seed_index": seed, "gpu": GPU, "port": _free_port(), "k": k, "run_order_seed": seed,
+            "timeout_s": 180, "save_audio": True, "concurrencies": concurrencies,
+            "configs": [{"adapter": "engine", "config": "fake", "label": lab, "env": {"LBL": lab}} for lab in labels]}
+    if frozen_refs:
+        spec["frozen_refs"] = frozen_refs
+    sp = tmp_path / f"{name}.json"
+    sp.write_text(json.dumps(spec))
+    out = tmp_path / name
+    asyncio.run(cli._sweep(type("A", (), {"spec": str(sp), "out": str(out)})()))
+    return str(out)
+
+
+def test_full_chain_winners_dref_final_gate(tmp_path, monkeypatch):
+    """qualification -> tuning winners -> winner-bound D_ref -> final reports -> complete final Q_ref -> declared engine gate.
+
+    Only the neural scorers are faked; class R and the preprocessing identity of the fake 'engine' baseline are stubbed
+    (the fake server is not a real baseline), everything else is the production path with source checks enabled.
+    """
+    from bench.eligibility import ConfigClass
+    from bench.effective_inputs import write_provenance
+    import bench.semantics as sem
+
+    eff = tmp_path / "eff"
+    eff.mkdir()
+    model = {"repo": "openbmb/MiniCPM-o-4_5", "revision": "503e754207c94da6bb26850b4469f367c9ea3582"}
+    for stack in ("canonical", "engine"):
+        shutil.copy(ROOT / "results" / "effective_inputs_v1" / "canonical.jsonl" if (ROOT / "results" / "effective_inputs_v1").exists()
+                    else ROOT / "results" / "effective_inputs" / "canonical.jsonl", eff / f"{stack}.jsonl")
+        write_provenance(eff / f"{stack}.jsonl", stack, model, preprocessing={"adapter": stack})
+    monkeypatch.setattr(campaign, "EFFECTIVE_DIR", eff)
+    monkeypatch.setattr(campaign, "CONCURRENCIES", (1, 32))
+    monkeypatch.setattr(sem, "preprocessing_identity", lambda adapter, config: {"adapter": adapter})
+    monkeypatch.setattr(sq, "class_r", lambda cand, elig, check_binding=True: ConfigClass(
+        engine="vllm-omni", config=cand["config"], track="T", audio_output="stream", chunk_tokens=25,
+        precision={"thinker": "bf16", "talker": "bf16", "flow": "tf32", "hift": "fp32"}, euler_steps=10, session_mode="turn", canonical_inputs=elig))
+    labels = ("a", "b")
+    qual_sweeps = [_sweep_spec(tmp_path, f"q{s}", seed=s, kind="quality", id_set="tuning", k=1, concurrencies=[8], labels=labels) for s in range(3)]
+    qdir = tmp_path / "qualification"
+    for g in campaign.group_cells(qual_sweeps).values():
+        d = qdir / campaign._slug(g["candidate"])
+        d.mkdir(parents=True)
+        score([g["cells"][s] for s in range(3)], d / "speech_quality.json")
+        (d / "qualification.json").write_text(json.dumps(sq.qualify(str(d / "speech_quality.json"), str(eff))))
+    rows = campaign.campaign_rows(qual_sweeps, qdir)
+    assert all(r["status"] == "qualified" for r in rows), [r.get("reason") for r in rows]
+    camp = qdir / "campaign_qualification.json"
+    camp.write_text(json.dumps({"scope": "development", "id_set": "tuning", "sweeps": qual_sweeps, "candidates": rows}))
+    tune = [_sweep_spec(tmp_path, "tune", seed=0, kind="performance", id_set="tuning", k=campaign.TUNE_K, concurrencies=[1, 32], labels=labels)]
     winners = tmp_path / "winners.json"
-    winners.write_text("{}")
-    _winners_stub(monkeypatch, spec["candidate"]["digest"], 1, spec["hardware"])
-    dref = tmp_path / "dref.json"
-    vrm.build_dref(full, dref, "truncation", winners)
-    ref = score(full, tmp_path / "fref.json", scope="final", d_ref=dref)
-    tq = score([cell(tmp_path, seed=s) for s in range(3)], tmp_path / "tq.json")
-    rec = sq.qualify(str(tq), str(tmp_path / "noeff"))
-    rec["qualified"] = True  # the engine adapter is never class R; force a qualified reference for the freeze logic
-    qual = tmp_path / "tq.qual.json"
-    qual.write_text(json.dumps(rec))
-    monkeypatch.setattr(sq, "verify_qualification", lambda p, check_sources=True: json.loads(Path(p).read_text()))
-    qref = tmp_path / "fq.json"
-    sq.freeze("final", "L20X", [(str(ref), str(qual))], qref)
-    eng_cells = [cell(tmp_path, label="e", seed=s, id_set="full") for s in range(3)]  # declared after the freeze
-    eng = score(eng_cells, tmp_path / "feng.json", scope="final", d_ref=dref)
-    head = json.loads((eng_cells[0] / "experiment.json").read_text())["experiment"]["candidate"]["digest"]
-    assert sq.gate(str(qref), str(eng), head)["overall"] in ("pass", "inconclusive")
+    winners.write_text(json.dumps(campaign.compute_winners(camp, tune)))
+    w = campaign.verify_winners(winners)
+    top1, top32 = w["cells"]["1"]["throughput"]["candidate_id"].split(":")[1].split("-")[-1], w["cells"]["32"]["throughput"]["candidate_id"].split(":")[1].split("-")[-1]
+    full32 = [_sweep_spec(tmp_path, f"f32s{s}", seed=s, kind="quality", id_set="full", k=1, concurrencies=[32], labels=labels) for s in range(3)]
+    full1 = [_sweep_spec(tmp_path, f"f1s{s}", seed=s, kind="quality", id_set="full", k=1, concurrencies=[1], labels=(top1,)) for s in range(3)]
+    inv, chosen, _ = campaign.select_cells(full32 + full1)
+    drefs = {}
+    for c, top in ((32, top32), (1, top1)):
+        dg = next(d for (d, s, cc) in inv if cc == c and inv[(d, s, cc)]["candidate_id"].split(":")[1].endswith(top))
+        drefs[c] = tmp_path / f"dref_c{c}.json"
+        vrm.build_dref([chosen[(dg, s, c)]["cell"] for s in range(3)], drefs[c], "truncation", winners)
+    refs = []
+    for (dg, s, c), a in sorted(chosen.items()):
+        if s:
+            continue
+        cells = [chosen[(dg, x, c)]["cell"] for x in range(3)]
+        rep = score(cells, tmp_path / f"final_{dg[:8]}_c{c}.json", scope="final", d_ref=drefs[c])
+        qual = next(r for r in rows if r["digest"] == dg)["qualification"]["path"]
+        refs.append((str(rep), qual))
+    qref = tmp_path / "qref_final.json"
+    with pytest.raises(sq.QRefError):  # an incomplete reference set is refused
+        sq.freeze("final", "L20X", refs[:-1], tmp_path / "incomplete.json", campaign=str(camp), winners=str(winners))
+    sq.freeze("final", "L20X", refs, qref, campaign=str(camp), winners=str(winners))
+    assert sq.verify_qref(str(qref))["values"]
+    eng = [_sweep_spec(tmp_path, f"e{s}", seed=s, kind="quality", id_set="full", k=1, concurrencies=[32], labels=("eng",),
+                       frozen_refs={"speech_qref": str(qref)}) for s in range(3)]
+    ecells = [next(iter(campaign.select_cells([e])[1].values()))["cell"] for e in eng]
+    erep = score(ecells, tmp_path / "engine_final.json", scope="final", d_ref=drefs[32])
+    head = json.loads((Path(ecells[0]) / "experiment.json").read_text())["experiment"]["candidate"]["digest"]
+    assert sq.gate(str(qref), str(erep), head)["overall"] in ("pass", "inconclusive")
+    q = json.loads(qref.read_text())
+    q["frozen_unix"] = -1  # editing the timestamp neither helps nor matters: the binding is the declared hash
+    (tmp_path / "qref_edit.json").write_text(json.dumps(q))
     with pytest.raises(sq.QRefError):
-        sq.gate(str(qref), str(eng), None)  # not the declared headline
+        sq.gate(str(tmp_path / "qref_edit.json"), str(erep), head)
+    undeclared = [_sweep_spec(tmp_path, f"u{s}", seed=s, kind="quality", id_set="full", k=1, concurrencies=[32], labels=("eng2",)) for s in range(3)]
+    ucells = [next(iter(campaign.select_cells([u])[1].values()))["cell"] for u in undeclared]
+    urep = score(ucells, tmp_path / "undeclared_final.json", scope="final", d_ref=drefs[32])
+    uhead = json.loads((Path(ucells[0]) / "experiment.json").read_text())["experiment"]["candidate"]["digest"]
     with pytest.raises(sq.QRefError):
-        sq.gate(str(qref), str(ref), spec["candidate"]["digest"])  # its cells were declared before the Q_ref was frozen
+        sq.gate(str(qref), str(urep), uhead)
+    # a tuning cell with a schedule other than its sweep's declaration is never selected
+    rec = json.loads((Path(tune[0]) / "sweep.json").read_text())
+    rec["spec"]["k"] = 10
+    from bench.experiment import digest as _digest
+
+    rec["spec_digest"] = _digest(rec["spec"])
+    (Path(tune[0]) / "sweep.json").write_text(json.dumps(rec))
+    campaign._WINNERS.clear()
+    assert not campaign.select_cells(tune)[1]
