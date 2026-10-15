@@ -130,13 +130,20 @@ def hf_rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     return w * (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)).to(x.dtype)
 
 
-def hf_rope(q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, theta: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rotate-half RoPE with cos/sin computed in fp32 and cast to the activation dtype (the reference rounding)."""
-    d = q.shape[-1]
-    inv = 1.0 / (theta ** (torch.arange(0, d, 2, device=q.device, dtype=torch.int64).float() / d))
+def hf_rope_tables(positions: torch.Tensor, head_dim: int, theta: float, dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    """cos/sin [n, 1, head_dim] computed in fp32 and cast to the activation dtype (the reference rounding); the same
+    for every layer of one forward, so callers compute them once."""
+    d = head_dim
+    inv = 1.0 / (theta ** (torch.arange(0, d, 2, device=positions.device, dtype=torch.int64).float() / d))
     freqs = positions.float()[:, None] * inv[None]
     emb = torch.cat([freqs, freqs], dim=-1)
-    cos, sin = emb.cos().to(q.dtype)[:, None], emb.sin().to(q.dtype)[:, None]
+    return emb.cos().to(dtype)[:, None], emb.sin().to(dtype)[:, None]
+
+
+def hf_rope(q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, theta: float, tables=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate-half RoPE with cos/sin computed in fp32 and cast to the activation dtype (the reference rounding)."""
+    d = q.shape[-1]
+    cos, sin = tables if tables is not None else hf_rope_tables(positions, d, theta, q.dtype)
 
     def rot(x):
         return torch.cat([-x[..., d // 2:], x[..., : d // 2]], dim=-1)
@@ -169,6 +176,7 @@ class DecoderRunner:
         nq, nk = s.num_heads * s.head_dim, s.num_kv_heads * s.head_dim
         hf = self.numerics == "hf"
         norm = (lambda t, w: hf_rms_norm(t, w, s.rms_eps)) if hf else (lambda t, w: fi.rmsnorm(t, w, s.rms_eps))
+        tables = hf_rope_tables(lay.positions, s.head_dim, s.rope_theta, x.dtype) if hf else None  # once for all layers
         for i, L in enumerate(self.layers):
             h = norm(x, L["ln1"])
             qkv = F.linear(h, L["qkv"])
@@ -180,7 +188,7 @@ class DecoderRunner:
                 k = norm(k.reshape(-1, s.head_dim), L["k_norm"]).view_as(k)
             q, k = q.contiguous(), k.contiguous()
             if hf:
-                q, k = hf_rope(q, k, lay.positions, s.rope_theta)
+                q, k = hf_rope(q, k, lay.positions, s.rope_theta, tables)
                 q, k = q.contiguous(), k.contiguous()
             else:
                 fi.apply_rope_pos_ids_inplace(q, k, lay.positions, rope_theta=s.rope_theta)

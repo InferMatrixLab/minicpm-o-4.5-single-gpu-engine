@@ -11,7 +11,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights, hf_rms_norm, hf_rope
+from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights, hf_rms_norm, hf_rope, hf_rope_tables
 
 PAD_SEQ_BASE = 1 << 41
 
@@ -54,13 +54,14 @@ class ThinkerDecoder:
         s = self.spec
         nq, nk = s.num_heads * s.head_dim, s.num_kv_heads * s.head_dim
         x = F.embedding(bk.tokens, self.emb)
+        tables = hf_rope_tables(bk.positions, s.head_dim, s.rope_theta, x.dtype)  # once per step, not per layer
         for i, L in enumerate(self.layers):
             h = hf_rms_norm(x, L["ln1"], s.rms_eps)
             qkv = F.linear(h, L["qkv"])
             q = hf_rms_norm(qkv[:, :nq].reshape(-1, s.head_dim), L["q_norm"], s.rms_eps).view(-1, s.num_heads, s.head_dim)
             k = hf_rms_norm(qkv[:, nq:nq + nk].reshape(-1, s.head_dim), L["k_norm"], s.rms_eps).view(-1, s.num_kv_heads, s.head_dim)
             v = qkv[:, nq + nk:].reshape(-1, s.num_kv_heads, s.head_dim).contiguous()
-            q, k = hf_rope(q, k, bk.positions, s.rope_theta)
+            q, k = hf_rope(q, k, bk.positions, s.rope_theta, tables)
             q, k = q.contiguous(), k.contiguous()
             fi.append_paged_kv_cache(k, v, bk.batch_idx, bk.positions, (self.kv.k[i], self.kv.v[i]), bk.indices, bk.indptr, bk.last)
             a = bk.wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
