@@ -1,0 +1,27 @@
+{
+ "description": "Engine development sweep (Track S, Token2Wav worker under MPS, first-chunk ramp) on GPU2; not campaign evidence",
+ "kind": "performance",
+ "id_set": "tuning",
+ "seed_index": 0,
+ "gpu": 2,
+ "port": 18902,
+ "k": 2,
+ "run_order_seed": 20261601,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1,
+  8
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_proc",
+   "label": "track-s-proc-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

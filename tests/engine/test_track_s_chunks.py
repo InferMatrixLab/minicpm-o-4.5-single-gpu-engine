@@ -63,3 +63,50 @@ def test_chunks_match_reference(n):
     assert [(ids, fin) for ids, _, fin in ours] == ref
     for ids, h, _ in ours:  # every passed token carries the hidden state of feeding exactly that token
         assert h.shape[0] == len(ids) and all(int(h[j].argmax()) == t for j, t in enumerate(ids))
+
+
+class ScriptedTalker:
+    """Codec logits that force a scripted frame sequence (EOS = cfg.eos); records the penalty window seen at each frame."""
+
+    def __init__(self, script, eos=6561):
+        import types
+
+        self.script, self.i = list(script), 0
+        self.cfg = types.SimpleNamespace(eos=eos)
+        self.vocab = eos + 1
+
+    def new_cache(self, b, n):
+        import types
+
+        return types.SimpleNamespace(k=torch.zeros(1))
+
+    def condition(self, ids, hidden):
+        return torch.zeros(ids.numel() + 2, 4)
+
+    def code_embed(self, codes):
+        return torch.zeros(1, 1, 4)
+
+    def forward(self, emb, cache, row):
+        tok = self.script[self.i] if self.i < len(self.script) else self.cfg.eos
+        self.i += 1
+        logits = torch.full((1, self.vocab), -1e9)
+        logits[0, tok] = 0.0
+        return logits
+
+
+def test_talker_stream_history_excludes_chunk_eos():
+    """After a chunk's EOS the penalty window holds the real frames only (HF never adds EOS to all_generated_tokens)."""
+    from engine.runtime.track_s import TalkerStream
+    from engine.talker_sampler import PAD
+
+    eos = 6561
+    ta = ScriptedTalker([5, 6, eos, 7, eos, 8, 9, eos], eos=eos)
+    ts = TalkerStream(ta, seed=1)
+    ts.feed([1, 2], torch.zeros(2, 4), False)
+    assert ts.state.history[0, -2:].tolist() == [5, 6] and eos not in ts.state.history[0].tolist()
+    ts.feed([3], torch.zeros(1, 4), False)
+    assert ts.state.history[0, -3:].tolist() == [5, 6, 7] and eos not in ts.state.history[0].tolist()
+    out = ts.feed([], torch.zeros(0, 4), True)
+    assert ts.generated == [5, 6, 7, 8, 9] and ts.done
+    assert ts.state.history[0].tolist() == [PAD] * 11 + [5, 6, 7, 8, 9]
+    assert [t for chunk, _ in out for t in chunk] == [5, 6, 7, 8, 9]

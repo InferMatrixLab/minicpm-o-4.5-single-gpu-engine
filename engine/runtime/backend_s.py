@@ -68,6 +68,7 @@ class LiveS:
     feed_last: bool = False  # the chunk ended at the per-chunk limit: the last frame still has to be fed
     ts: dict | None = None  # codes, seeds, steps, history, live (device tensors, one row)
     frames: int = 0
+    codes: list[int] = field(default_factory=list)  # every non-EOS codec frame of the utterance
     utterance_done: bool = False
     # token2wav
     prompt_future: Future | None = None
@@ -460,9 +461,14 @@ class TrackSBackend:
         if tok == eos:
             if fed_upto is not None:
                 self.akv.truncate(lv.seq, fed_upto)  # later K-block replays fed EOS/PAD; the reference never feeds them
+            # the reference never adds a chunk's EOS to its token history: the penalty window holds real frames only
+            from engine.runtime.track_s import history_from
+
+            lv.ts["history"] = history_from(lv.codes, self.cfg.window, self.device)
             self._end_chunk(lv)
             return
         lv.frames += 1
+        lv.codes.append(tok)
         lv.chunk_frames += 1
         for w in lv.chunker.push([tok]):
             self._queue_window(lv, w)

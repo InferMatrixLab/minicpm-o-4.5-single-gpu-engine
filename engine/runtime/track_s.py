@@ -10,7 +10,7 @@ and ``TTSStreamingGenerator.generate_with_buffer`` (``utils.py``) with ``attenti
   plus ``audio_bos`` on every chunk, prefilled after everything before it (one KV cache for the whole
   utterance, positions continue).  Frames are sampled until EOS (no minimum length on this path, at most 500 per
   chunk); the frame-0 rule applies to the first frame of the utterance only and the 16-frame penalty window spans
-  chunks.  Codec tokens accumulate in a 25-token buffer that carries across chunks; the remainder is emitted as
+  chunks and holds real frames only (the reference never adds a chunk's EOS to ``all_generated_tokens``).  Codec tokens accumulate in a 25-token buffer that carries across chunks; the remainder is emitted as
   the last chunk when the final text chunk's EOS arrives.
 """
 
@@ -23,6 +23,14 @@ import torch
 from engine.talker_sampler import DecodeState, TalkerSampling, step
 
 THINKER_CHUNK = 10
+
+
+def history_from(frames: list[int], window: int, device) -> torch.Tensor:
+    """The sampler's penalty window [1, window] holding the last ``window`` real frames (PAD before the first)."""
+    from engine.talker_sampler import PAD
+
+    tail = frames[-window:]
+    return torch.tensor([[PAD] * (window - len(tail)) + tail], dtype=torch.int64, device=device)
 TALKER_MAX_PER_CHUNK = 500
 AUDIO_CHUNK = 25
 
@@ -74,6 +82,7 @@ class TalkerStream:
         self.row = torch.tensor([0], device=self.cache.k.device)
         self.state = DecodeState.new([self.seed], self.cfg, device=self.cache.k.device)
         self.buffer: list[int] = []
+        self.generated: list[int] = []  # every non-EOS codec frame of the utterance
         self.done = False
 
     def feed(self, ids: list[int], hidden: torch.Tensor, text_finished: bool):
@@ -90,12 +99,15 @@ class TalkerStream:
             tok = int(step(self.state, logits, t.cfg.eos, self.cfg)[0])
             if tok == t.cfg.eos:
                 self.state.finished[:] = False  # EOS ends this text chunk only; the utterance continues with the next
+                # the reference never adds EOS to all_generated_tokens: the penalty window holds real frames only
+                self.state.history = history_from(self.generated, self.cfg.window, self.state.history.device)
                 if text_finished:
                     out.append((list(self.buffer), True))
                     self.buffer = []
                     self.done = True
                 return out
             self.buffer.append(tok)
+            self.generated.append(tok)
             if len(self.buffer) >= AUDIO_CHUNK:
                 out.append((self.buffer[:AUDIO_CHUNK], False))
                 self.buffer = self.buffer[AUDIO_CHUNK:]
