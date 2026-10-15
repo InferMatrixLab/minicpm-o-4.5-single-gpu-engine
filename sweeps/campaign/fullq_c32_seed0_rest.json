@@ -1,0 +1,53 @@
+{
+ "description": "L20X full-set speech quality at C=32, seed 0 (the candidates not measured on GPU1 before its release)",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 2,
+ "port": 18490,
+ "k": 1,
+ "run_order_seed": 20261535,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "vllm-omni",
+   "config": "minicpmo_4_5_turn.yaml",
+   "label": "mps-off",
+   "mps": "off"
+  },
+  {
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mps.yaml",
+   "label": "mps-on",
+   "mps": "on"
+  },
+  {
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mrv2_h200_mps.yaml",
+   "label": "mps-on",
+   "mps": "on"
+  },
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-on",
+   "mps": "on",
+   "env": {
+    "OMNI_SGLANG_MPS": "1"
+   }
+  },
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mm32k",
+   "mps": "off",
+   "env": {
+    "OMNI_SGLANG_MAX_SEQ": "32768"
+   }
+  }
+ ]
+}

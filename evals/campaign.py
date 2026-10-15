@@ -63,6 +63,11 @@ EVAL_K = 5
 TUNE_LANES = ({"gpu": 1, "port": 18510, "concurrencies": [1, 32]}, {"gpu": 2, "port": 18520, "concurrencies": [2, 16]},
               {"gpu": 3, "port": 18530, "concurrencies": [4, 8]})
 CONCURRENCIES = (1, 2, 4, 8, 16, 32)
+#: From 2026-10-15 15:45 only GPUs 2 and 3 may be used (GPU1 released at the user's request): later stages run there.
+EVAL_LANES = ({"gpu": 2, "port": 18525, "concurrencies": [1, 2, 16]}, {"gpu": 3, "port": 18535, "concurrencies": [4, 8, 32]})
+LATE_SEED_GPU = {0: 2, 1: 2, 2: 3}
+#: Seed-0 full-set C=32 cells measured on GPU1 before its release; the rest of seed 0 runs on GPU2.
+FULLQ_SEED0_DONE_ON_GPU1 = (("sglang-omni", "speech", "mps-off"), ("vllm-omni", "minicpmo_4_5_turn_mrv2", "mps-off"))
 #: metric -> (run-summary field, higher is better)
 METRICS = {"throughput": ("throughput_frames_s", True), "ttfa_p50": ("ttfa_p50_s", False), "ttfa_p95": ("ttfa_p95_s", False),
            "rtf_mean": ("rtf_mean", False)}
@@ -133,11 +138,15 @@ def all_specs() -> dict[str, dict]:
         out[f"tune_gpu{lane['gpu']}.json"] = tune_spec(lane)
     for s in SEEDS:
         out[f"fullq_c32_seed{s['seed_index']}.json"] = fullq_spec(s, 32, tuning_candidates())
+    rest = {**SEEDS[0], "gpu": LATE_SEED_GPU[0], "port": 18440}
+    spec = fullq_spec(rest, 32, [c for c in tuning_candidates() if candidate_key(c) not in FULLQ_SEED0_DONE_ON_GPU1])
+    spec["description"] += " (the candidates not measured on GPU1 before its release)"
+    out["fullq_c32_seed0_rest.json"] = spec
     return out
 
 
 def _lane_of(c: int) -> dict:
-    return next(lane for lane in TUNE_LANES if c in lane["concurrencies"])
+    return next(lane for lane in EVAL_LANES if c in lane["concurrencies"])
 
 
 def _digest(c: dict) -> str:
@@ -158,7 +167,8 @@ def stage_specs(winners: dict) -> dict[str, dict]:
                                   "timeout_s": 180, "save_audio": True, "concurrencies": [c], "configs": [by_digest[d] for d in digests]}
     top = by_digest[winners["cells"]["1"]["throughput"]["candidate_digest"]]
     for s in SEEDS:
-        out[f"fullq_c1_seed{s['seed_index']}.json"] = fullq_spec(s, 1, [top])
+        late = {**s, "gpu": LATE_SEED_GPU[s["seed_index"]], "port": s["port"] + 5}
+        out[f"fullq_c1_seed{s['seed_index']}.json"] = fullq_spec(late, 1, [top])
     return out
 
 

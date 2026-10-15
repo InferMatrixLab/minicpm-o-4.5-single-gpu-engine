@@ -1,0 +1,26 @@
+{
+ "description": "L20X evaluation of the C=4 winners",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "gpu": 3,
+ "port": 18540,
+ "k": 5,
+ "run_order_seed": 20261319,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  4
+ ],
+ "configs": [
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-on",
+   "mps": "on",
+   "env": {
+    "OMNI_SGLANG_MPS": "1"
+   }
+  }
+ ]
+}

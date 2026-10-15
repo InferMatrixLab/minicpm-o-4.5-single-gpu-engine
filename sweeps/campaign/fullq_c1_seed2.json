@@ -1,0 +1,26 @@
+{
+ "description": "L20X full-set speech quality at C=1, seed 2",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 2,
+ "gpu": 3,
+ "port": 18485,
+ "k": 1,
+ "run_order_seed": 20261227,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1
+ ],
+ "configs": [
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mm32k",
+   "mps": "off",
+   "env": {
+    "OMNI_SGLANG_MAX_SEQ": "32768"
+   }
+  }
+ ]
+}

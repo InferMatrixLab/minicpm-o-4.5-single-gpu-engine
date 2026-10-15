@@ -1,0 +1,32 @@
+{
+ "description": "L20X evaluation of the C=2 winners",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "gpu": 2,
+ "port": 18530,
+ "k": 5,
+ "run_order_seed": 20261317,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  2
+ ],
+ "configs": [
+  {
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mps.yaml",
+   "label": "mps-on",
+   "mps": "on"
+  },
+  {
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-on",
+   "mps": "on",
+   "env": {
+    "OMNI_SGLANG_MPS": "1"
+   }
+  }
+ ]
+}
