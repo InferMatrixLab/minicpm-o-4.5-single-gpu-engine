@@ -5,7 +5,8 @@
 Thinker (64 reference prompts, tokens from thinker_ref_bf16.pt, reference = bf16 eager): bf16 SDPA and fp32 eager
 runs of the same HF code -> per-token hidden cosine (min, p01, mean), top-1 agreement, greedy identity.
 Talker (talker_ref_bf16.pt, HF condition + HF sampled codes, reference = HF chat run, SDPA): eager attention and fp32
-runs of the same HF Talker -> teacher-forced top-1 agreement.
+runs of the same HF Talker -> teacher-forced top-1 agreement (``tts_config`` pins the Talker's attention to sdpa, so
+the variant's attention is set on the Talker explicitly).
 """
 
 import json
@@ -33,6 +34,7 @@ def main():
     for name, dtype, attn in (("bf16_eager", torch.bfloat16, "eager"), ("bf16_sdpa", torch.bfloat16, "sdpa"), ("fp32_eager", torch.float32, "eager")):
         m = AutoModel.from_pretrained(MODEL, trust_remote_code=True, torch_dtype=dtype, init_vision=False, init_audio=False,
                                       attn_implementation=attn).cuda().eval()
+        m.tts.model.config._attn_implementation = attn  # tts_config pins the Talker to sdpa; vary it with the Thinker
         cos, agree, total, identical, per_prompt = [], 0, 0, 0, []
         for r in tref:
             t = r["tokens"].cuda()

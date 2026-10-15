@@ -56,3 +56,33 @@ def test_condition_and_teacher_forced_logits():
     assert worst <= 1e-2, worst
     assert agree / total >= 0.99, agree / total
     assert shifted_worst > 1e-2
+
+
+@torch.inference_mode()
+def test_talker_within_hf_noise():
+    """Evidence for AC-3.2 (pending a user decision on the 99% floor): HF's own bf16 Talker run with eager instead of
+    sdpa attention agrees with the HF chat run on ~96.3% of teacher-forced top-1 codes, so 99% is below HF's rounding
+    noise.  The engine must be no further from the chat run than that eager variant is."""
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    from tools.hfref.talker_llama_probe import hf_llama, replay_engine, replay_hf
+
+    from engine.models.talker import Talker
+
+    ref = [r for r in torch.load(REF) if r["codes"] is not None]
+    ta = Talker.load(MODEL, device="cuda")
+    ours = [replay_engine(ta, r["condition"], r["codes"]) for r in ref]
+    del ta
+    m, emb, head = hf_llama(torch.bfloat16, "eager")
+    eager = [replay_hf(m, emb, head, r["condition"].cuda(), r["codes"], torch.bfloat16) for r in ref]
+
+    def agree(a):
+        hit = tot = 0
+        for x, r in zip(a, ref):
+            n = min(x.shape[0], r["logits"].shape[0])
+            hit += int((x[:n].argmax(-1) == r["logits"][:n].argmax(-1)).sum())
+            tot += n
+        return hit / tot
+
+    assert agree(ours) >= agree(eager), (agree(ours), agree(eager))
