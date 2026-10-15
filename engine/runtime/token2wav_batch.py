@@ -36,9 +36,41 @@ def _trim(cache: torch.Tensor, keep: int, dim: int) -> torch.Tensor:
     return cache
 
 
+def _conv_chunk(conv, x: torch.Tensor, cache: torch.Tensor, tr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``CausalConv1d.forward_chunk`` whose new cache is the 2 frames ending at each row's real length ``tr``."""
+    full = torch.cat([cache, x], dim=2)  # [b, c, 2 + T]
+    k = conv.causal_padding[0]
+    idx = (tr[:, None] + torch.arange(k, device=x.device)[None, :])[:, None, :].expand(-1, full.shape[1], -1)
+    return torch.nn.Conv1d.forward(conv, full), torch.gather(full, 2, idx)
+
+
+def _conv_block_chunk(cb, x: torch.Tensor, cnn_cache: torch.Tensor, tr: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``CausalConvBlock.forward_chunk`` with real-end caches (``cb.block``: T, conv, T, LN, Mish, T, conv, T)."""
+    c1, c2 = cnn_cache.split((cb.in_channels, cb.out_channels), dim=1)
+    h = cb.block[0](x)
+    h, n1 = _conv_chunk(cb.block[1], h, c1, tr)
+    h = cb.block[2:6](h)
+    h, n2 = _conv_chunk(cb.block[6], h, c2, tr)
+    return cb.block[7](h), torch.cat((n1, n2), dim=1)
+
+
+def _block_chunk(block, x, c, cnn_cache, att_cache, mask, tr):
+    """``DiTBlock.forward_chunk`` with real-end conv caches (identical when ``tr`` is the frame count)."""
+    from stepaudio2.cosyvoice2.flow.decoder_dit import modulate
+
+    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv = block.adaLN_modulation(c).chunk(9, dim=-1)
+    x_att, new_att = block.attn.forward_chunk(modulate(block.norm1(x), shift_msa, scale_msa), att_cache, mask)
+    x = x + gate_msa * x_att
+    x_conv, new_cnn = _conv_block_chunk(block.conv, modulate(block.norm3(x), shift_conv, scale_conv), cnn_cache, tr)
+    x = x + gate_conv * x_conv
+    x = x + gate_mlp * block.mlp(modulate(block.norm2(x), shift_mlp, scale_mlp))
+    return x, new_cnn, new_att
+
+
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False):
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
+        self.profile: dict | None = None  # stage -> [calls, seconds, items] when set
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.graphs = None
         if use_graphs:
@@ -60,9 +92,24 @@ class BatchedToken2Wav:
         with strict_fp32():
             with torch.amp.autocast("cuda", dtype=self.dtype):
                 for (_, last), idx in groups.items():
-                    for i, m in zip(idx, self._flow([items[i][0] for i in idx], [items[i][1] for i in idx], last)):
+                    for i, m in zip(idx, self._prof("flow", len(idx), self._flow, [items[i][0] for i in idx], [items[i][1] for i in idx], last)):
                         mels[i] = m
-            return self._vocode(items, mels)
+            return self._prof("vocode", len(items), self._vocode, items, mels)
+
+    def _prof(self, name, n, fn, *a):
+        if self.profile is None:
+            return fn(*a)
+        import time
+
+        torch.cuda.current_stream().synchronize()
+        t = time.perf_counter()
+        r = fn(*a)
+        torch.cuda.current_stream().synchronize()
+        acc = self.profile.setdefault(name, [0, 0.0, 0])
+        acc[0] += 1
+        acc[1] += time.perf_counter() - t
+        acc[2] += n
+        return r
 
     # --- flow ---------------------------------------------------------------------------------------------------------
     def _flow(self, sts: list[StreamState], windows: list[list[int]], last: bool) -> list[torch.Tensor]:
@@ -70,8 +117,8 @@ class BatchedToken2Wav:
         n = len(sts)
         tok = torch.tensor(windows, dtype=torch.int32, device="cuda")
         spk = flow.spk_embed_affine_layer(F.normalize(torch.cat([st.prompt.spk for st in sts]), dim=1))
-        h = flow.encoder_proj(self._encoder(sts, flow.input_embedding(tok), last))
-        mel = self._solve(sts, h.transpose(1, 2).contiguous(), spk)
+        h = flow.encoder_proj(self._prof("encoder", n, self._encoder, sts, flow.input_embedding(tok), last))
+        mel = self._prof("solve", n, self._solve, sts, h.transpose(1, 2).contiguous(), spk, None, not last)
         out = []
         for i, st in enumerate(sts):
             keep = st.prompt.mels.shape[1]
@@ -134,8 +181,55 @@ class BatchedToken2Wav:
             st.flow_cache["conformer_cnn_cache"] = new_cnn[i:i + 1].clone()
         return xs
 
-    def _solve(self, sts: list[StreamState], mu: torch.Tensor, spks: torch.Tensor) -> torch.Tensor:
-        """``CausalConditionalCFM.forward_chunk`` (cosine schedule, CFG) over a batch with right-padded estimator caches."""
+    @torch.inference_mode()
+    def setup(self, feats: tuple):
+        """``Token2Wav.setup`` (reference ``Flow.setup_cache``) on this module's solver: the prompt tokens plus 3 silence
+        tokens through the flow encoder, then the Euler solve over the prompt frames with the prompt mel as condition and
+        empty caches (frames padded to a graph bucket; padding is masked and the conv caches come from the real end)."""
+        tokens, _, spk, mels, _ = feats
+        flow = self.flow
+        from engine.models.token2wav import SILENCE_TOKEN
+
+        pad = torch.full((1, 3), SILENCE_TOKEN, device=tokens.device, dtype=tokens.dtype)
+        with strict_fp32(), torch.amp.autocast("cuda", dtype=self.dtype):
+            spks = flow.spk_embed_affine_layer(F.normalize(spk, dim=1))
+            h, cnn, att = flow.encoder.forward_chunk(xs=flow.input_embedding(torch.cat([tokens, pad], dim=1)), last_chunk=False, cnn_cache=None,
+                                                    att_cache=None)
+            h = flow.encoder_proj(h)
+            assert h.shape[1] == mels.shape[1], (h.shape, mels.shape)
+            est = flow.decoder.estimator
+            steps, depth = self.t2w.n_timesteps, len(est.blocks)
+            blk = est.blocks[0]
+            dt = next(est.parameters()).dtype
+            st = StreamState(prompt=None, flow_cache={
+                "conformer_cnn_cache": cnn.clone(), "conformer_att_cache": att.clone(),
+                "estimator_cnn_cache": torch.zeros(steps, depth, 2, blk.conv.in_channels + blk.conv.out_channels, 2, device="cuda", dtype=dt),
+                "estimator_att_cache": torch.zeros(steps, depth, 2, blk.attn.num_heads, 0, 2 * blk.attn.head_dim, device="cuda", dtype=dt)},
+                hift_cache={})
+            self._solve([st], h.transpose(1, 2).contiguous(), spks, cond=mels.transpose(1, 2).contiguous(), keep_cache=True)
+        return self.t2w.prompt(feats, st.flow_cache)
+
+    def _t_pad(self, T: int, keep_cache: bool, empty_cache: bool) -> int:
+        """Frames the solve runs at: the graph bucket for T when padding is exact for what is kept, else T."""
+        if self.graphs is None:
+            return T
+        from engine.runtime.dit_graph import FINAL_T, SETUP_T
+
+        if T in self.graphs.graph_t:
+            return T
+        if not keep_cache:  # final windows: their caches are never read again
+            return next((b for b in FINAL_T if b >= T), T)
+        if empty_cache:  # prompt setup: conv caches are gathered at the real end, attention keys masked
+            return next((b for b in SETUP_T if b >= T), T)
+        return T
+
+    def _solve(self, sts: list[StreamState], mu: torch.Tensor, spks: torch.Tensor, cond: torch.Tensor | None = None,
+               keep_cache: bool = True) -> torch.Tensor:
+        """``CausalConditionalCFM.forward_chunk`` (cosine schedule, CFG) over a batch with right-padded estimator caches.
+
+        All rows have ``T = mu.shape[2]`` real frames; the solve may run at a padded frame count (see ``_t_pad``): padded
+        frames are masked as keys, never feed real frames (causal convs, per-frame norms), and are dropped.
+        """
         cfm = self.flow.decoder
         est = cfm.estimator
         n, T, dev = len(sts), mu.shape[2], mu.device
@@ -143,62 +237,84 @@ class BatchedToken2Wav:
         cnns = [st.flow_cache["estimator_cnn_cache"] for st in sts]  # [steps, depth, 2, c, 2]
         lens = [a.shape[4] for a in atts]
         L = max(lens)
+        Tp = self._t_pad(T, keep_cache, L == 0)
         steps, depth = self.t2w.n_timesteps, atts[0].shape[1]
         assert all(a.shape[0] == steps for a in atts) and all(c.shape[0] == steps for c in cnns)
         A = atts[0].new_zeros((steps, depth, 2 * n) + atts[0].shape[3:4] + (L, atts[0].shape[5]))
         C = cnns[0].new_empty((steps, depth, 2 * n) + cnns[0].shape[3:])
-        mask = torch.zeros(2 * n, T, T + L, dtype=torch.bool, device=dev)
+        mask = torch.zeros(2 * n, Tp, Tp + L, dtype=torch.bool, device=dev)
         for i in range(n):
             for half in range(2):
                 r = i + half * n
                 A[:, :, r, :, :lens[i]] = atts[i][:, :, half]
                 C[:, :, r] = cnns[i][:, :, half]
-                mask[r, :, :T + lens[i]] = True
-        x = torch.stack([cfm.rand_noise[0, :, o:o + T] for o in lens]).to(mu.dtype)
+                mask[r, :, :T] = True
+                mask[r, :, Tp:Tp + lens[i]] = True
+        tr = torch.full((2 * n,), T, dtype=torch.int64, device=dev)
+        padT = (lambda z: F.pad(z, (0, Tp - T))) if Tp > T else (lambda z: z)
+        x = padT(torch.stack([cfm.rand_noise[0, :, o:o + T] for o in lens]).to(mu.dtype))
         t_span = torch.linspace(0, 1, steps + 1, device=dev, dtype=mu.dtype)
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         t, dt = t_span[0].unsqueeze(0), t_span[1] - t_span[0]
-        mu_in = torch.cat([mu, torch.zeros_like(mu)])
+        mu_in = padT(torch.cat([mu, torch.zeros_like(mu)]))
         spks_in = torch.cat([spks, torch.zeros_like(spks)])
-        cond_in = torch.zeros_like(mu_in)
-        new_att = A.new_empty((steps, depth, 2 * n) + A.shape[3:4] + (T + L, A.shape[5]))
-        new_cnn = torch.empty_like(C)
-        call = self.graphs if self.graphs is not None else (lambda *a: self._estimator(est, *a))
+        cond_in = torch.zeros_like(mu_in) if cond is None else padT(torch.cat([cond, torch.zeros_like(cond)]))
+        new_att = A.new_empty((steps, depth, 2 * n) + A.shape[3:4] + (Tp + L, A.shape[5])) if keep_cache else None
+        new_cnn = torch.empty_like(C) if keep_cache else None
+        if self.graphs is not None:
+            call = self.graphs
+        else:
+            call = lambda x, mu, t, *a: self._estimator_temb(est, x, mu, est.t_embedder(t).unsqueeze(1), *a)  # noqa: E731
         for step in range(1, steps + 1):
-            dphi, nc, na = call(x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, C[step - 1], A[step - 1], mask)
-            new_att[step - 1].copy_(na)  # graph outputs are overwritten by the next replay
-            new_cnn[step - 1].copy_(nc)
+            dphi, nc, na = call(x.repeat(2, 1, 1), mu_in, t.repeat(2 * n), spks_in, cond_in, C[step - 1], A[step - 1], mask, tr)
+            if keep_cache:
+                new_att[step - 1].copy_(na)  # graph outputs are overwritten by the next replay
+                new_cnn[step - 1].copy_(nc)
             d, u = dphi.chunk(2, dim=0)
             x = x + dt * ((1.0 + cfm.inference_cfg_rate) * d - cfm.inference_cfg_rate * u)
             t = t + dt
             if step < steps:
                 dt = t_span[step + 1] - t
-        for i, st in enumerate(sts):
-            st.flow_cache["estimator_att_cache"] = torch.stack([new_att[:, :, i, :, :T + lens[i]], new_att[:, :, n + i, :, :T + lens[i]]], dim=2)
-            st.flow_cache["estimator_cnn_cache"] = torch.stack([new_cnn[:, :, i], new_cnn[:, :, n + i]], dim=2)
-        return x.float()
+        if keep_cache:
+            for i, st in enumerate(sts):
+                rows = []
+                for r in (i, n + i):  # this request's keys: its T new frames, then its own cache
+                    na = new_att[:, :, r]
+                    rows.append(torch.cat([na[:, :, :, :T], na[:, :, :, Tp:Tp + lens[i]]], dim=3) if Tp > T else na[:, :, :, :T + lens[i]])
+                st.flow_cache["estimator_att_cache"] = torch.stack(rows, dim=2)
+                st.flow_cache["estimator_cnn_cache"] = torch.stack([new_cnn[:, :, i], new_cnn[:, :, n + i]], dim=2)
+        return x[:, :, :T].float()
 
     @staticmethod
     def _estimator(est, x, mu, t, spks, cond, cnn_cache, att_cache, mask):
         """``DiT.forward_chunk`` (eager path) with a key mask for padded caches; returns (dphi, new cnn, new att)."""
-        return BatchedToken2Wav._estimator_temb(est, x, mu, est.t_embedder(t).unsqueeze(1), spks, cond, cnn_cache, att_cache, mask)
+        tr = torch.full((x.shape[0],), x.shape[2], dtype=torch.int64, device=x.device)
+        return BatchedToken2Wav._estimator_temb(est, x, mu, est.t_embedder(t).unsqueeze(1), spks, cond, cnn_cache, att_cache, mask, tr)
 
     @staticmethod
-    def _estimator_temb(est, x, mu, t, spks, cond, cnn_cache, att_cache, mask):
-        """The estimator after the timestep embedding (``t``: [rows, 1, hidden]); this part is graph-captured."""
+    def _estimator_temb(est, x, mu, t, spks, cond, cnn_cache, att_cache, mask, tr, out=None):
+        """The estimator after the timestep embedding (``t``: [rows, 1, hidden]); this part is graph-captured.
+
+        ``tr`` [rows]: real frames per row (the rest is padding); each causal conv's new cache is taken at the row's real
+        end.  ``out = (dphi, new_cnn [depth, ...], new_att [depth, ...])`` buffers receive the results block by block (cast to
+        their dtype, as the reference stores its caches); without ``out`` they are allocated in the cache dtype.
+        """
         from einops import pack, repeat
 
+        rows, T = x.shape[0], x.shape[2]
+        if out is None:
+            out = (torch.empty_like(x), torch.empty_like(cnn_cache),
+                   att_cache.new_empty(att_cache.shape[:3] + (T + att_cache.shape[3], att_cache.shape[4])))
         x = pack([x, mu], "b * t")[0]
         x = pack([x, repeat(spks, "b c -> b c t", t=x.shape[-1])], "b * t")[0]
         x = pack([x, cond], "b * t")[0]
         x = est.in_proj(x.transpose(1, 2))
-        cnns, atts = [], []
         for b, block in enumerate(est.blocks):
-            x, c, a = block.forward_chunk(x, t, cnn_cache[b], att_cache[b], mask)
-            cnns.append(c)
-            atts.append(a)
-        x = est.final_layer(x, t).transpose(1, 2)
-        return x, torch.stack(cnns), torch.stack(atts)
+            x, c, a = _block_chunk(block, x, t, cnn_cache[b], att_cache[b], mask, tr)
+            out[1][b].copy_(c)
+            out[2][b].copy_(a)
+        out[0].copy_(est.final_layer(x, t).transpose(1, 2))
+        return out
 
     # --- vocoder ------------------------------------------------------------------------------------------------------
     def _vocode(self, items, mels) -> list[np.ndarray]:

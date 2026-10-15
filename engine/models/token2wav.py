@@ -145,32 +145,53 @@ def hift_forward(hift, mel: torch.Tensor, cache_source: torch.Tensor, seeds: lis
 
 
 class Token2Wav:
-    def __init__(self, model_dir: str | Path, float16: bool = False, n_timesteps: int = 10, noise_seed: int = 0):
+    def __init__(self, model_dir: str | Path, float16: bool = False, n_timesteps: int = 10, noise_seed: int = 0, spk_threads: int = 1):
         from stepaudio2 import Token2wav
 
         torch.manual_seed(noise_seed)  # the flow's rand_noise buffer is drawn here
         self.ref = Token2wav(str(model_dir), float16=float16, n_timesteps=n_timesteps)
+        if spk_threads != 1:  # CAMPPlus on more CPU threads (the reference uses 1; the embedding moves by ~5e-6 relative)
+            import onnxruntime
+
+            opt = onnxruntime.SessionOptions()
+            opt.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+            opt.intra_op_num_threads = spk_threads
+            self.ref.spk_model = onnxruntime.InferenceSession(f"{model_dir}/campplus.onnx", sess_options=opt, providers=["CPUExecutionProvider"])
         self.flow, self.hift = self.ref.flow, self.ref.hift
         self.float16, self.n_timesteps = float16, n_timesteps
         self.window = torch.from_numpy(np.hamming(2 * SOURCE_CACHE)).cuda()
 
-    def prepare(self, ref_audio: str | Path | bytes) -> Prompt:
-        """Reference voice -> prompt features and starting stream caches (the HF 16 kHz PCM16 path)."""
+    def features(self, ref_audio: str | Path | bytes) -> tuple:
+        """Reference voice -> (S3 tokens, token lengths, CAMPPlus embedding, 24 kHz prompt mel, mel lengths): the HF 16 kHz
+        PCM16 path, no flow work (safe off the engine thread)."""
         import librosa
         import soundfile as sf
 
         src = io.BytesIO(ref_audio) if isinstance(ref_audio, (bytes, bytearray)) else str(ref_audio)
         wav16, _ = librosa.load(src, sr=16000, mono=True)
-        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f, torch.inference_mode():
             sf.write(f.name, wav16, 16000)  # PCM_16, as in init_token2wav_cache
-            tokens, tokens_len, spk, mels, mels_len = self.ref._prepare_prompt(f.name)
+            return self.ref._prepare_prompt(f.name)
+
+    def setup(self, feats: tuple) -> Prompt:
+        """Prompt features -> the starting stream caches (reference ``setup_cache`` over the prompt plus 3 silence tokens)."""
+        tokens, tokens_len, spk, mels, mels_len = feats
         pad = torch.full((1, 3), SILENCE_TOKEN, device=tokens.device, dtype=tokens.dtype)
         with torch.inference_mode(), strict_fp32(), torch.amp.autocast("cuda", dtype=torch.float16 if self.float16 else torch.float32):
             flow_cache = own_flow_cache(self.flow.setup_cache(torch.cat([tokens, pad], dim=1), mels, spk, n_timesteps=self.n_timesteps),
                                         self.n_timesteps)
+        return self.prompt(feats, flow_cache)
+
+    @staticmethod
+    def prompt(feats: tuple, flow_cache: dict) -> Prompt:
+        tokens, tokens_len, spk, mels, mels_len = feats
         hift_cache = dict(mel=torch.zeros(1, mels.shape[2], 0, device="cuda"), source=torch.zeros(1, 1, 0, device="cuda"),
                           speech=torch.zeros(1, 0, device="cuda"))
         return Prompt(tokens, tokens_len, spk, mels, mels_len, flow_cache, hift_cache)
+
+    def prepare(self, ref_audio: str | Path | bytes) -> Prompt:
+        """Reference voice -> prompt features and starting stream caches (the HF 16 kHz PCM16 path)."""
+        return self.setup(self.features(ref_audio))
 
     def new_stream(self, prompt: Prompt, noise_seed: int = 0) -> StreamState:
         return StreamState(prompt, clone_tree(prompt.flow_cache), clone_tree(prompt.hift_cache), noise_seed=noise_seed)

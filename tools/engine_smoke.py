@@ -78,9 +78,23 @@ async def main():
         async with sem:
             await one(backend, cr, res, 0)
 
+    getattr(backend, "tick_profile", {}).clear()
+    if hasattr(backend, "t2w_batch"):
+        backend.t2w_batch.profile = {}
     t = time.perf_counter()
     await asyncio.gather(*(gated(cr) for cr in reqs[a.warmup:]))
     wall = time.perf_counter() - t
+    g = getattr(getattr(backend, "t2w_batch", None), "graphs", None)
+    if g is not None:
+        reasons = sorted(g.counts["eager_reasons"].items(), key=lambda kv: -kv[1])[:6]
+        print("estimator graph/eager calls:", g.counts["graph"], g.counts["eager"], reasons, flush=True)
+    bp = getattr(getattr(backend, "t2w_batch", None), "profile", None)
+    if bp:
+        print("t2w stages (calls, total s, ms/call, items/call):", {k: (v[0], round(v[1], 2), round(1000 * v[1] / v[0], 1), round(v[2] / v[0], 1))
+                                                              for k, v in bp.items()}, flush=True)
+    prof = getattr(backend, "tick_profile", {})
+    if prof:
+        print("tick profile (calls, total s, ms/call):", {k: (v[0], round(v[1], 2), round(1000 * v[1] / max(v[0], 1), 1)) for k, v in prof.items()}, flush=True)
     for r in res:
         print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items() if k not in ("wav", "text")}), r["text"][:60], flush=True)
     for rid, tl in getattr(backend, "timelines", {}).items():

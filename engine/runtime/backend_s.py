@@ -96,7 +96,8 @@ class LiveS:
 class TrackSBackend:
     def __init__(self, model_dir: Path = MODEL_DIR, device: str = "cuda", max_live: int = 64, thinker_pages: int = 8192, talker_pages: int = 8192,
                  page_size: int = 16, float16_flow: bool = False, talker_k: int = 4, use_graphs: bool = True, prepare_workers: int = 4,
-                 profile: bool = False):
+                 t2w_graphs: bool = False, t2w_compile: bool = False, spk_threads: int = 8, t2w_min_batch: int = 8, t2w_max_wait_ms: float = 40.0,
+                 switch_interval_s: float = 0.0002, profile: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -110,6 +111,10 @@ class TrackSBackend:
         from engine.talker_sampler import TalkerSampling
 
         torch.backends.cudnn.allow_tf32 = False  # AC-3.4: Token2Wav against FP32 (see engine.models.token2wav.strict_fp32)
+        import sys
+
+        # two launch-bound host threads (Thinker/Talker and Token2Wav) share the GIL; hand it over often
+        sys.setswitchinterval(switch_interval_s)
         self.tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
         self.thinker = Thinker.load(model_dir, device=device)
         self.talker = Talker.load(model_dir, device=device)
@@ -126,20 +131,29 @@ class TrackSBackend:
         self.adec = TalkerDecoder(self.talker, self.akv, self.aspec, self.cfg, use_graphs=use_graphs)
         self.tdec.capture_all()
         self.adec.capture_all()
-        self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow)
-        self.t2w_batch = BatchedToken2Wav(self.t2w)
+        self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
+        self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile)
+        if self.t2w_batch.graphs is not None:
+            self.t2w_batch.graphs.capture_all()
         self.frontend = MultimodalFrontend(model_dir, device=device)
         self.device, self.max_live, self.talker_k = device, max_live, talker_k
         self.profile = profile
         self.timelines: dict[str, list[tuple[str, float]]] = {}  # request id -> (event, perf_counter), when profiling
+        self.tick_profile: dict[str, list] = {}  # stage -> [calls, seconds], when profiling
         self.pool = ThreadPoolExecutor(prepare_workers, thread_name_prefix="t2w-prepare")
         self.inbox: queue.Queue = queue.Queue()
         self.live: dict[int, LiveS] = {}
         self._next = 0
         self._lock = threading.Lock()
-        self._prepare_lock = threading.Lock()
-        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.t2w_min_batch, self.t2w_max_wait = t2w_min_batch, t2w_max_wait_ms / 1000
+        self.t2w_inbox: queue.Queue = queue.Queue()
+        self.t2w_live: dict[int, LiveS] = {}  # owned by the Token2Wav thread
+        self.t2w_wake = threading.Event()
+        self.t2w_stream = torch.cuda.Stream(device=device)
+        self.thread = threading.Thread(target=self._run, daemon=True, name="engine")
         self.thread.start()
+        self.t2w_thread = threading.Thread(target=self._run_t2w, daemon=True, name="token2wav")
+        self.t2w_thread.start()
 
     @classmethod
     def from_config(cls, path: str | None) -> "TrackSBackend":
@@ -166,8 +180,11 @@ class TrackSBackend:
             raise BadRequest(f"talker repetition_window={ts['repetition_window']} differs from the engine's ({self.cfg.window})")
 
     def _prepare(self, ref: bytes):
-        with self._prepare_lock, torch.inference_mode():  # the reference prompt path uses the flow's shared scratch buffers
-            return self.t2w.prepare(ref)
+        """Worker thread: the reference voice's features (no flow work; the Token2Wav thread runs the flow setup)."""
+        feats = self.t2w.features(ref)
+        torch.cuda.current_stream().synchronize()  # the Token2Wav thread reads them on its own stream
+        self.t2w_wake.set()
+        return feats
 
     async def generate(self, req: EngineRequest):
         self._check_sampling(req)
@@ -235,6 +252,8 @@ class TrackSBackend:
             from engine.token2wav_chunker import StreamChunker
 
             lv.chunker = StreamChunker()
+            self.t2w_inbox.put(lv)
+            self.t2w_wake.set()
         self.live[lv.seq] = lv
 
     def _release(self, lv: LiveS) -> None:
@@ -247,14 +266,31 @@ class TrackSBackend:
         lv.emit(Done("stop", {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": lv.frames}))
         self._release(lv)
 
+    def _timed(self, name: str, fn, *a) -> None:
+        if not self.profile:
+            fn(*a)
+            return
+        import time
+
+        torch.cuda.current_stream().synchronize()
+        t = time.perf_counter()
+        fn(*a)
+        torch.cuda.current_stream().synchronize()
+        acc = self.tick_profile.setdefault(name, [0, 0.0])
+        acc[0] += 1
+        acc[1] += time.perf_counter() - t
+
     def _tick(self) -> None:
         for lv in [x for x in self.live.values() if x.cancelled and not x.finished]:
             self._release(lv)
-        self._thinker_step([x for x in self.live.values() if not x.thinker_done])
-        self._talker_step([x for x in self.live.values() if x.wants_audio and not x.utterance_done])
-        self._token2wav_step()
-        for lv in [x for x in list(self.live.values()) if x.utterance_done and not x.windows and not x.finished]:
-            self._finish(lv)
+        self._timed("thinker", self._thinker_step, [x for x in self.live.values() if not x.thinker_done])
+        self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
+        for lv in [x for x in list(self.live.values()) if x.utterance_done]:
+            # the Thinker and Talker are done: free their KV; the Token2Wav thread emits the rest and Done
+            self.tkv.release(lv.seq)
+            self.akv.release(lv.seq)
+            self.live.pop(lv.seq, None)
+            self.t2w_wake.set()
 
     # thinker -----------------------------------------------------------------------------------
     def _thinker_step(self, rows: list[LiveS]) -> None:
@@ -372,8 +408,10 @@ class TrackSBackend:
         lv.frames += 1
         lv.chunk_frames += 1
         for w in lv.chunker.push([tok]):
+            w.t_ready = _now()
             lv.windows.append(w)
             lv.mark(f"window_ready:{w.index}")
+            self.t2w_wake.set()
         lv.ts["codes"] = torch.tensor([tok], dtype=torch.int64, device=self.device)
         if lv.chunk_frames >= TALKER_MAX_PER_CHUNK:
             # the reference feeds this frame and moves on to the next chunk without an EOS
@@ -389,36 +427,90 @@ class TrackSBackend:
         ch = lv.chunks.pop(0)
         lv.talking = False
         if ch.final:
-            lv.utterance_done = True
             w = lv.chunker.finish()
             if w is not None:
+                w.t_ready = _now()
                 lv.windows.append(w)
+            lv.utterance_done = True  # after the final window is queued (the Token2Wav thread reads both)
 
-    # token2wav ---------------------------------------------------------------------------------
-    def _token2wav_step(self) -> None:
-        items, who = [], []
-        for lv in list(self.live.values()):
-            if not lv.windows:
+    # token2wav thread ---------------------------------------------------------------------------
+    def _run_t2w(self) -> None:
+        """All flow work (prompt setup, window decodes) on its own thread and CUDA stream, overlapping the Thinker/Talker.
+
+        Batching: first windows are decoded at once (TTFA); continuation windows wait until ``t2w_min_batch`` of them
+        (or every live stream's) are pending, or the oldest has waited ``t2w_max_wait_ms``.
+        """
+        torch.cuda.set_device(torch.device(self.device).index or 0)
+        while True:
+            try:
+                while True:
+                    lv = self.t2w_inbox.get_nowait()
+                    self.t2w_live[lv.seq] = lv
+            except queue.Empty:
+                pass
+            try:
+                with torch.cuda.stream(self.t2w_stream), torch.inference_mode():
+                    worked = self._t2w_tick()
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                for lv in list(self.t2w_live.values()):
+                    lv.emit(RuntimeError(f"token2wav error: {type(e).__name__}: {e}"))
+                    lv.cancelled = True
+                self.t2w_live.clear()
+                worked = False
+            if not worked:
+                self.t2w_wake.wait(0.002)
+                self.t2w_wake.clear()
+
+    def _t2w_tick(self) -> bool:
+        worked = False
+        for lv in list(self.t2w_live.values()):
+            if lv.cancelled:
+                self.t2w_live.pop(lv.seq, None)
                 continue
-            if lv.stream is None:
-                if not lv.prompt_future.done():
-                    continue
+            if lv.stream is None and lv.prompt_future is not None and lv.prompt_future.done():
                 try:
-                    lv.stream = self.t2w.new_stream(lv.prompt_future.result(), noise_seed=request_seed(lv.req))
+                    lv.stream = self.t2w.new_stream(self.t2w_batch.setup(lv.prompt_future.result()), noise_seed=request_seed(lv.req))
+                    lv.mark("prompt_setup")
                 except Exception as e:  # a bad reference voice fails its own request only
                     from engine.server import BadRequest
 
                     lv.emit(BadRequest(f"reference audio: {type(e).__name__}: {e}"))
-                    self._release(lv)
-                    continue
+                    lv.cancelled = True
+                    self.t2w_live.pop(lv.seq, None)
+                worked = True
+        ready = [lv for lv in self.t2w_live.values() if lv.stream is not None and lv.windows]
+        if ready:
+            now = _now()
+            first = any(lv.windows[0].index == 0 for lv in ready)
+            oldest = min(lv.windows[0].t_ready for lv in ready)
+            enough = len(ready) >= min(self.t2w_min_batch, len(self.t2w_live))
+            if first or enough or now - oldest >= self.t2w_max_wait or any(lv.windows[0].last for lv in ready):
+                self._timed("token2wav", self._decode_windows, ready)
+                worked = True
+        for lv in list(self.t2w_live.values()):
+            if lv.utterance_done and not lv.windows and lv.seq not in self.live:
+                lv.emit(Done("stop", {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": lv.frames}))
+                lv.finished = True
+                self.t2w_live.pop(lv.seq, None)
+        return worked
+
+    def _decode_windows(self, ready: list[LiveS]) -> None:
+        items = []
+        for lv in ready:
             w = lv.windows.pop(0)
             items.append((lv.stream, w.tokens, w.last))
-            who.append(lv)
-        if not items:
-            return
-        for lv, wav in zip(who, self.t2w_batch.decode(items)):
+        for lv, wav in zip(ready, self.t2w_batch.decode(items)):
             lv.mark(f"window_decoded:{len(items)}")
             wav = wav.astype(np.float32)
             if len(wav):
                 lv.emit(AudioChunk(wav, lv.sample_offset))
                 lv.sample_offset += len(wav)
+
+
+def _now() -> float:
+    import time
+
+    return time.perf_counter()
