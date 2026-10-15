@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 .venv-engine/
+.venv-hfref/
 *.egg-info/
 /results/
 /artifacts/
