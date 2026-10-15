@@ -217,7 +217,7 @@ def _code_files(stack: str) -> list[str]:
     if stack in _ADAPTER_MODULE:
         files.append(f"bench/adapters/{_ADAPTER_MODULE[stack]}.py")
     if stack == "engine":
-        files += ["engine/models/token2wav.py", "engine/runtime/backend.py"]
+        files += ["engine/models/token2wav.py", "engine/runtime/backend.py", "engine/runtime/backend_s.py", "engine/runtime/t2w_worker.py"]
     return files
 
 
