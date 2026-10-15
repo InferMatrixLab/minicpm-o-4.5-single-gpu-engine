@@ -27,7 +27,7 @@ if [ "$R" = vllm ]; then
     --save-result --save-detailed --result-dir $OUT --result-filename native_vllm_c$C.json) > $OUT/native_vllm_c$C.log 2>&1
 else
   (cd $OMNI_SGLANG_REPO && .venv/bin/python -m benchmarks.eval.benchmark_omni_seedtts --generate-only --port $PORT --model minicpmo --lang en \
-    --meta $DS/en/meta.lst --voice-clone --reference-audio-field audio.ref_audio --max-concurrency $C --max-samples $N \
+    --meta $DS/en/meta.lst --voice-clone --reference-audio-field audio.ref_audio --max-concurrency $C --max-samples $N --temperature 0.0 \
     --output-dir $OUT/native_sglang_c$C) > $OUT/native_sglang_c$C.log 2>&1
 fi
 echo "native rc=$?"
