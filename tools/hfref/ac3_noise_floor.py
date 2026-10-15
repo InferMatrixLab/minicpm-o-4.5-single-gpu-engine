@@ -33,16 +33,21 @@ def main():
     for name, dtype, attn in (("bf16_eager", torch.bfloat16, "eager"), ("bf16_sdpa", torch.bfloat16, "sdpa"), ("fp32_eager", torch.float32, "eager")):
         m = AutoModel.from_pretrained(MODEL, trust_remote_code=True, torch_dtype=dtype, init_vision=False, init_audio=False,
                                       attn_implementation=attn).cuda().eval()
-        cos, agree, total, identical = [], 0, 0, 0
+        cos, agree, total, identical, per_prompt = [], 0, 0, 0, []
         for r in tref:
             t = r["tokens"].cuda()
             o = m.llm(input_ids=t[None], output_hidden_states=True)
-            cos.append(F.cosine_similarity(o.hidden_states[-1][0].float(), r["hidden"].cuda().float(), dim=-1).cpu())
-            agree += int((o.logits[0].argmax(-1).cpu() == r["top1"]).sum())
+            c = F.cosine_similarity(o.hidden_states[-1][0].float(), r["hidden"].cuda().float(), dim=-1).cpu()
+            cos.append(c)
+            top1 = o.logits[0].float().argmax(-1).cpu()
+            agree += int((top1 == r["top1"]).sum())
             total += t.numel()
             p = r["prompt_len"]
             g = m.llm.generate(input_ids=t[None, :p], max_new_tokens=t.numel() - p, do_sample=False, eos_token_id=[151645, 151643], pad_token_id=0)
-            identical += int(torch.equal(g[0].cpu(), r["tokens"]))
+            same = bool(torch.equal(g[0].cpu(), r["tokens"]))
+            identical += int(same)
+            per_prompt.append({"cos": c, "top1": top1, "greedy_identical": same})
+        torch.save(per_prompt, f"results/engine_parity/hf_{name}_per_prompt.pt")
         tal_agree = tal_total = 0
         tts = m.tts
         for r in aref:
