@@ -48,7 +48,11 @@ def main():
             g = m.llm.generate(input_ids=t[None, :p], max_new_tokens=t.numel() - p, do_sample=False, eos_token_id=[151645, 151643], pad_token_id=0)
             same = bool(torch.equal(g[0].cpu(), r["tokens"]))
             identical += int(same)
-            per_prompt.append({"cos": c, "top1": top1, "greedy_identical": same})
+            gen, want = g[0, p:].cpu().tolist(), r["tokens"][p:].tolist()
+            at = None if same else next((k for k in range(min(len(gen), len(want))) if gen[k] != want[k]), min(len(gen), len(want)))
+            # HF's own divergence: reply position and the reference top-1/top-2 margin there (the engine test compares)
+            per_prompt.append({"cos": c, "top1": top1, "greedy_identical": same, "diverge_at": at,
+                               "diverge_margin": None if at is None else float(r["margin"][p + at - 1])})
         torch.save(per_prompt, f"results/engine_parity/hf_{name}_per_prompt.pt")
         tal_agree = tal_total = 0
         tts = m.tts
