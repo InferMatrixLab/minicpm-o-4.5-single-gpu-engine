@@ -39,17 +39,28 @@ def main():
         return o
 
     m.tts.generate = gen
+    bounds = []
+    orig_speech = m._generate_speech_non_streaming
+
+    def speech(outputs, tts_bound, *a, **k):
+        seq = outputs["full_sequences"][0]
+        bounds.append(seq[tts_bound[0]:tts_bound[1]].cpu())  # the reply tokens the condition is built from
+        return orig_speech(outputs, tts_bound, *a, **k)
+
+    m._generate_speech_non_streaming = speech
     out = []
     for i, r in enumerate(reqs):
         logits_log.clear()
         codes_log.clear()
+        bounds.clear()
         torch.manual_seed(1000 + i)
         with tempfile.TemporaryDirectory() as td:
             emb_path = Path(td) / "emb.pt"
             text = m.chat(msgs=r.messages(), do_sample=False, max_new_tokens=256, use_tts_template=True, enable_thinking=False, generate_audio=True,
                           output_audio_path=str(Path(td) / "a.wav"), output_tts_inputs_embeds_path=str(emb_path))
             cond = torch.load(emb_path).float().cpu()[0]
-        out.append({"row_id": r.request_id, "text": text, "condition": cond, "codes": codes_log[0] if codes_log else None,
+        out.append({"row_id": r.request_id, "text": text, "condition": cond, "reply_ids": bounds[0] if bounds else None,
+                    "prompt": r.messages(), "codes": codes_log[0] if codes_log else None,
                     "logits": torch.cat(logits_log) if logits_log else None})
         print(i, r.request_id, cond.shape, None if not codes_log else codes_log[0].shape, flush=True)
     hook.remove()
