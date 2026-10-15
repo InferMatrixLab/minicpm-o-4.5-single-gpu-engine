@@ -61,3 +61,30 @@ def test_flush_once():
     assert c.finish().last
     with pytest.raises(RuntimeError):
         c.push([3])
+
+
+def test_first_chunk_ramp_windows():
+    """first_chunk=8: the first window is 3 silence + 5 tokens + 3 lookahead, later windows are the reference 25 + 3,
+    consecutive windows overlap by the 3 lookahead tokens, and every token is decoded exactly once."""
+    from engine.token2wav_chunker import CHUNK, PRE_LOOKAHEAD, SILENCE_PREFIX, SILENCE_TOKEN, StreamChunker
+
+    toks = list(range(1, 81))
+    ch = StreamChunker(first_chunk=8)
+    ws = []
+    for t in toks:
+        ws += ch.push([t])
+    ws.append(ch.finish())
+    assert ws[0].tokens == [SILENCE_TOKEN] * SILENCE_PREFIX + toks[:8]
+    assert all(len(w.tokens) == CHUNK + PRE_LOOKAHEAD for w in ws[1:-1])
+    for a, b in zip(ws, ws[1:]):
+        assert a.tokens[-PRE_LOOKAHEAD:] == b.tokens[:PRE_LOOKAHEAD]
+    decoded = [w.tokens[:-PRE_LOOKAHEAD] for w in ws[:-1]] + [ws[-1].tokens]
+    flat = [t for d in decoded for t in d]
+    assert flat == [SILENCE_TOKEN] * SILENCE_PREFIX + toks
+
+
+def test_first_chunk_ramp_ready_after_first_chunk_frames():
+    from engine.token2wav_chunker import StreamChunker
+
+    ch = StreamChunker(first_chunk=8)
+    assert [len(ch.push([i])) for i in range(1, 9)] == [0] * 7 + [1]

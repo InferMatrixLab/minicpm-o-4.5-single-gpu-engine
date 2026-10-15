@@ -155,7 +155,7 @@ def test_graph_estimator_matches_eager(float16, compiled):
     outs, mels = [], []
     for bt in (eager, graph):
         rec, flow = [], bt._flow
-        bt._flow = lambda sts, ws, last, flow=flow, rec=rec: (lambda m: rec.append([x.float().cpu() for x in m]) or m)(flow(sts, ws, last))
+        bt._flow = lambda sts, ws, last, *rest, flow=flow, rec=rec: (lambda m: rec.append([x.float().cpu() for x in m]) or m)(flow(sts, ws, last, *rest))
         mels.append(rec)
         sts = [ours.new_stream(p, noise_seed=j) for j, p in enumerate(prompts)]
         got = [[], []]
@@ -212,3 +212,84 @@ def test_hift_graphs_match_eager():
                 assert a.shape == b.shape and sa.shape == sb.shape
                 assert float((a - b).norm() / b.norm()) <= 1e-4, (F, n)
     assert hg.counts["graph"] == 4
+
+
+def test_ramped_first_window_graphs_match_eager():
+    """With the first-chunk ramp (first window 8 tokens + 3 lookahead) the graph path's mels equal the eager batched
+    path's (FP32), first window included."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", noise_seed=7)
+    prompts = [ours.prepare(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav")]
+    gen = np.random.default_rng(5)
+    plans = []
+    for n in (70, 45):
+        ch = StreamChunker(first_chunk=8)
+        ws = [(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())]
+        assert len(ws[0][0]) == 11
+        plans.append(ws)
+    mels = []
+    for bt in (BatchedToken2Wav(ours), BatchedToken2Wav(ours, use_graphs=True)):
+        rec, flow = [], bt._flow
+        bt._flow = lambda sts, ws, last, *rest, flow=flow, rec=rec: (lambda m: rec.append([x.float().cpu() for x in m]) or m)(flow(sts, ws, last, *rest))
+        sts = [ours.new_stream(p, noise_seed=j) for j, p in enumerate(prompts)]
+        for k in range(max(len(p) for p in plans)):
+            bt.decode([(sts[j], *plans[j][k]) for j in range(2) if k < len(plans[j])])
+        mels.append(rec)
+    for ga, ea in zip(mels[1], mels[0]):
+        for x, y in zip(ga, ea):
+            assert float((x - y).norm() / y.norm()) <= 1e-4
+
+
+def test_batched_setups_of_different_prompts_match_single():
+    """setup_many over prompts of different lengths (one padded solve) equals each prompt set up alone (FP32)."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", noise_seed=7)
+    for bt in (BatchedToken2Wav(ours), BatchedToken2Wav(ours, use_graphs=True)):
+        feats = [ours.features(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav")]
+        many = bt.setup_many(feats)
+        for f, m in zip(feats, many):
+            one = bt.setup(f)
+            for k, v in one.flow_cache.items():
+                assert m.flow_cache[k].shape == v.shape, k
+                assert float((m.flow_cache[k].float() - v.float()).norm() / v.float().norm().clamp_min(1e-12)) <= 1e-4, k
+
+
+@pytest.mark.parametrize("graphs", [False, True])
+def test_merged_final_windows_match_unmerged(graphs):
+    """Final windows riding in the steady 28-token call (zero-padded) give the same mel as their own final-window call."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", noise_seed=7)
+    prompts = [ours.prepare(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav")]
+    gen = np.random.default_rng(6)
+    plans = []
+    for n in (60, 85, 74):  # final windows of 13, 13 and 2 + 3 tokens, alongside steady windows of the others
+        ch = StreamChunker()
+        plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
+    mels = []
+    for merge in (False, True):
+        bt = BatchedToken2Wav(ours, use_graphs=graphs)
+        bt.merge_finals = merge
+        rec, flow = [], bt._flow
+        bt._flow = lambda sts, ws, last, *rest, flow=flow, rec=rec: (lambda m: rec.extend(zip([id(s) for s in sts], [x.float().cpu() for x in m])) or m)(
+            flow(sts, ws, last, *rest))
+        sts = [ours.new_stream(p, noise_seed=j) for j, p in enumerate(prompts)]
+        order = {id(st): j for j, st in enumerate(sts)}
+        got = {j: [] for j in range(3)}
+        for k in range(max(len(p) for p in plans)):
+            bt.decode([(sts[j], *plans[j][k]) for j in range(3) if k < len(plans[j])])
+        for sid, m in rec:
+            got[order[sid]].append(m)
+        mels.append(got)
+    for j in range(3):
+        assert len(mels[0][j]) == len(mels[1][j])
+        for x, y in zip(mels[1][j], mels[0][j]):
+            assert x.shape == y.shape
+            assert float((x - y).norm() / y.norm()) <= 1e-4, j

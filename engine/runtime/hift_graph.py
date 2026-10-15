@@ -13,12 +13,16 @@ import torch
 from engine.models.token2wav import SOURCE_CACHE, hift_forward_noise, hift_noise, hift_samples, strict_fp32
 
 ROWS = (1, 2, 4, 8, 16)
-FRAMES = {50: 0, 58: SOURCE_CACHE}  # mel frames -> cached source samples
+FRAMES = {16: 0, 50: 0, 58: SOURCE_CACHE}  # mel frames -> cached source samples (16: a ramped first window)
+# final windows: 8 cached mel frames + 2 x (3 .. 25) tokens, a few per call
+FINAL_FRAMES = {8 + 2 * n: SOURCE_CACHE for n in range(3, 25)}
+FINAL_ROWS = 4
 
 
 class HiFTGraphs:
-    def __init__(self, hift, rows=ROWS, frames=FRAMES):
-        self.hift, self.rows, self.frames = hift, tuple(rows), dict(frames)
+    def __init__(self, hift, rows=ROWS, frames=FRAMES, final_frames=FINAL_FRAMES):
+        self.hift, self.rows, self.frames = hift, tuple(rows), {**dict(final_frames), **dict(frames)}
+        self.final = set(final_frames) - set(frames)
         self.graphs: dict[tuple[int, int], tuple] = {}
         self.pool = torch.cuda.graph_pool_handle()
         self.dim = hift.m_source.l_sin_gen.dim
@@ -40,9 +44,12 @@ class HiFTGraphs:
         torch.cuda.synchronize()
         self.graphs[(rows, F)] = (g, st, out)
 
+    def _rows(self, F: int) -> tuple:
+        return tuple(r for r in self.rows if r <= FINAL_ROWS) if F in self.final else self.rows
+
     def capture_all(self) -> int:
         for F in self.frames:
-            for r in self.rows:
+            for r in self._rows(F):
                 if (r, F) not in self.graphs:
                     self._capture(r, F)
         return len(self.graphs)
@@ -60,9 +67,10 @@ class HiFTGraphs:
             with strict_fp32():
                 return hift_forward_noise(self.hift, mel, cache_source, rand_ini, noise)
         speech, source = [], []
-        for a in range(0, n, self.rows[-1]):
-            b = min(n, a + self.rows[-1])
-            k = next(r for r in self.rows if r >= b - a)
+        rows = self._rows(F)
+        for a in range(0, n, rows[-1]):
+            b = min(n, a + rows[-1])
+            k = next(r for r in rows if r >= b - a)
             if (k, F) not in self.graphs:
                 self._capture(k, F)
             g, st, out = self.graphs[(k, F)]

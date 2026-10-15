@@ -79,7 +79,7 @@ async def main():
             await one(backend, cr, res, 0)
 
     getattr(backend, "tick_profile", {}).clear()
-    if hasattr(backend, "t2w_batch"):
+    if getattr(backend, "t2w_batch", None) is not None:
         backend.t2w_batch.profile = {}
     t = time.perf_counter()
     await asyncio.gather(*(gated(cr) for cr in reqs[a.warmup:]))

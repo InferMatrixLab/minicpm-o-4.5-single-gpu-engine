@@ -17,11 +17,12 @@ ROW_BUCKETS = (2, 4, 8, 16, 32, 64)
 # Cache-length buckets: graphs captured in sequence do not reuse each other's pool memory (~1.7-4 GB each at 64 rows),
 # so few buckets; attention over padded keys costs little next to the block GEMMs.
 L_BUCKETS = (512, 1024)
-STEADY_T = (50,)  # mel frames of a 25-token window (exact: its caches are kept)
-FINAL_T = (56,)  # final windows (at most 27 tokens -> 54 frames), padded: their caches are never read
+STEADY_T = (16, 50)  # mel frames of a ramped first window (8 tokens) and of a 25-token window (exact: caches are kept)
+FINAL_T = (50, 56)  # final windows (at most 27 tokens -> 54 frames), padded: their caches are never read
 SETUP_T = (256, 512, 768, 1024)  # prompt setups (no cache), padded: conv caches gathered at the real end
 MAX_L = L_BUCKETS[-1]
-ROW_LIMIT = {**{t: ROW_BUCKETS[-1] for t in STEADY_T}, **{t: 16 for t in FINAL_T}, **{t: 4 for t in SETUP_T}}
+# rows (2 x requests) per call for each frame count; setup graphs are large (whole prompts), so fewer rows
+ROW_LIMIT = {**{t: 16 for t in FINAL_T}, **{t: ROW_BUCKETS[-1] for t in STEADY_T}, 16: 16, 256: 16, 512: 8, 768: 4, 1024: 4}
 
 
 def bucket(n: int, buckets) -> int:
@@ -186,7 +187,8 @@ class EncoderGraphs:
 
     ROWS = (1, 2, 4, 8, 16, 32)
     L1 = (128, 256, 384, 512)
-    TOKENS = 28
+    TOKENS = (11, 28)  # a ramped first window (8 + 3 lookahead) and a 25 + 3 window
+    ROW_LIMIT = {11: 8, 28: 32}
 
     def __init__(self, enc, core_fn, autocast_dtype):
         self.enc, self.core_fn, self.autocast_dtype = enc, core_fn, autocast_dtype
@@ -206,12 +208,20 @@ class EncoderGraphs:
         return bucket(n, self.L1)
 
     def supports(self, rows: int, tokens: int, off1: int, last: bool) -> bool:
-        return not last and tokens == self.TOKENS and rows <= self.ROWS[-1] and off1 <= self.L1[-1]
+        return not last and tokens in self.TOKENS and rows <= self.ROW_LIMIT[tokens] and off1 <= self.L1[-1]
 
-    def _dims(self, rows, L1):
-        T1 = self.TOKENS - self.look
+    def _keys(self):
+        for tok in self.TOKENS:
+            for rows in self.ROWS:
+                if rows > self.ROW_LIMIT[tok]:
+                    break
+                for L1 in self.L1:
+                    yield rows, L1, tok
+
+    def _dims(self, rows, L1, tok):
+        T1 = tok - self.look
         T2, L2 = T1 * self.s, L1 * self.s
-        return {"xs": ((rows, self.TOKENS, self.c), None), "cnn": ((rows, self.c, self.cnn_t), torch.float32),
+        return {"xs": ((rows, tok, self.c), None), "cnn": ((rows, self.c, self.cnn_t), torch.float32),
                 "A1": ((self.d1, rows, self.nh, L1, self.dk2), self.dtype), "m1": ((rows, T1, L1 + T1), torch.bool),
                 "A2": ((self.d2, rows, self.nh, L2, self.dk2), self.dtype), "m2": ((rows, T2, L2 + T2), torch.bool),
                 "o_xs": ((rows, T2, self.c), None), "o_new1": ((self.d1, rows, self.nh, L1 + T1, self.dk2), None),
@@ -228,25 +238,25 @@ class EncoderGraphs:
 
     def _alloc(self, dtypes: dict) -> None:
         sizes = {}
-        for rows in self.ROWS:
-            for L1 in self.L1:
-                for name, (shape, _) in self._dims(rows, L1).items():
-                    n = 1
-                    for d in shape:
-                        n *= d
-                    key = (name, dtypes[name])
-                    sizes[key] = max(sizes.get(key, 0), n)
+        for rows, L1, tok in self._keys():
+            for name, (shape, _) in self._dims(rows, L1, tok).items():
+                n = 1
+                for d in shape:
+                    n *= d
+                key = (name, dtypes[name])
+                sizes[key] = max(sizes.get(key, 0), n)
         for (name, dt), n in sizes.items():
             self._arena[(name, dt)] = torch.zeros(n, dtype=dt, device=self.device)
 
     @torch.inference_mode()
-    def _capture(self, rows: int, L1: int, dtypes: dict):
+    def _capture(self, rows: int, L1: int, tok: int, dtypes: dict):
         if not self._arena:
             self._alloc(dtypes)
-        st = {name: self._view(name, shape, dtypes[name]) for name, (shape, _) in self._dims(rows, L1).items()}
+        st = {name: self._view(name, shape, dtypes[name]) for name, (shape, _) in self._dims(rows, L1, tok).items()}
         st["m1"].fill_(True)
         st["m2"].fill_(True)
-        args = (st["xs"], st["cnn"], st["A1"], st["m1"], st["A2"], st["m2"], False)
+        st["valid"] = torch.full((rows,), tok, dtype=torch.int64, device=self.device)
+        args = (st["xs"], st["cnn"], st["A1"], st["m1"], st["A2"], st["m2"], False, st["valid"])
         out = (st["o_xs"], st["o_new1"], st["o_new2"], st["o_cnn"])
         with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
             self.core_fn(self.enc, *args, out=out)
@@ -255,42 +265,46 @@ class EncoderGraphs:
             with torch.cuda.graph(g, pool=self.pool, capture_error_mode="thread_local"):
                 self.core_fn(self.enc, *args, out=out)
         torch.cuda.synchronize()
-        self.graphs[(rows, L1)] = (g, st, out)
+        self.graphs[(rows, L1, tok)] = (g, st, out)
 
     @torch.inference_mode()
     def capture_all(self, xs_dtype, cnn_dtype, att_dtype) -> int:
         """Capture every key with dummy inputs of the dtypes real calls use."""
-        T1 = self.TOKENS - self.look
-        for rows in self.ROWS:
-            for L1 in self.L1:
-                if (rows, L1) in self.graphs:
-                    continue
-                z = lambda shape, dt: torch.zeros(shape, dtype=dt, device=self.device)  # noqa: E731
-                self(z((rows, self.TOKENS, self.c), xs_dtype), z((rows, self.c, self.cnn_t), cnn_dtype),
-                     z((self.d1, rows, self.nh, L1, self.dk2), att_dtype), torch.ones(rows, T1, L1 + T1, dtype=torch.bool, device=self.device),
-                     z((self.d2, rows, self.nh, L1 * self.s, self.dk2), att_dtype),
-                     torch.ones(rows, T1 * self.s, (L1 + T1) * self.s, dtype=torch.bool, device=self.device), False)
+        for rows, L1, tok in self._keys():
+            if (rows, L1, tok) in self.graphs:
+                continue
+            T1 = tok - self.look
+            z = lambda shape, dt: torch.zeros(shape, dtype=dt, device=self.device)  # noqa: E731
+            self(z((rows, tok, self.c), xs_dtype), z((rows, self.c, self.cnn_t), cnn_dtype),
+                 z((self.d1, rows, self.nh, L1, self.dk2), att_dtype), torch.ones(rows, T1, L1 + T1, dtype=torch.bool, device=self.device),
+                 z((self.d2, rows, self.nh, L1 * self.s, self.dk2), att_dtype),
+                 torch.ones(rows, T1 * self.s, (L1 + T1) * self.s, dtype=torch.bool, device=self.device), False)
         return len(self.graphs)
 
     @torch.inference_mode()
-    def __call__(self, xs, cnns, A1, mask1, A2, mask2, last):
-        n, L1 = xs.shape[0], A1.shape[3]
+    def __call__(self, xs, cnns, A1, mask1, A2, mask2, last, valid=None):
+        n, L1, tok = xs.shape[0], A1.shape[3], xs.shape[1]
         rows = bucket(n, self.ROWS)
-        if (rows, L1) not in self.graphs:
+        if (rows, L1, tok) not in self.graphs:
             # output dtypes follow the eager run (autocast): learn them once from an eager call
             with torch.amp.autocast("cuda", dtype=self.autocast_dtype):
-                ref = self.core_fn(self.enc, xs, cnns, A1, mask1, A2, mask2, last)
+                ref = self.core_fn(self.enc, xs, cnns, A1, mask1, A2, mask2, last, valid)
             dtypes = {"xs": xs.dtype, "cnn": cnns.dtype, "A1": A1.dtype, "m1": torch.bool, "A2": A2.dtype, "m2": torch.bool,
                       "o_xs": ref[0].dtype, "o_new1": ref[1].dtype, "o_new2": ref[2].dtype, "o_cnn": ref[3].dtype}
-            self._capture(rows, L1, dtypes)
+            self._capture(rows, L1, tok, dtypes)
             return ref
-        g, st, out = self.graphs[(rows, L1)]
+        g, st, out = self.graphs[(rows, L1, tok)]
         st["xs"][:n].copy_(xs)
         st["cnn"][:n].copy_(cnns)
         st["A1"][:, :n].copy_(A1)
         st["A2"][:, :n].copy_(A2)
         st["m1"][:n].copy_(mask1)
         st["m2"][:n].copy_(mask2)
+        if valid is not None:
+            st["valid"][:n].copy_(valid)
+        else:
+            st["valid"][:n] = tok
+        st["valid"][n:] = tok
         if rows > n:
             st["m1"][n:] = True
             st["m2"][n:] = True

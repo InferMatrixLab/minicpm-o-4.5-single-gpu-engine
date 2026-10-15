@@ -30,9 +30,18 @@ class Window:
 
 @dataclass
 class StreamChunker:
+    """``first_chunk`` < 25 is the first-chunk ramp (an approved approximation, off by default): the first window
+    decodes ``first_chunk`` tokens (the 3 silence tokens included) plus 3 lookahead, so it is ready after
+    ``first_chunk`` codec frames instead of 25; every later window is the reference 25 + 3."""
+
     buffer: list[int] = field(default_factory=lambda: [SILENCE_TOKEN] * SILENCE_PREFIX)
     emitted: int = 0
     closed: bool = False
+    first_chunk: int = CHUNK
+
+    def __post_init__(self):
+        if not SILENCE_PREFIX < self.first_chunk <= CHUNK:
+            raise ValueError(f"first_chunk must be in ({SILENCE_PREFIX}, {CHUNK}]")
 
     def push(self, tokens: list[int]) -> list[Window]:
         """Add codec tokens (never EOS); returns the full windows that became ready."""
@@ -41,10 +50,11 @@ class StreamChunker:
         out = []
         for t in tokens:
             self.buffer.append(int(t))
-            if len(self.buffer) >= CHUNK + PRE_LOOKAHEAD:
-                out.append(Window(self.buffer[: CHUNK + PRE_LOOKAHEAD], False, self.emitted))
+            size = self.first_chunk if self.emitted == 0 else CHUNK
+            if len(self.buffer) >= size + PRE_LOOKAHEAD:
+                out.append(Window(self.buffer[: size + PRE_LOOKAHEAD], False, self.emitted))
                 self.emitted += 1
-                self.buffer = self.buffer[CHUNK:]
+                self.buffer = self.buffer[size:]
         return out
 
     def finish(self) -> Window | None:
