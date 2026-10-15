@@ -10,7 +10,7 @@ export ENGINE_GPU_TESTS=1
 step() { echo "[$(date +%T)] $*"; }
 
 step "GPU tests"
-for f in test_kernels test_thinker_decode test_talker_decode test_token2wav_stream test_thinker_gpu_parity test_talker_gpu_parity; do
+for f in test_kernels test_thinker_decode test_talker_decode test_token2wav_stream test_thinker_gpu_parity test_talker_gpu_parity test_token2wav_chunker test_track_s_chunks; do
   CUDA_VISIBLE_DEVICES=$UUID timeout 2400 .venv-engine/bin/python -m pytest tests/engine/$f.py -q -p no:cacheprovider > $OUT/$f.log 2>&1
   step "$f rc=$? $(tail -1 $OUT/$f.log)"
 done
@@ -26,11 +26,13 @@ step "smoke under MPS"
 M=/tmp/cgz-mps-val$G; rm -rf $M; mkdir -p $M/pipe $M/log
 export CUDA_MPS_PIPE_DIRECTORY=$M/pipe CUDA_MPS_LOG_DIRECTORY=$M/log
 CUDA_VISIBLE_DEVICES=$UUID nvidia-cuda-mps-control -d
-for c in 1 8 32; do
-  n=$((c == 1 ? 8 : 4 * c))
-  CUDA_VISIBLE_DEVICES=$UUID timeout 2400 .venv-engine/bin/python tools/engine_smoke.py --config configs/engine/track_s_proc.json --n $n --c $c \
-    > $OUT/smoke_c$c.log 2>&1
-  step "smoke C=$c rc=$? $(grep '^{"n"' $OUT/smoke_c$c.log | cut -c1-200)"
+for cfg in track_s_proc track_s_proc_euler; do
+  for c in 1 8 32; do
+    n=$((c == 1 ? 8 : 4 * c))
+    CUDA_VISIBLE_DEVICES=$UUID timeout 2400 .venv-engine/bin/python tools/engine_smoke.py --config configs/engine/$cfg.json --n $n --c $c \
+      > $OUT/smoke_${cfg}_c$c.log 2>&1
+    step "smoke $cfg C=$c rc=$? $(grep '^{"n"' $OUT/smoke_${cfg}_c$c.log | cut -c1-200)"
+  done
 done
 echo quit | nvidia-cuda-mps-control; sleep 2; rm -rf $M
 unset CUDA_MPS_PIPE_DIRECTORY CUDA_MPS_LOG_DIRECTORY
