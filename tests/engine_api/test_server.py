@@ -1,7 +1,10 @@
 """Engine API contract with a scripted backend, driven by the harness's own engine adapter and client."""
 
 import asyncio
+import base64
+import io
 import json
+import wave
 import sys
 from pathlib import Path
 
@@ -84,6 +87,15 @@ def test_non_streaming_body():
     assert m.ok and tr.text == "Hello world." and abs(m.duration_s - 1.5) < 1e-6
 
 
+def _empty_wav_data_url() -> str:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+    return "data:audio/wav;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
 @pytest.mark.parametrize("body", [
     "not json",
     {},
@@ -96,6 +108,14 @@ def test_non_streaming_body():
     {"messages": [{"role": "user", "content": "x"}], "modalities": ["text"], "talker_sampling": {"top_k": 0}},
     {"messages": [{"role": "user", "content": "x"}], "ref_audio": "data:audio/wav;base64,@@@"},
     {"messages": [{"role": "user", "content": "x"}], "modalities": ["text"], "stream": "yes"},
+    # nested media payloads of the wrong type (the image case used to reach the media decoder and return 500)
+    {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": "invalid"}]}], "modalities": ["text"]},
+    {"messages": [{"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": 3}}]}], "modalities": ["text"]},
+    {"messages": [{"role": "user", "content": [{"type": "video_url"}]}], "modalities": ["text"]},
+    {"messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": "AAAA"}]}], "modalities": ["text"]},
+    # voice prompts that are valid base64 but not decodable audio, or hold no samples
+    {"messages": [{"role": "user", "content": "x"}], "ref_audio": "data:audio/wav;base64," + base64.b64encode(b"\x13" * 4000).decode()},
+    {"messages": [{"role": "user", "content": "x"}], "ref_audio": _empty_wav_data_url()},
 ])
 def test_malformed_requests_get_400(body):
     async def go(url):
@@ -162,3 +182,52 @@ def test_engine_failure_mid_stream_ends_with_an_error_event():
     err = json.loads(lines[-2][len("data: "):])
     assert err["error"]["type"] == "server_error" and "boom" in err["error"]["message"]
     assert not request_metrics(trace).ok
+
+
+def test_bad_inputs_are_400_in_both_modes_and_the_next_request_is_served():
+    """Malformed media and an undecodable voice are rejected before any response header in stream and non-stream modes;
+    the admission state is untouched (the next request is served)."""
+    import base64
+
+    adapter = get_adapter("engine")
+    bad_voice = "data:audio/wav;base64," + base64.b64encode(b"\x13" * 4000).decode()
+
+    async def go(url):
+        statuses = []
+        async with aiohttp.ClientSession() as s:
+            for stream in (True, False):
+                for body in ({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": "invalid"}]}], "modalities": ["text"]},
+                             {"messages": [{"role": "user", "content": "x"}], "ref_audio": bad_voice}):
+                    async with s.post(url + "/v1/chat/completions", json={**body, "stream": stream}) as r:
+                        statuses.append((r.status, (await r.json())["error"]["type"]))
+        async with make_session(connections=2) as sess:
+            trace = await send_request(sess, url, adapter, _req(), timeout_s=30)
+        return statuses, trace
+
+    statuses, trace = asyncio.run(_with_server(Scripted(), go))
+    assert statuses == [(400, "invalid_request_error")] * 4
+    assert request_metrics(trace).ok
+
+
+def test_worker_reference_audio_failure_stays_an_input_error():
+    """A reference-audio failure reported by the Token2Wav worker reaches the request as BadRequest (other worker
+    failures stay runtime errors)."""
+    import queue as _q
+
+    from engine.runtime.backend_s import TrackSBackend
+    from engine.server import BadRequest
+
+    class LV:
+        def __init__(self):
+            self.cancelled, self.out = False, _q.Queue()
+
+        def emit(self, ev):
+            self.out.put(ev)
+
+    b = TrackSBackend.__new__(TrackSBackend)
+    for kind, want in (("bad_request", BadRequest), (None, RuntimeError)):
+        lv = LV()
+        b.audio_live = {7: lv}
+        b._on_t2w(("error", 7, "reference audio: LibsndfileError: x") + ((kind,) if kind else ()))
+        ev = lv.out.get_nowait()
+        assert type(ev) is want, (kind, type(ev))

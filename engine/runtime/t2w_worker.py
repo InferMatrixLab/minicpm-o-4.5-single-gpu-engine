@@ -257,7 +257,7 @@ def worker_main(inq, outq, cfg: dict) -> None:
                 try:
                     f = tuple(x.cuda(non_blocking=True) if x.device.type == "cpu" else x for x in r.features.result())
                 except Exception as e:
-                    outq.put(("error", r.seq, f"reference audio: {type(e).__name__}: {e}"))
+                    outq.put(("error", r.seq, f"reference audio: {type(e).__name__}: {e}", "bad_request"))  # an input error, typed across IPC
                     drop(r.seq)
                     continue
                 groups.setdefault(next((b for b in SETUP_T if b >= f[3].shape[1]), -f[3].shape[1]), []).append((r, f))

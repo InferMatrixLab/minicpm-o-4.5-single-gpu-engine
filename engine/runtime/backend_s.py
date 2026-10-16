@@ -428,7 +428,9 @@ class TrackSBackend:
             lv.finished = True
         elif kind == "error":
             self.audio_live.pop(seq, None)
-            lv.emit(RuntimeError(m[2]))
+            from engine.server import BadRequest
+
+            lv.emit(BadRequest(m[2]) if len(m) > 3 and m[3] == "bad_request" else RuntimeError(m[2]))
 
     def _queue_window(self, lv: LiveS, w) -> None:
         lv.mark(f"window_ready:{w.index}")

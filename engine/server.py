@@ -110,6 +110,26 @@ def _decode_audio_ref(v) -> bytes:
         raise BadRequest(f"ref_audio is not readable: {e}") from None
 
 
+def _check_decodable_audio(data: bytes) -> None:
+    """The voice prompt must decode (as the Token2Wav feature path reads it, librosa at 16 kHz) and hold samples: checked
+    before any response header, so an unreadable voice is an HTTP 400 rather than a failure mid-stream."""
+    import io
+
+    import soundfile as sf
+
+    try:
+        n = sf.info(io.BytesIO(data)).frames
+    except Exception:
+        try:
+            import librosa
+
+            n = len(librosa.load(io.BytesIO(data), sr=16000, mono=True, duration=1.0)[0])
+        except Exception as e:
+            raise BadRequest(f"ref_audio is not decodable audio: {type(e).__name__}") from None
+    if not n:
+        raise BadRequest("ref_audio holds no samples")
+
+
 def _number(d: dict, k: str, kind, lo, hi, default):
     v = d.get(k, default)
     if v is None:
@@ -138,8 +158,13 @@ def parse_request(body) -> EngineRequest:
             for part in c:
                 if not isinstance(part, dict) or part.get("type") not in PART_TYPES:
                     raise BadRequest(f"unsupported content part {part if not isinstance(part, dict) else part.get('type')!r}")
-                if part["type"] == "text" and not isinstance(part.get("text"), str):
+                t = part["type"]
+                if t == "text" and not isinstance(part.get("text"), str):
                     raise BadRequest("text parts need a string 'text'")
+                if t in ("image_url", "audio_url", "video_url") and not (isinstance(part.get(t), dict) and isinstance(part[t].get("url"), str)):
+                    raise BadRequest(f"{t} parts need an object {{'url': string}} in '{t}'")
+                if t == "input_audio" and not (isinstance(part.get(t), dict) and isinstance(part[t].get("data"), str)):
+                    raise BadRequest("input_audio parts need an object {'data': base64 string} in 'input_audio'")
         elif not isinstance(c, str):
             raise BadRequest("message content must be a string or a list of parts")
     mods = body.get("modalities", ["text", "audio"])
@@ -149,6 +174,8 @@ def parse_request(body) -> EngineRequest:
     if ref is None and isinstance(body.get("audio"), dict):
         ref = body["audio"].get("ref_audio")
     ref_bytes = _decode_audio_ref(ref) if ref else None
+    if ref_bytes is not None:
+        _check_decodable_audio(ref_bytes)
     if "audio" in mods and ref_bytes is None:
         raise BadRequest("audio output needs a voice prompt (ref_audio)")
     ts = body.get("talker_sampling") or {}
@@ -257,7 +284,8 @@ class EngineServer:
         if failure is not None:
             self.failed = getattr(self, "failed", 0) + 1
             try:
-                await resp.write(f"data: {json.dumps({'error': {'message': str(failure)[:500], 'type': 'server_error', 'code': 500}})}\n\n".encode())
+                kind, code = ("invalid_request_error", 400) if isinstance(failure, BadRequest) else ("server_error", 500)
+                await resp.write(f"data: {json.dumps({'error': {'message': str(failure)[:500], 'type': kind, 'code': code}})}\n\n".encode())
                 await resp.write(b"data: [DONE]\n\n")
                 await resp.write_eof()
             except ConnectionResetError:
