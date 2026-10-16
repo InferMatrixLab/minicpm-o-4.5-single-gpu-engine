@@ -146,25 +146,10 @@ def _trim_heap() -> None:
 SETUP_FRAME_BUDGET = 16 * 512  # rows x frames per eager batched setup call (its new caches: ~2.7 GB in FP16)
 
 
-def _long_reference(ref: bytes, seconds: float = 30.0) -> bytes:
-    """``ref`` (a WAV) repeated to ``seconds``: the longest voice prompt the warm-up shows each feature process."""
-    import io
-    import wave
-
-    with wave.open(io.BytesIO(ref)) as w:
-        params, frames = w.getparams(), w.readframes(w.getnframes())
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as o:
-        o.setparams(params)
-        o.writeframes(frames * max(1, int(seconds * params.framerate / max(1, params.nframes)) + 1))
-    return buf.getvalue()
-
-
 def _feat_warm(ref: bytes):
-    """A warm-up job that holds its process for a while, so the pool starts every process (each runs one), with a long
-    voice too, so the ONNX Runtime arena (which keeps the largest input's size) and the allocator reach their steady size
-    before load (disabling the arena instead cost ~15 ms per voice)."""
-    _feat_job(_long_reference(ref))
+    """A warm-up job that holds its process for a while, so the pool starts every process (each runs one).  (A process's
+    native memory still grows by ~35 MB over its first ~200 real voices and then stays flat; warming with a 30 s voice or
+    150 synthetic voices of 1.5-20 s did not prevent it, so neither is done.)"""
     _feat_job(ref)
     time.sleep(2.0)
     return _feat_job(ref)
