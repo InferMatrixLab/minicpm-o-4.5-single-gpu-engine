@@ -129,7 +129,15 @@ async def run(a) -> dict:
     traces = await load()
     await smp
     ms = [request_metrics(t) for t in traces]
-    idle = samples[-1]
+    t_idle = time.time()  # the drained state: no request admitted or live (the sampler can stop mid-round)
+    while True:
+        idle = {"t": time.time(), **await metrics(a.url)}
+        if (idle.get("admitted", idle.get("live")) == 0 and idle.get("live") == 0 and not idle.get("audio_live")) or time.time() - t_idle > 120:
+            break
+        await asyncio.sleep(2)
+    await asyncio.sleep(3)  # the Token2Wav worker reports its counters once a second
+    idle = {"t": time.time(), **await metrics(a.url)}
+    samples.append(idle)
     steady = samples[min(6, len(samples) - 1)]
     report["sustain"] = {
         "minutes": a.sustain_min, "requests": len(ms), "invalid": sum(not m.ok for m in ms),
