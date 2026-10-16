@@ -41,8 +41,11 @@ class _Bucket:
 
 class ThinkerDecoder:
     def __init__(self, thinker, kv: PagedKV, spec: DecoderSpec, buckets=(1, 2, 4, 8, 16, 32, 64), max_len: int = 8192, use_graphs: bool = True,
-                 layers: list[dict] | None = None):
+                 layers: list[dict] | None = None, fused: bool = True):
+        """``fused``: the reference-rounding Triton kernels of ``engine.runtime.kernels`` (about 11 kernels per layer
+        instead of about 50; the same roundings, a norm's fp32 sum order aside) in place of the torch elementwise ops."""
         self.spec, self.kv = spec, kv
+        self.fused = fused and kv.k.dtype == torch.bfloat16
         self.layers = layers if layers is not None else fuse_weights(thinker.w, spec)
         self.final_norm = thinker.w["model.norm.weight"]
         self.emb, self.head = thinker.w["model.embed_tokens.weight"], thinker.w["lm_head.weight"]
@@ -51,6 +54,9 @@ class ThinkerDecoder:
         self.buckets = {b: _Bucket(self, b) for b in buckets}
 
     def _step(self, bk: _Bucket) -> None:
+        if self.fused:
+            self._step_fused(bk)
+            return
         import flashinfer as fi
 
         s = self.spec
@@ -75,6 +81,30 @@ class ThinkerDecoder:
         bk.hidden.copy_(hid)
         bk.next.copy_(F.linear(hid, self.head).argmax(-1))
         bk.last.add_(1)  # the next step's last-page fill when the host does not re-plan (same rows, no new page)
+
+    def _step_fused(self, bk: _Bucket) -> None:
+        """``_step`` with the residual add fused into the next norm, q/k norm + RoPE in one kernel, and SiLU-and-multiply."""
+        import flashinfer as fi
+
+        from engine.runtime.kernels import add_rms_norm_hf, qk_norm_rope_hf, rms_norm_hf, silu_mul_hf
+
+        s = self.spec
+        nq = s.num_heads * s.head_dim
+        x = F.embedding(bk.tokens, self.emb)
+        cos, sin = hf_rope_tables(bk.positions, s.head_dim, s.rope_theta, x.dtype)
+        h = rms_norm_hf(x, self.layers[0]["ln1"], s.rms_eps)
+        last = len(self.layers) - 1
+        for i, L in enumerate(self.layers):
+            q, k, v = qk_norm_rope_hf(linear(h, L["qkv"]), L["q_norm"], L["k_norm"], cos, sin, s.num_heads, s.num_kv_heads, s.head_dim,
+                                      s.rms_eps)
+            fi.append_paged_kv_cache(k, v, bk.batch_idx, bk.positions, (self.kv.k[i], self.kv.v[i]), bk.indices, bk.indptr, bk.last)
+            a = bk.wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
+            x, h = add_rms_norm_hf(x, linear(a.reshape(-1, nq), L["o"]), L["ln2"], s.rms_eps)
+            d = linear(silu_mul_hf(linear(h, L["gate_up"])), L["down"])
+            x, h = add_rms_norm_hf(x, d, self.final_norm if i == last else self.layers[i + 1]["ln1"], s.rms_eps)
+        bk.hidden.copy_(h)
+        bk.next.copy_(F.linear(h, self.head).argmax(-1))
+        bk.last.add_(1)
 
     def _plan(self, bk: _Bucket, seqs: list[int]) -> None:
         lay = self.kv.layout(seqs, [1] * len(seqs), device=self.device)

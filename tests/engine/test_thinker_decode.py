@@ -138,3 +138,37 @@ def test_prefill_graph_matches_eager_two_sequence_batch():
         kv.release(PAD_SEQ)
         assert torch.equal(a, b), n
         assert kv.lengths[1] == kv.lengths[2] == n
+
+
+@torch.inference_mode()
+def test_fused_kernels_match_torch_step():
+    """The fused reference-rounding kernels against the torch elementwise step: same greedy tokens over 24 steps and
+    hidden states within bf16 noise (rare one-ulp norm differences, from a norm's fp32 sum order, accumulate)."""
+    from engine.models.thinker import Thinker
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+    from engine.runtime.thinker_decode import ThinkerDecoder
+
+    th = Thinker.load(MODEL, device="cuda")
+    c = th.cfg
+    spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
+    runs = []
+    for fused in (False, True):
+        kv = PagedKV(spec, 2048)
+        pre = DecoderRunner(th.w, spec, kv)
+
+        gen = torch.Generator(device="cuda").manual_seed(1)
+        prompts = [torch.randint(0, 150000, (n,), device="cuda", generator=gen) for n in (17, 40)]
+        h = pre.forward(torch.cat([th.embed(p) for p in prompts]), kv.layout([0, 1], [p.numel() for p in prompts]))
+        toks = torch.nn.functional.linear(h[torch.tensor([16, 56], device="cuda")], th.w["lm_head.weight"]).argmax(-1).tolist()
+        dec = ThinkerDecoder(th, kv, spec, buckets=(2,), fused=fused)
+        out, hids = [], []
+        for _ in range(24):
+            toks, hid = dec.step([0, 1], toks)
+            out.append(toks)
+            hids.append(hid)
+        runs.append((out, torch.stack(hids).float()))
+
+    assert runs[0][0] == runs[1][0]
+    a, b = runs[0][1], runs[1][1]
+    cos = torch.nn.functional.cosine_similarity(a.flatten(1), b.flatten(1), dim=-1)
+    assert float(cos.min()) > 0.999, float(cos.min())  # one-ulp norm differences accumulate through the KV (0.9998 at 24 steps)

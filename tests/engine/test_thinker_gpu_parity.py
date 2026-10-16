@@ -5,6 +5,9 @@ on the 1%-low and the mean per-token hidden-state cosine and on top-1 agreement 
 prompt-level bootstrap: the engine must not be significantly worse at 95%), and on greedy identity (also >= 90%, with
 every divergence at an HF top-1/top-2 margin no larger than the largest one at which HF's own SDPA path diverges).  Min and mean cosine are reported.
 
+Teacher-forced hidden states come from the paged prefill runner; greedy generation from the served graph decoder
+(``ThinkerDecoder``: fused reference-rounding kernels).
+
 References: ``tools/hfref/thinker_reference.py`` (bf16 eager) -> results/engine_parity/thinker_ref_bf16.pt, and
 ``tools/hfref/ac3_noise_floor.py`` -> results/engine_parity/hf_bf16_sdpa_per_prompt.pt (both on the same GPU).
 """
@@ -42,12 +45,14 @@ def not_significantly_worse(eng: list, hf: list, stat, higher_is_better=True, re
 def test_thinker_within_hf_noise():
     from engine.models.thinker import Thinker
     from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+    from engine.runtime.thinker_decode import ThinkerDecoder
 
     th = Thinker.load(MODEL, device="cuda")
     c = th.cfg
     spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
     kv = PagedKV(spec, 4096)
     run = DecoderRunner(th.w, spec, kv)
+    dec = ThinkerDecoder(th, kv, spec, buckets=(1,))  # the served decode path: graphs, fused reference-rounding kernels
     ref, hf = torch.load(REF), torch.load(SDPA)
     assert len(ref) == len(hf) == 64
     eng, divergences = [], []
@@ -65,8 +70,7 @@ def test_thinker_within_hf_noise():
             gen.append(nxt)
             if nxt in (151645, 151643):
                 break
-            hh = run.forward(th.embed(torch.tensor([nxt], device="cuda")), kv.layout([seq], [1]))
-            nxt = int(torch.nn.functional.linear(hh[-1:], th.w["lm_head.weight"]).argmax())
+            nxt = dec.step([seq], [nxt])[0][0]
         kv.release(seq)
         same = gen == ref_gen
         if not same:
