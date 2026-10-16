@@ -26,6 +26,16 @@ from dataclasses import dataclass, field
 _FEAT = None  # per feature process: an object with what ``Token2wav._prepare_prompt`` reads
 
 
+def _rss_kib(pid: int) -> int | None:
+    try:
+        for line in open(f"/proc/{pid}/status"):
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1])
+    except OSError:
+        return None
+    return None
+
+
 def _feat_init(model_dir: str, spk_threads: int) -> None:
     """Feature-process initializer: the S3 tokenizer (GPU) and CAMPPlus (CPU ONNX) only, no flow."""
     import types
@@ -212,7 +222,11 @@ def worker_main(inq, outq, cfg: dict) -> None:
             outq.put(("stats", None, {"t2w_requests": len(reqs), "t2w_streams": sum(r.stream is not None for r in reqs.values()),
                                       "t2w_cache_slots_used": (fast.pool.in_use() - fast.scratch) if fast is not None else None,
                                       "t2w_cnn_rows_free": len(fast.cnn_free) if fast is not None else None,
-                                      "t2w_gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved())}))
+                                      "t2w_gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
+                                      "t2w_dit_graph_calls": fast.counts["graph"] if fast is not None else None,
+                                      "t2w_dit_eager_calls": fast.counts["eager"] if fast is not None else None,
+                                      "t2w_rss_kib": _rss_kib(os.getpid()),
+                                      "feature_rss_kib": sum(_rss_kib(p) or 0 for p in getattr(pool, "_processes", {}) or {}) or None}))
         while msgs:
             m = msgs.popleft()
             kind = m[0]

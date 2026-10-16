@@ -107,11 +107,28 @@ def resolved_deploy(adapter: str, config: str, extra: list[str], env: dict) -> d
     elif adapter == "sglang-omni":
         d = resolve_sglang_deploy(extra)
     else:
-        script = ROOT / "scripts" / "serve_engine.sh"
-        d = {"engine": adapter, "config": config, "serve_script_sha256": _sha(script.read_text()) if script.exists() else None}
+        d = resolve_engine_deploy(config)
     d["extra_args"] = list(extra)
     d["env_overlay"] = dict(env)
     return d
+
+
+def engine_config_path(config: str) -> Path:
+    """The engine JSON the serving launcher reads (``scripts/serve_engine.sh``: a path, or a name under configs/engine)."""
+    return Path(config) if config.startswith("/") or config.endswith(".json") else ROOT / "configs" / "engine" / f"{config}.json"
+
+
+def resolve_engine_deploy(config: str) -> dict:
+    """The engine's measured identity: launcher bytes, the config JSON bytes and its parsed settings, and the engine
+    implementation (every source file under engine/).  Defaults not named in the JSON live in that source, so the source
+    hash binds them too."""
+    script = ROOT / "scripts" / "serve_engine.sh"
+    path = engine_config_path(config)
+    raw = path.read_bytes() if path.is_file() else None
+    return {"engine": "engine", "config": config, "config_path": str(path), "serve_script_sha256": _sha(script.read_text()) if script.exists() else None,
+            "config_sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
+            "settings": json.loads(raw) if raw is not None else None,
+            "engine_tree_sha256": tree_sha256(ROOT, ("engine",))}
 
 
 def deploy_files_sha256(resolved: dict) -> tuple:
@@ -145,9 +162,11 @@ SERVE_SCRIPTS = {"vllm-omni": "serve_vllm_omni.sh", "sglang-omni": "serve_sglang
 
 
 def execution_fingerprints(adapter_name: str) -> dict:
-    """Everything outside the candidate that the measurement depends on."""
+    """Everything outside the candidate that the measurement depends on (for the engine also its implementation tree and
+    this repository's commit and dirty-content hash; baseline experiments keep their earlier fields)."""
     scripts = ROOT / "scripts"
-    return {
+    extra = {"engine": {"tree_sha256": tree_sha256(ROOT, ("engine",)), "repo": repo_fingerprint(ROOT)}} if adapter_name == "engine" else {}
+    return {**extra,
         "harness_tree_sha256": tree_sha256(ROOT, ("bench", "scripts")),
         "repos": {"vllm-omni": repo_fingerprint(VLLM_OMNI), "sglang-omni": repo_fingerprint(SGLANG_OMNI)},
         "envs": {"bench": env_fingerprint(sys.executable)["freeze_sha256"], adapter_name: env_fingerprint(ADAPTER_PYTHON[adapter_name])["freeze_sha256"]},
@@ -155,7 +174,17 @@ def execution_fingerprints(adapter_name: str) -> dict:
     }
 
 
-def build_experiment(cell: CellSpec, kind: str, cache_policy: str, strict: bool, save_audio: bool, record_raw: bool, sglang_stream: bool) -> dict:
+def build_experiment(cell: CellSpec, kind: str, cache_policy: str, strict: bool, save_audio: bool, record_raw: bool, sglang_stream: bool,
+                     frozen_refs: dict | None = None) -> dict:
+    """The experiment spec.  ``frozen_refs`` (references frozen before execution, e.g. the speech Q_ref, by content hash)
+    are part of it, so every run's base digest binds them and they cannot be attached afterwards."""
+    spec = _build_experiment(cell, kind, cache_policy, strict, save_audio, record_raw, sglang_stream)
+    if frozen_refs:
+        spec["frozen_refs"] = dict(frozen_refs)
+    return spec
+
+
+def _build_experiment(cell: CellSpec, kind: str, cache_policy: str, strict: bool, save_audio: bool, record_raw: bool, sglang_stream: bool) -> dict:
     rows = load_seed_tts_rows()
     sets = make_id_sets(rows)
     adapter = _adapter(cell.candidate.adapter, sglang_stream)
@@ -234,7 +263,9 @@ async def run_one_cell(
     if deploy_files_sha256(resolved) != cand.deploy_files_sha256:
         raise RuntimeError(f"deploy files changed since candidate {cand.candidate_id} was declared")
     if spec is None:
-        spec = build_experiment(cell, kind, cache_policy, strict, save_audio, True, sglang_stream)
+        spec = build_experiment(cell, kind, cache_policy, strict, save_audio, True, sglang_stream, frozen_refs)
+    elif frozen_refs and spec.get("frozen_refs") != frozen_refs:
+        raise RuntimeError("the frozen references differ from the experiment's")
     if spec["hardware"].get("gpu_uuid") != gpu_identity(cell.gpu_index).get("gpu_uuid"):
         raise RuntimeError("GPU differs from the frozen experiment")
     base_digest = spec_base_digest(spec)
@@ -255,8 +286,6 @@ async def run_one_cell(
     header = {"experiment": spec, "experiment_digest": spec_digest(spec), "experiment_base_digest": base_digest, "manifest": manifest}
     prev_decl = json.loads((out / "experiment.json").read_text()) if (out / "experiment.json").exists() else {}
     declare(out, {**header, "declared_unix": prev_decl.get("declared_unix", time.time()),
-                  # references frozen before this cell executes (Q_refs it will be gated against), bound by content hash
-                  "frozen_refs": prev_decl.get("frozen_refs", frozen_refs or {}),
                   "recoveries": prev_decl.get("recoveries", []) + list(recovery or [])})  # frozen before execution
     gpu_name = spec["hardware"].get("gpu_sku", "")
     meta = RunMeta(gpu=gpu_name, engine=cand.adapter, config=cand.config, candidate_id=cand.candidate_id, config_digest=cand.digest,
@@ -357,7 +386,7 @@ async def _extend(args) -> int:
                                 "label": c["label"], "mps": c["mps"]}, tuple(c["deploy_files_sha256"]))
     cell = make_cell(cand, spec["concurrency"], args.k, spec["id_set"], spec["seed_index"], spec["timeout_s"], spec["hardware"]["gpu_index"])
     if spec_base_digest(build_experiment(cell, spec["kind"], spec["cache_policy"], spec["strict"], spec["save_audio"], spec["record_raw"],
-                                         spec["adapter_options"]["sglang_stream"])) != spec_base_digest(spec):
+                                         spec["adapter_options"]["sglang_stream"], spec.get("frozen_refs"))) != spec_base_digest(spec):
         raise SystemExit("current execution fingerprints differ from the frozen experiment; start a new experiment instead")
     res2 = await run_one_cell(cell=cell, out=out, port=args.port, url=None, cache_policy=spec["cache_policy"], run_order_seed=0,
                               save_audio=spec["save_audio"], strict=spec["strict"], sglang_stream=spec["adapter_options"]["sglang_stream"],
@@ -428,7 +457,7 @@ async def _sweep(args) -> int:
     for i, cell in enumerate(order):
         safe = cell.candidate.candidate_id.replace(":", "_").replace("/", "_")
         cell_dir = out / f"{i:02d}_{safe}_c{cell.concurrency}"
-        current = build_experiment(cell, kind, "restart", True, bool(spec.get("save_audio", True)), True, False)
+        current = build_experiment(cell, kind, "restart", True, bool(spec.get("save_audio", True)), True, False, frozen)
         state = resume_state(cell_dir, current)
         if state == "retry":
             record["attempts"].append({"cell": cell.digest, "moved_to": str(_set_aside(cell_dir))})

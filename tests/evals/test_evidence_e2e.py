@@ -350,6 +350,25 @@ def test_full_chain_winners_dref_final_gate(tmp_path, monkeypatch):
     uhead = json.loads((Path(ucells[0]) / "experiment.json").read_text())["experiment"]["candidate"]["digest"]
     with pytest.raises(sq.QRefError):
         sq.gate(str(qref), str(urep), uhead)
+    # B12c: attaching the Q_ref to completed, undeclared cells afterwards (inside the experiment, with its digests
+    # recomputed, or beside it) fails verification and the gate: the runs carry the base digest of the declared spec
+    from bench.experiment import spec_base_digest, spec_digest
+    from bench.verify import verify_cell
+
+    sha = sq._sha(str(qref))
+    for c in ucells:
+        d = json.loads((Path(c) / "experiment.json").read_text())
+        d["experiment"]["frozen_refs"] = {"speech_qref": {"path": str(qref), "sha256": sha}}
+        d["experiment_digest"], d["experiment_base_digest"] = spec_digest(d["experiment"]), spec_base_digest(d["experiment"])
+        d["frozen_refs"] = d["experiment"]["frozen_refs"]
+        (Path(c) / "experiment.json").write_text(json.dumps(d))
+        assert not verify_cell(Path(c)).ok
+    with pytest.raises(sq.QRefError):
+        sq.gate(str(qref), str(urep), uhead)
+    # declared cells carry the binding inside the verified experiment
+    for c in ecells:
+        assert json.loads((Path(c) / "experiment.json").read_text())["experiment"]["frozen_refs"]["speech_qref"]["sha256"] == sha
+        assert verify_cell(Path(c)).ok
     # a tuning cell with a schedule other than its sweep's declaration is never selected
     rec = json.loads((Path(tune[0]) / "sweep.json").read_text())
     rec["spec"]["k"] = 10

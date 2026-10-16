@@ -26,10 +26,12 @@ import argparse
 import asyncio
 import base64
 import json
+import os
 import struct
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import AsyncIterator, Protocol
 
 import numpy as np
@@ -181,7 +183,9 @@ class EngineServer:
         self.app.router.add_get("/v1/models", self.models)
         self.app.router.add_post("/v1/chat/completions", self.chat)
         self.app.router.add_get("/metrics", self.metrics)
+        self.app.router.add_get("/info", self.info_route)
         self.cancelled = 0
+        self.info: dict = {}  # the served identity (config bytes, engine source), set by main()
 
     async def health(self, _):
         return web.Response(text="ok")
@@ -190,6 +194,9 @@ class EngineServer:
         """Engine counters for the robustness suite: live requests, KV pages, memory; {} for backends without counters."""
         stats = getattr(self.backend, "stats", None)
         return web.json_response({**(stats() if callable(stats) else {}), "cancelled_streams": self.cancelled, "failed_streams": getattr(self, "failed", 0)})
+
+    async def info_route(self, _):
+        return web.json_response(self.info)
 
     async def models(self, _):
         return web.json_response({"object": "list", "data": [{"id": self.model_name, "object": "model"}]})
@@ -294,13 +301,25 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     spec = a.backend
     if spec is None and a.config:
-        import json
-        from pathlib import Path
-
         spec = json.loads(Path(a.config).read_text()).get("backend")
     mod, _, cls = (spec or "engine.runtime.backend:EngineBackend").partition(":")
     backend = getattr(__import__(mod, fromlist=[cls]), cls).from_config(a.config)
-    web.run_app(EngineServer(backend).app, host=a.host, port=a.port, print=None)
+    srv = EngineServer(backend)
+    srv.info = served_identity(a.config)
+    web.run_app(srv.app, host=a.host, port=a.port, print=None)
+
+
+def served_identity(config: str | None) -> dict:
+    """What this process serves, in the harness's terms (``bench.cli.resolve_engine_deploy``): the config path and bytes
+    hash and the engine source tree hash, computed at startup from the files actually loaded."""
+    import hashlib
+
+    from bench.fingerprint import tree_sha256
+
+    root = Path(__file__).resolve().parents[1]
+    raw = Path(config).read_bytes() if config else None
+    return {"config_path": str(Path(config).resolve()) if config else None, "config_sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
+            "engine_tree_sha256": tree_sha256(root, ("engine",)), "pid": os.getpid()}
     return 0
 
 

@@ -278,7 +278,7 @@ class TrackSBackend:
     def stats(self) -> dict:
         import resource
 
-        return {"live": len(self.live), "queued": self.inbox.qsize(), "admitted": self.admitted, "thinker_kv_pages_used": self.tkv.used_pages,
+        return {"live": len(self.live), "queued": self.inbox.qsize(), "admitted": self.admitted, "first_chunk": self.first_chunk, "thinker_kv_pages_used": self.tkv.used_pages,
                 "talker_kv_pages_used": self.akv.used_pages, "thinker_kv_pages": self.tkv.num_pages, "talker_kv_pages": self.akv.num_pages,
                 "gpu_memory_allocated_bytes": int(torch.cuda.memory_allocated()), "gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
                 "rss_max_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "rss_kib": _rss_kib(), "audio_live": len(self.audio_live),

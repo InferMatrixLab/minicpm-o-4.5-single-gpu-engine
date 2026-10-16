@@ -293,9 +293,14 @@ def gate(qref_path: str, quality_path: str, headline_digest: str | None, check_s
         if check_sources:
             sha = _sha(qref_path)
             for s in vr.report["seeds"].values():
-                decl = json.loads((Path(s["cell"]) / "experiment.json").read_text())
-                if ((decl.get("frozen_refs") or {}).get("speech_qref") or {}).get("sha256") != sha:
-                    raise QRefError(f"{s['cell']} was not declared against this frozen Q_ref (frozen_refs.speech_qref)")
+                from bench.verify import verify_cell
+
+                v = verify_cell(Path(s["cell"]))  # the binding counts only inside the verified experiment its runs carry
+                if not v.ok:
+                    raise QRefError(f"{s['cell']} does not verify: {v.problems[:3]}")
+                spec = json.loads((Path(s["cell"]) / "experiment.json").read_text())["experiment"]
+                if ((spec.get("frozen_refs") or {}).get("speech_qref") or {}).get("sha256") != sha:
+                    raise QRefError(f"{s['cell']} was not declared against this frozen Q_ref (experiment.frozen_refs.speech_qref)")
     res = comparative_gates(vr.summary["per_seed"], vr.report["rows_sha256"], tuple(vr.summary["seed_indices"]), q)
     res["absolute_floors_passed"] = bool(vr.summary["absolute_floors_pooled"]["passed"])
     res["scope"] = scope
