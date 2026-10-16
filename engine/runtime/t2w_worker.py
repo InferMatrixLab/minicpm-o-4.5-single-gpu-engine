@@ -120,13 +120,27 @@ def _feat_job(ref: bytes):
     import soundfile as sf
     import torch
 
-    wav16, _ = librosa.load(io.BytesIO(ref), sr=16000, mono=True)
-    with tempfile.NamedTemporaryFile(suffix=".wav") as f, torch.inference_mode():
-        sf.write(f.name, wav16, 16000)  # PCM_16, as in init_token2wav_cache
-        front = prompt_front_end(_FEAT, f.name)
-        if getattr(_FEAT, "audio_tokenizer", None) is None:  # CPU only: resolve the embedding before it crosses processes
-            return front[:2] + (front[2].result(),) + front[3:]
-        return ("done",) + tuple(x.cpu() for x in finish_prompt(_FEAT.audio_tokenizer, front))  # the whole prompt, on the CPU
+    try:
+        wav16, _ = librosa.load(io.BytesIO(ref), sr=16000, mono=True)
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f, torch.inference_mode():
+            sf.write(f.name, wav16, 16000)  # PCM_16, as in init_token2wav_cache
+            front = prompt_front_end(_FEAT, f.name)
+            if getattr(_FEAT, "audio_tokenizer", None) is None:  # CPU only: resolve the embedding before it crosses processes
+                return front[:2] + (front[2].result(),) + front[3:]
+            return ("done",) + tuple(x.cpu() for x in finish_prompt(_FEAT.audio_tokenizer, front))  # the whole prompt, on the CPU
+    finally:
+        _trim_heap()
+
+
+def _trim_heap() -> None:
+    """Give freed heap back to the OS after a job: jobs of varied audio sizes otherwise leave glibc holding the peak
+    (feature-process RSS crept up ~3% over a 30-minute soak, slowing but not flat)."""
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
 
 
 SETUP_FRAME_BUDGET = 16 * 512  # rows x frames per eager batched setup call (its new caches: ~2.7 GB in FP16)
