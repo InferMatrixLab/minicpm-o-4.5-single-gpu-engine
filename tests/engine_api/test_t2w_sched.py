@@ -105,3 +105,36 @@ def test_capped_decode_rows_serve_the_earliest_deadlines_without_starvation():
     _, wait_long, late_long, _ = _simulate(Policy(max_decode_rows=4), arrive_every=3, ticks=1200)
     assert wait_long <= wait_short + 1e-9, (wait_short, wait_long)  # the longest wait does not grow with the run
     assert late <= 0.0 and late_long <= 0.0, (late, late_long)  # windows wait only while their audio is buffered
+
+
+def test_playback_clock_follows_the_harness_stall_model_through_underruns():
+    """B20: 1 s at t=0, then 1 s at t=3 (the buffer ran out at t=1: a 2 s stall) -> exhausted at t=4, not t=2.  Over a
+    random delivery sequence the clock's stalls add up to the harness's ``playback_stall_s``."""
+    import numpy as np
+
+    from bench.metrics import playback_stall_s
+
+    a = AudioState()
+    a.sent(SR, 0.0)
+    a.sent(SR, 3.0)
+    assert a.t_exhaust == 4.0 and a.deadline(0.0, Policy()) == 4.0 and a.slack(3.5) == 0.5
+    rng = np.random.default_rng(3)
+    for _ in range(50):
+        times = np.cumsum(rng.uniform(0.0, 1.6, 30))
+        durs = rng.uniform(0.04, 1.2, 30)
+        st, stalls = AudioState(), 0.0
+        for t, d in zip(times, durs):
+            if st.t_exhaust is not None and t > st.t_exhaust:
+                stalls += t - st.t_exhaust  # the buffer was empty from t_exhaust until this delivery
+            st.sent(int(round(d * SR)), float(t))
+        cum = np.cumsum([int(round(d * SR)) / SR for d in durs])
+        assert abs(stalls - playback_stall_s(list(times), list(cum))) < 1e-9
+
+
+def test_edf_prefers_the_stream_about_to_underrun_over_a_refilled_stalled_one():
+    stalled, tight = AudioState(), AudioState()
+    stalled.sent(SR, 0.0)
+    stalled.sent(4 * SR, 3.0)  # stalled 1 s .. 3 s, then refilled: runs out at t=7
+    tight.sent(int(1.2 * SR), 4.0)  # runs out at t=5.2
+    p = Policy(max_decode_rows=1)
+    assert choose_windows([(stalled.deadline(0, p), "stalled"), (tight.deadline(0, p), "tight")], p) == ["tight"]

@@ -27,7 +27,7 @@ from bench.client import make_session, send_request
 from bench.manifest import build_manifest, validate_manifest
 from bench.metrics import request_metrics
 from bench.experiment import Candidate, CellSpec, asdict_candidate, build_spec, digest, spec_base_digest, spec_digest, unique_candidates
-from bench.fingerprint import env_fingerprint, file_sha256, gpu_identity, repo_fingerprint, tree_sha256
+from bench.fingerprint import env_distributions_sha256, env_fingerprint, file_sha256, gpu_identity, repo_fingerprint, tree_sha256
 from bench.protocol import RunMeta, evaluate_run, ids_sha256, plan_sweep, run_cell, save_run
 from bench.verify import verify_cell
 from bench.servers import Server, ServerSpec, sglang_omni_spec, vllm_omni_spec
@@ -93,8 +93,10 @@ def server_spec(cand: Candidate, port: int, gpu: int) -> ServerSpec:
     elif cand.adapter == "sglang-omni":
         spec = sglang_omni_spec(port, gpu, extra)
     elif cand.adapter == "engine":
+        env = cand.env_dict()
         spec = ServerSpec(name="engine", cmd=["bash", str(ROOT / "scripts" / "serve_engine.sh"), cand.config, str(port), *extra], port=port, gpu=gpu,
-                          info_path="/info", expected_identity=served_identity_expected(cand.config))
+                          info_path="/info", expected_identity=served_identity_expected(cand.config, env))
+        spec.env["ENGINE_PYTHON"] = engine_python(env)  # the launcher runs exactly the interpreter declared and fingerprinted
     else:
         raise ValueError(cand.adapter)
     spec.env.update(cand.env_dict())
@@ -144,10 +146,20 @@ def resolve_engine_deploy(config: str) -> dict:
             "engine_tree_sha256": tree_sha256(ROOT, ("engine",))}
 
 
-def served_identity_expected(config: str) -> dict:
-    """What a correctly launched engine server reports at ``/info`` for this declared config."""
+def engine_python(env: dict | None = None) -> str:
+    """The engine interpreter, resolved as ``scripts/serve_engine.sh`` does: the candidate's ``ENGINE_PYTHON``, else this
+    tree's ``.venv-engine``, else the main checkout's (frozen worktrees share it).  The launch, the environment
+    fingerprint, the manifest and the served-identity check all use this one result."""
+    p = (env or {}).get("ENGINE_PYTHON") or str(ROOT / ".venv-engine" / "bin" / "python")
+    return p if os.access(p, os.X_OK) else ENGINE_PYTHON
+
+
+def served_identity_expected(config: str, env: dict | None = None) -> dict:
+    """What a correctly launched engine server reports at ``/info`` for this declared config and environment: config
+    bytes, engine source, backend, the interpreter and its installed distributions."""
     r = resolve_engine_deploy(config)
-    return {k: r[k] for k in ("config_sha256", "engine_tree_sha256", "backend")}
+    py = engine_python(env)
+    return {**{k: r[k] for k in ("config_sha256", "engine_tree_sha256", "backend")}, "python": py, "python_dists_sha256": env_distributions_sha256(py)}
 
 
 def deploy_files_sha256(resolved: dict) -> tuple:
@@ -189,7 +201,11 @@ SERVE_SCRIPTS = {"vllm-omni": "serve_vllm_omni.sh", "sglang-omni": "serve_sglang
 ENGINE_RUN_PATHS = ("engine", "configs/engine", "scripts")  # what an engine run executes from this repository
 
 
-def execution_fingerprints(adapter_name: str) -> dict:
+def adapter_python(adapter_name: str, env: dict | None = None) -> str:
+    return engine_python(env) if adapter_name == "engine" else ADAPTER_PYTHON[adapter_name]
+
+
+def execution_fingerprints(adapter_name: str, env: dict | None = None) -> dict:
     """Everything outside the candidate that the measurement depends on (for the engine also its implementation tree and
     this repository's commit and dirty-content hash; baseline experiments keep their earlier fields)."""
     scripts = ROOT / "scripts"
@@ -197,7 +213,7 @@ def execution_fingerprints(adapter_name: str) -> dict:
     return {**extra,
         "harness_tree_sha256": tree_sha256(ROOT, ("bench", "scripts")),
         "repos": {"vllm-omni": repo_fingerprint(VLLM_OMNI), "sglang-omni": repo_fingerprint(SGLANG_OMNI)},
-        "envs": {"bench": env_fingerprint(sys.executable)["freeze_sha256"], adapter_name: env_fingerprint(ADAPTER_PYTHON[adapter_name])["freeze_sha256"]},
+        "envs": {"bench": env_fingerprint(sys.executable)["freeze_sha256"], adapter_name: env_fingerprint(adapter_python(adapter_name, env))["freeze_sha256"]},
         "launch_scripts": {name: file_sha256(scripts / name) for name in ("env.sh", SERVE_SCRIPTS[adapter_name])},
     }
 
@@ -208,7 +224,7 @@ def build_experiment(cell: CellSpec, kind: str, cache_policy: str, strict: bool,
     are part of it, so every run's base digest binds them and they cannot be attached afterwards."""
     spec = _build_experiment(cell, kind, cache_policy, strict, save_audio, record_raw, sglang_stream)
     if cell.candidate.adapter == "engine":  # every run must find this identity at the served /info before load
-        spec["fingerprints"]["engine"]["served_identity"] = served_identity_expected(cell.candidate.config)
+        spec["fingerprints"]["engine"]["served_identity"] = served_identity_expected(cell.candidate.config, cell.candidate.env_dict())
     if frozen_refs:
         spec["frozen_refs"] = dict(frozen_refs)
     return spec
@@ -228,7 +244,7 @@ def _build_experiment(cell: CellSpec, kind: str, cache_policy: str, strict: bool
         dataset={"repo": SEED_TTS_REPO, "revision": SEED_TTS_REVISION, "locale": "en"},
         sampling=effective_sampling(cell.candidate.adapter, adapter, example) | {"seed_policy": "sha256(row_id) + seed_index"},
         adapter_options={"name": cell.candidate.adapter, "sglang_stream": bool(sglang_stream), "streaming": bool(adapter.streaming)},
-        fingerprints=execution_fingerprints(cell.candidate.adapter),
+        fingerprints=execution_fingerprints(cell.candidate.adapter, cell.candidate.env_dict()),
         hardware=gpu_identity(cell.gpu_index),
         cache_policy=cache_policy,
         strict=strict,
@@ -302,7 +318,7 @@ async def run_one_cell(
     prev = json.loads((out / "result.json").read_text()) if (out / "result.json").exists() else None
     manifest = build_manifest(
         repos=DEFAULT_REPOS,
-        env_pythons={**DEFAULT_PYTHONS, cand.adapter: ADAPTER_PYTHON[cand.adapter]},  # every environment the spec fingerprints
+        env_pythons={**DEFAULT_PYTHONS, cand.adapter: adapter_python(cand.adapter, cand.env_dict())},  # every environment the spec fingerprints
         out_dir=out,
         gpu_index=cell.gpu_index,
         deploy={"engine": cand.adapter, "config": cand.config, "resolved": resolved, "candidate": asdict_candidate(cand), "cell": cell.to_json(),

@@ -2,8 +2,11 @@
 
 Faults it must reject: an SSE error followed by [DONE], overlapping audio, a reply without audio, a cancellation the
 engine does not drain or that received no audio, frame counts that never reach a window boundary, omitted / null / stale
-counters, a leaked CNN row, an unreadable feature-process RSS, a served GPU other than the declared one, and a sustained
-load that does not keep every client busy across row-cycle boundaries.  A clean backend passes.
+counters, nonfinite / negative / future values, a changed feature-process inventory, a leaked CNN row, live CUDA
+allocations that do not return although reserved memory is unchanged, an unreadable feature-process RSS, a served GPU
+other than the declared one, a GPU reading missing in the middle of the load, a memory excursion that recovers by the
+end, and a sustained load that does not keep every client busy across row-cycle boundaries.  A clean backend passes,
+and so does a fixed warmed reservation.  A full run's saved artifacts replay to the same results; edits are caught.
 """
 
 import asyncio
@@ -27,20 +30,28 @@ SR = 24000
 class Backend:
     """mode: ok | error_after_audio | overlap | no_audio | stuck (never drains); frames: audio_frames per reply.
     stats_fault: None | omit (no CNN-row counter) | null (null stream counter) | stale (old worker counters) |
-    leak_cnn (one CNN row lost per request) | child_missing (one feature process's RSS unreadable)."""
+    leak_cnn (one CNN row lost per request) | child_missing (one feature process's RSS unreadable) |
+    alloc_leak (32 MiB of live CUDA tensors kept per request inside an unchanged reservation) |
+    warm_reserved (a large fixed reservation; allocations return) | spike (engine RSS +5% for a few readings)."""
 
-    def __init__(self, mode="ok", frames=None, stats_fault=None, delay=0.01):
+    def __init__(self, mode="ok", frames=None, stats_fault=None, delay=0.01, procs=2):
         self.mode, self.frames, self.n, self.live, self.fault, self.delay = mode, frames or [33], 0, 0, stats_fault, delay
+        self.reads, self.procs = 0, procs
 
     def stats(self):
         import time
 
+        self.reads += 1
+        spike = self.fault == "spike" and 6 <= self.reads <= 8
         m = {"admitted": 1 if self.mode == "stuck" else self.live, "live": self.live, "queued": 0, "max_live": 64, "thinker_kv_pages_used": 0,
              "talker_kv_pages_used": 0, "thinker_kv_pages": 8192, "talker_kv_pages": 8192, "first_chunk": 8, "audio_live": 0, "t2w_requests": 0,
              "t2w_streams": 0, "t2w_cache_slots_used": 0, "t2w_cnn_rows_free": 64 - (self.n if self.fault == "leak_cnn" else 0),
-             "t2w_dit_eager_calls": self.n, "rss_kib": 1000, "t2w_rss_kib": 2000, "feature_processes": 2,
-             "feature_rss_by_pid": {"11": 500, "12": None if self.fault == "child_missing" else 500}, "feature_rss_kib": None if self.fault == "child_missing" else 1000,
-             "t2w_stats_time": time.time() - (60 if self.fault == "stale" else 0)}
+             "t2w_dit_eager_calls": self.n, "rss_kib": 1050 if spike else 1000, "t2w_rss_kib": 2000, "feature_processes": self.procs,
+             "feature_rss_by_pid": {str(11 + i): None if self.fault == "child_missing" and i == 1 else 500 for i in range(self.procs)},
+             "feature_rss_kib": None if self.fault == "child_missing" else 500 * self.procs,
+             "gpu_memory_allocated_bytes": 10 << 30, "gpu_memory_reserved_bytes": (40 if self.fault == "warm_reserved" else 20) << 30,
+             "t2w_gpu_memory_allocated_bytes": (5 << 30) + (self.n * (32 << 20) if self.fault == "alloc_leak" else 0),
+             "t2w_gpu_memory_reserved_bytes": 30 << 30, "t2w_stats_time": time.time() - (60 if self.fault == "stale" else 0)}
         if self.fault == "omit":
             del m["t2w_cnn_rows_free"]
         if self.fault == "null":
@@ -116,7 +127,25 @@ def test_counter_schema_rejects_omitted_null_and_stale_counters():
     assert rb.idle_problems({**Backend().stats(), "cancelled_streams": 0}) == []
     m = {**Backend().stats(), "cancelled_streams": 0}
     del m["feature_rss_by_pid"]["12"]
-    assert any("1 of 2 processes" in p for p in rb.schema_problems(m))
+    assert any("1 of 2 processes" in p for p in rb.schema_problems(m, expect=rb.Expect(2)))
+
+
+def test_counter_schema_rejects_nonfinite_negative_future_and_inconsistent_values():
+    import time
+
+    ex = rb.Expect(feature_processes=2)
+    clean = {**Backend().stats(), "cancelled_streams": 0}
+    assert rb.schema_problems(clean, expect=ex) == []
+    cases = {"t2w_stats_time": [float("nan"), float("inf"), time.time() + 30], "feature_processes": [float("nan"), -1, 1.5],
+             "t2w_cnn_rows_free": [float("inf"), -3, 2.5], "rss_kib": [0, -5], "gpu_memory_allocated_bytes": [None, float("nan")]}
+    for k, vals in cases.items():
+        for v in vals:
+            assert rb.schema_problems({**clean, k: v}, expect=ex), (k, v)
+    assert any("config declares 4" in p for p in rb.schema_problems(clean, expect=rb.Expect(4)))  # count from the config
+    assert any("per-PID sum" in p for p in rb.schema_problems({**clean, "feature_rss_kib": 999}, expect=ex))
+    moved = {**clean, "feature_rss_by_pid": {"11": 500, "13": 500}}  # a replaced child
+    assert any("PIDs changed" in p for p in rb.schema_problems(moved, expect=rb.Expect(2, frozenset({"11", "12"}))))
+    assert any("gpu_memory_used_mib" in p for p in rb.schema_problems({**clean, "gpu_memory_used_mib": None}, expect=ex, sampled=True))
 
 
 def test_drain_compares_capacities_with_the_warmed_baseline():
@@ -128,7 +157,8 @@ def test_drain_compares_capacities_with_the_warmed_baseline():
     res = _run(leak, lambda u: rb.scenario_cancel(u, a, payloads, base))
     assert not res["idle_problems"] and any("t2w_cnn_rows_free" in p for p in res["baseline_problems"]) and not res["passed"], res
     clean = Backend()
-    assert _run(clean, lambda u: rb.scenario_cancel(u, a, payloads, clean.stats()))["passed"]
+    ok = _run(clean, lambda u: rb.scenario_cancel(u, a, payloads, clean.stats()))
+    assert ok["passed"], ok
 
 
 def test_gpu_check_requires_the_declared_served_device(monkeypatch):
@@ -170,15 +200,15 @@ def test_sustain_refills_continuously_across_row_cycles(monkeypatch):
     monkeypatch.setattr(rb, "gpu_memory_used_mib", lambda u: 100.0 if u else None)
     a = get_adapter("engine")
     be = Backend(delay=0.05)
-    res, samples, _ = _run(be, lambda u: rb.scenario_sustain(u, a, _reqs(3), 2, 0.05, "GPU-x", be.stats(), interval_s=0.2, steady_index=2))
+    res, samples, _ = _run(be, lambda u: rb.scenario_sustain(u, a, _reqs(3), 2, 0.05, "GPU-x", be.stats(), interval_s=0.2, ref_s=0.5, expect=rb.Expect(2)))
     assert res["passed"], res
     assert res["row_cycles"] > 2 and res["in_flight_min"] == res["in_flight_max"] == 2, res
     assert res["requests"] == res["requests_started"]
     leaky = Backend(delay=0.05, stats_fault="leak_cnn")
-    bad, _, _ = _run(leaky, lambda u: rb.scenario_sustain(u, a, _reqs(3), 2, 0.05, "GPU-x", leaky.stats(), interval_s=0.2, steady_index=2))
+    bad, _, _ = _run(leaky, lambda u: rb.scenario_sustain(u, a, _reqs(3), 2, 0.05, "GPU-x", leaky.stats(), interval_s=0.2, ref_s=0.5, expect=rb.Expect(2)))
     assert not bad["passed"] and bad["baseline_problems"], bad
     gone = Backend(delay=0.05)
-    nogpu, _, _ = _run(gone, lambda u: rb.scenario_sustain(u, a, _reqs(3), 2, 0.05, None, gone.stats(), interval_s=0.2, steady_index=2))
+    nogpu, _, _ = _run(gone, lambda u: rb.scenario_sustain(u, a, _reqs(3), 2, 0.05, None, gone.stats(), interval_s=0.2, ref_s=0.5, expect=rb.Expect(2)))
     assert not nogpu["passed"] and "gpu_memory_used_mib" in nogpu["missing_memory"], nogpu
 
 
@@ -211,3 +241,89 @@ def test_served_identity_matches_the_harness_resolution():
     assert served["config_sha256"] == want["config_sha256"] and served["engine_tree_sha256"] == want["engine_tree_sha256"]
     assert rb.identity_check({**served, "backend": "engine.runtime.backend_s:TrackSBackend"}, cfg)["matches"]
     assert not rb.identity_check(served, str(ROOT / "configs" / "engine" / "track_s_proc.json"))["matches"]
+
+
+def _sustain(be, monkeypatch, gpu=lambda u: 100.0 if u else None, uuid="GPU-x"):
+    monkeypatch.setattr(rb, "gpu_memory_used_mib", gpu)
+    a = get_adapter("engine")
+    return _run(be, lambda u: rb.scenario_sustain(u, a, _reqs(3), 2, 0.05, uuid, be.stats(), interval_s=0.2, ref_s=0.5, expect=rb.Expect(2)))[0]
+
+
+def test_allocator_growth_inside_unchanged_reserved_memory_fails(monkeypatch):
+    """Live CUDA tensors kept per request: reserved and device memory unchanged, every capacity counter back -- only the
+    allocated-bytes comparison with the warmed baseline sees it."""
+    res = _sustain(Backend(delay=0.05, stats_fault="alloc_leak"), monkeypatch)
+    assert not res["passed"] and any("t2w_gpu_memory_allocated_bytes" in p for p in res["baseline_problems"]), res
+    assert all(v["max_dev"] == 0.0 for k, v in res["memory_envelope"].items() if "reserved" in k), res["memory_envelope"]
+
+
+def test_a_fixed_warmed_reservation_passes(monkeypatch):
+    res = _sustain(Backend(delay=0.05, stats_fault="warm_reserved"), monkeypatch)
+    assert res["passed"], res
+
+
+def test_gpu_reading_missing_in_the_middle_fails(monkeypatch):
+    calls = {"n": 0}
+
+    def gpu(u):
+        calls["n"] += 1
+        return None if calls["n"] == 5 else 100.0
+
+    res = _sustain(Backend(delay=0.05), monkeypatch, gpu=gpu)
+    assert not res["passed"] and any("gpu_memory_used_mib" in p for p in res["sample_schema_problems"]), res
+
+
+def test_memory_excursion_that_recovers_by_the_end_fails(monkeypatch):
+    """Engine RSS +5% for a few readings after the reference, back at the end: the endpoint alone would pass."""
+    res = _sustain(Backend(delay=0.05, stats_fault="spike"), monkeypatch)
+    env = res["memory_envelope"]["rss_kib"]
+    assert not res["passed"] and env["max_dev"] >= 0.04, res
+
+
+def test_replay_rebuilds_a_full_run_and_rejects_edits(monkeypatch, tmp_path):
+    """tools/robustness_replay.py rebuilds every scenario's request-derived results from the saved artifacts of a full
+    run; an edited trace, a deleted wire record and a missing artifact are rejected."""
+    import gzip
+    import json
+    from types import SimpleNamespace
+
+    import tools.robustness_replay as rr
+
+    monkeypatch.setattr(rb, "gpu_query", lambda u: {"sku": "X", "uuid": u, "driver": "1", "index": 0, "memory_used_mib": 100.0} if u else None)
+    be = Backend(delay=0.02, procs=4, frames=[32, 33, 34, 40])
+    cfg = str(ROOT / "configs" / "engine" / "track_s_fast.json")
+
+    async def go():
+        from engine.server import served_identity
+
+        es = EngineServer(be)
+        es.info = {**served_identity(cfg, "engine.runtime.backend_s:TrackSBackend"), "device_uuid": "GPU-a"}
+        srv = TestServer(es.app)
+        await srv.start_server()
+        try:
+            return await rb.run(SimpleNamespace(url=f"http://127.0.0.1:{srv.port}", out=str(tmp_path), config=cfg, gpu_uuid="GPU-a", acceptance=False,
+                                                sustain_min=0.03, concurrency=2, overload=4, eos_n=6))
+        finally:
+            await srv.close()
+    rep = asyncio.run(go())
+    assert rep["identity"]["matches"] and rep["gpu"]["matches"] and rep["sustain"]["requests"] > 6, rep.get("sustain")
+    ok = rr.verify(tmp_path)
+    assert ok["ok"], ok["problems"][:5]
+    assert ok["rebuilt"]["sustain"]["requests"] == rep["sustain"]["requests"] and ok["rebuilt"]["eos_boundary"]["n"] == 6
+    # an edited stored metric: the replay of its wire bytes disagrees (and the artifact hash changed)
+    lines = (tmp_path / "requests.jsonl").read_text().splitlines()
+    i = next(k for k, line in enumerate(lines) if '"scenario": "sustain"' in line)
+    r = json.loads(lines[i])
+    r["metrics"]["stall_s"] += 1.0
+    lines[i] = json.dumps(r)
+    (tmp_path / "requests.jsonl").write_text("\n".join(lines) + "\n")
+    bad = rr.verify(tmp_path)
+    assert not bad["ok"] and any("hash" in p for p in bad["problems"]) and any("stall_s" in p for p in bad["problems"]), bad["problems"][:5]
+    # a deleted wire record
+    with gzip.open(tmp_path / "wire.jsonl.gz", "rt") as f:
+        wires = f.read().splitlines()
+    with gzip.open(tmp_path / "wire.jsonl.gz", "wt") as f:
+        f.write("\n".join(wires[1:]) + "\n")
+    assert any("no wire record" in p for p in rr.verify(tmp_path)["problems"])
+    (tmp_path / "requests.jsonl").unlink()
+    assert not rr.verify(tmp_path)["ok"]

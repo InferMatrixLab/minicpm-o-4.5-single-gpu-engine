@@ -290,7 +290,10 @@ class EngineServer:
         finally:
             if not finished:  # the client went away (write failed or the handler was cancelled): cancel in the engine
                 self.cancelled += 1
-                await asyncio.shield(asyncio.ensure_future(events.aclose()))
+            # close the backend's event stream on every path, also after Done: its finally blocks give back the request's
+            # admission slot and engine state, and must not wait for garbage collection (a write error raised below keeps
+            # this frame, and so the suspended generator, alive in a reference cycle)
+            await asyncio.shield(asyncio.ensure_future(events.aclose()))
         if failure is not None:
             self.failed = getattr(self, "failed", 0) + 1
             try:
@@ -322,6 +325,8 @@ class EngineServer:
             return _err(503, str(e) or "engine at its admission limit", "server_overloaded")
         except BadRequest as e:
             return _err(400, str(e), "invalid_request_error")
+        finally:  # also when the handler is cancelled (client gone): the backend's finally blocks run now, not at GC
+            await asyncio.shield(asyncio.ensure_future(events.aclose()))
         msg = {"role": "assistant", "content": "".join(text)}
         if "audio" in req.modalities:
             wav = np.concatenate(audio) if audio else np.zeros(0, dtype=np.float32)
@@ -368,8 +373,11 @@ def served_identity(config: str | None, backend_spec: str | None = None, backend
     except Exception:  # noqa: BLE001 - CPU-only test servers report no device
         pass
     t2wp = getattr(backend, "t2wp", None)
+    from bench.fingerprint import installed_distributions_sha256
+
     return {"config_path": str(Path(config).resolve()) if config else None, "config_sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
-            "backend": backend_spec, "engine_tree_sha256": tree_sha256(root, ("engine",)), "python": sys.executable, "pid": os.getpid(),
+            "backend": backend_spec, "engine_tree_sha256": tree_sha256(root, ("engine",)), "python": sys.executable,
+            "python_dists_sha256": installed_distributions_sha256(), "pid": os.getpid(),
             "t2w_worker_pid": getattr(getattr(t2wp, "proc", None), "pid", None), **device}
 
 

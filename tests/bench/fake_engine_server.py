@@ -36,10 +36,13 @@ async def chat(request: web.Request) -> web.StreamResponse:
 
 
 async def info(_):
-    """The served identity a real engine reports, for the test candidates' config name ("fake")."""
+    """The served identity a real engine reports, for the test candidates' config name ("fake"); FAKE_INFO_OVERRIDE (a
+    JSON object) replaces fields, to serve something other than the declaration."""
+    import os
+
     from bench.cli import served_identity_expected
 
-    return web.json_response(served_identity_expected("fake"))
+    return web.json_response({**served_identity_expected("fake"), **json.loads(os.environ.get("FAKE_INFO_OVERRIDE", "{}"))})
 
 
 if __name__ == "__main__":

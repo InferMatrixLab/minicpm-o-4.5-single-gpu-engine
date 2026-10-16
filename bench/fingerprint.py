@@ -49,6 +49,23 @@ def repo_fingerprint(path: str | Path, paths: tuple[str, ...] = ()) -> dict:
     return {"commit": commit or None, "dirty": bool(diff.strip()), "diff_sha256": hashlib.sha256(diff.encode()).hexdigest()}
 
 
+def installed_distributions_sha256() -> str:
+    """The installed distributions (name==version, sorted) of the running interpreter.  The engine server reports it at
+    /info, and ``env_distributions_sha256`` computes the same for a declared interpreter, by this same function."""
+    import importlib.metadata as md
+
+    dists = sorted({f"{(d.metadata['Name'] or '').lower()}=={d.version}" for d in md.distributions()})
+    return hashlib.sha256("\n".join(dists).encode()).hexdigest()
+
+
+@functools.lru_cache(maxsize=16)
+def env_distributions_sha256(python: str) -> str | None:
+    """``installed_distributions_sha256`` of the interpreter at ``python`` (run there); None if it cannot run."""
+    root = str(Path(__file__).resolve().parents[1])
+    out = _run([python, "-c", f"import sys; sys.path.insert(0, {root!r}); from bench.fingerprint import installed_distributions_sha256 as f; print(f())"])
+    return out.strip() or None
+
+
 @functools.lru_cache(maxsize=16)
 def env_fingerprint(python: str) -> dict:
     frozen = _run(["uv", "pip", "freeze", "--python", python])

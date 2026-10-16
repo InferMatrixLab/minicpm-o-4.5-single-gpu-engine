@@ -61,7 +61,10 @@ def _feat_init(model_dir: str, spk_threads: int, gpu_tokens: bool = True) -> Non
     opt.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
     opt.intra_op_num_threads = spk_threads
     # every voice has its own length: ONNX Runtime's per-shape memory patterns would grow the process with each new one
-    # (the per-shape FFT plans of the front end are bounded and filled before load: _warm_shape_caches)
+    # (the per-shape FFT plans of the front end are bounded and filled before load: _warm_shape_caches).  The CPU arena
+    # stays on: it holds a job's working set as a fixed pool (without it every job returns ~40 MB to the OS and takes it
+    # back, and RSS swings +-3% with the sampling instant: results/engine_dev/r7_memory); it keeps the peak of the
+    # longest voice seen, so it is filled before load with a voice of ARENA_WARM_S (_warm_arena)
     opt.enable_mem_pattern = False
     h.spk_model = onnxruntime.InferenceSession(f"{model_dir}/assets/token2wav/campplus.onnx", sess_options=opt, providers=["CPUExecutionProvider"])
     _FEAT = h
@@ -125,7 +128,7 @@ def _feat_job(ref: bytes):
     import soundfile as sf
     import torch
 
-    try:
+    def run():
         wav16, _ = librosa.load(io.BytesIO(ref), sr=16000, mono=True)
         with tempfile.NamedTemporaryFile(suffix=".wav") as f, torch.inference_mode():
             sf.write(f.name, wav16, 16000)  # PCM_16, as in init_token2wav_cache
@@ -133,8 +136,12 @@ def _feat_job(ref: bytes):
             if getattr(_FEAT, "audio_tokenizer", None) is None:  # CPU only: resolve the embedding before it crosses processes
                 return front[:2] + (front[2].result(),) + front[3:]
             return ("done",) + tuple(x.cpu() for x in finish_prompt(_FEAT.audio_tokenizer, front))  # the whole prompt, on the CPU
+
+    try:
+        out = run()  # every temporary of the job (audio, mels, futures, GPU tensors) is released when run() returns
     finally:
-        _trim_heap()
+        _trim_heap()  # so the trim sees the job's freed memory, not memory its locals still hold
+    return out
 
 
 def _trim_heap() -> None:
@@ -148,6 +155,7 @@ def _trim_heap() -> None:
         pass
 
 
+JEMALLOC = "/lib/x86_64-linux-gnu/libjemalloc.so.2"  # the feature processes' allocator (system package libjemalloc2)
 SETUP_FRAME_BUDGET = 16 * 512  # rows x frames per eager batched setup call (its new caches: ~2.7 GB in FP16)
 
 
@@ -155,11 +163,11 @@ SHAPE_WARM_LENGTHS = 1200  # distinct input lengths: above the per-shape FFT cac
 
 
 def _warm_shape_caches(n: int = SHAPE_WARM_LENGTHS, seed: int = 0) -> None:
-    """Fill the per-shape caches of the front end to capacity before load.  The batched FFTs of the Kaldi fbank, the S3
-    log-mel and the 24 kHz mel are planned per frame count and those plans are cached (bounded: fbank alone plateaus at
-    ~36 MB after ~750 distinct lengths, then +0.4 MB per further 750), so a process seeing new voice lengths grows until
-    the caches are full; warmed here with ``n`` distinct lengths of 1.5-25 s, it stays at that size.  Numerics are
-    unaffected (the same ops, the caches only hold plans)."""
+    """Run the front end over ``n`` distinct input lengths of 1.5-25 s before load, so per-shape state is created up
+    front.  Round 6 attributed the per-length growth (~36 MB per process, plateauing after ~750 lengths) to FFT plans;
+    round 7 found raw FFTs do not grow and the owner is oneDNN's primitive cache (1024 shape-keyed entries; the
+    resampler's conv1d), now disabled in the feature processes (ONEDNN_PRIMITIVE_CACHE_CAPACITY=0).  The warm-up is kept
+    because the measured flat configuration includes it.  Numerics are unaffected (the same ops)."""
     import numpy as np
     import s3tokenizer
     import torch
@@ -179,10 +187,44 @@ def _warm_shape_caches(n: int = SHAPE_WARM_LENGTHS, seed: int = 0) -> None:
     _trim_heap()
 
 
+ARENA_WARM_S = 60.0  # the reference length the CAMPPlus arena is sized for before load (longer voices still extend it)
+
+
+def _warm_arena(seconds: float = ARENA_WARM_S, seed: int = 1) -> None:
+    """Run the speaker model once on a ``seconds`` voice so its CPU arena reaches that working set before load."""
+    import numpy as np
+    import torch
+    import torchaudio.compliance.kaldi as kaldi
+
+    audio = torch.from_numpy(np.random.default_rng(seed).standard_normal(int(seconds * 16000)).astype(np.float32) * 0.1)
+    feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
+    feat = feat - feat.mean(dim=0, keepdim=True)
+    _FEAT.spk_model.run(None, {_FEAT.spk_model.get_inputs()[0].name: feat.unsqueeze(0).numpy()})
+    del audio, feat
+    _trim_heap()
+
+
+def _warm_jobs(n: int, seed: int = 2) -> None:
+    """``n`` whole feature jobs on synthetic voices (noise, 1.5-25 s, 24 kHz WAV) before load, so the heap reaches the
+    layout steady load leaves it in before the first measurement."""
+    import io
+
+    import numpy as np
+    import soundfile as sf
+
+    rng = np.random.default_rng(seed)
+    for n24 in rng.integers(int(1.5 * 24000), 25 * 24000, n):
+        b = io.BytesIO()
+        sf.write(b, (rng.standard_normal(int(n24)) * 0.05).astype(np.float32), 24000, format="WAV", subtype="PCM_16")
+        _feat_job(b.getvalue())
+
+
 def _feat_warm(ref: bytes):
-    """Warm a feature process before load (the per-shape caches, then two real jobs); the job also holds the process
-    for a while, so the pool starts every process (each runs one)."""
+    """Warm a feature process before load (the per-shape FFT caches, the speaker model's arena at ARENA_WARM_S, then two
+    real jobs); the job also holds the process for a while, so the pool starts every process (each runs one)."""
     _warm_shape_caches()
+    _warm_arena()
+    _warm_jobs(int(os.environ.get("FEATURE_WARM_JOBS", "0")))
     _feat_job(ref)
     time.sleep(2.0)
     return _feat_job(ref)
@@ -200,6 +242,146 @@ class _Req:
     feat: tuple | None = None  # the resolved prompt features (on this process's stream), once ready
     t_feat: float = 0.0  # when the loop saw them ready (setups are taken oldest first)
     audio: AudioState = field(default_factory=AudioState)  # first-audio state and playback clock (t2w_sched)
+
+
+def setup_calls(ready: list, setup_t, row_limit: dict, frame_budget: int = SETUP_FRAME_BUDGET) -> list:
+    """Setup calls for the requests whose features are ready (oldest first), batched per frame bucket: small groups
+    ride the setup graphs (row limits); larger ones run as fewer, bigger eager calls bounded by a frame budget (they are
+    compute-bound, and one call beats many for every request's first audio)."""
+    groups: dict[int, list] = {}
+    for r in ready:
+        groups.setdefault(next((b for b in setup_t if b >= r.feat[3].shape[1]), -r.feat[3].shape[1]), []).append(r)
+    calls = []
+    for b, items in groups.items():
+        per = max(1, row_limit.get(b, 2) // 2)
+        if len(items) > per:
+            per = max(per, frame_budget // (2 * max(abs(b), 1)))
+        calls += [(b, items[k:k + per]) for k in range(0, len(items), per)]
+    return calls
+
+
+class WorkerLoop:
+    """The worker's per-request state and scheduling over injected parts, so the production loop runs in CPU tests.
+
+    ``bt``: setup_many / new_stream / release_prompt / release_stream / decode (``BatchedToken2Wav``); ``emit``: one
+    message to the engine; ``resolve``: a done feature future -> prompt features (raises for unusable audio);
+    ``calls_for``: ready requests, oldest first -> [(bucket, requests)] setup calls; ``clock``: the worker clock.
+
+    mode "edf" (task17, the default): work-conserving -- every ready window is decoded in the tick it is ready, earliest
+    playback deadline first (``Policy.max_decode_rows`` may cap a call); a setup never runs ahead of a waiting
+    continuation window (decode first, then at most ``Policy.setup_calls_when_busy`` setup calls); setups oldest first.
+    mode "legacy" (rounds 4-5, kept for the scheduler comparison): every pending setup first, then a decode held until
+    ``min_batch`` windows wait, a first or last window is among them, or the oldest waited ``max_wait``."""
+
+    def __init__(self, bt, emit, resolve, calls_for, policy: Policy, mode: str = "edf", min_batch: int = 8, max_wait: float = 0.04,
+                 clock=time.perf_counter, log=None, note=None):
+        if mode not in ("edf", "legacy"):
+            raise ValueError(f"t2w_policy must be 'edf' or 'legacy', not {mode!r}")
+        self.bt, self.emit, self.resolve, self.calls_for, self.policy, self.mode = bt, emit, resolve, calls_for, policy, mode
+        self.min_batch, self.max_wait, self.clock = min_batch, max_wait, clock
+        self.log = log or (lambda kind, n, t0: None)
+        self.note = note
+        self.reqs: dict[int, _Req] = {}
+
+    # messages from the engine
+    def open(self, seq: int, seed: int, fut) -> None:
+        self.reqs[seq] = _Req(seq, seed, features=fut, t_open=self.clock())
+
+    def window(self, seq: int, tokens, last: bool, index: int) -> None:
+        if seq in self.reqs:
+            self.reqs[seq].windows.append((tokens, last, index, self.clock()))
+
+    def close(self, seq: int) -> None:
+        """A request leaves the worker: its stream's cache slots go back (fast DiT)."""
+        r = self.reqs.pop(seq, None)
+        if r is not None and r.stream is not None:
+            self.bt.release_stream(r.stream)
+
+    # one scheduling tick
+    def tick(self) -> bool:
+        self._resolve_ready()
+        ready = sorted((r for r in self.reqs.values() if r.stream is None and r.feat is not None), key=lambda r: r.t_feat)
+        calls = [(part[0].t_feat, (b, part)) for b, part in self.calls_for(ready)]
+        if self.mode == "legacy":
+            worked = self._setups([c for _, c in calls])
+            return self._decode(gate=True) or worked
+        waiting = any(r.stream is not None and r.windows and r.audio.started for r in self.reqs.values())
+        decode_first, run = plan_tick(waiting, calls, self.policy)
+        worked = self._decode() if decode_first else False
+        worked = self._setups(run) or worked
+        if not decode_first:
+            worked = self._decode() or worked
+        return worked
+
+    def _resolve_ready(self) -> None:
+        for r in [r for r in self.reqs.values() if r.stream is None and r.feat is None and r.features.done()]:
+            try:
+                f = self.resolve(r.features)
+            except Exception as e:
+                self.emit(("error", r.seq, f"reference audio: {type(e).__name__}: {e}", "bad_request"))  # an input error, typed across IPC
+                self.close(r.seq)
+                continue
+            r.feat, r.t_feat, r.features = f, self.clock(), None  # the future is not kept once resolved
+            if self.note is not None:
+                self.note(f"features_ready 1 {(r.t_feat - r.t_open) * 1000:.1f}")
+
+    def _setups(self, calls: list) -> bool:
+        for b, part in calls:
+            try:
+                t0 = time.perf_counter()
+                prompts = self.bt.setup_many([r.feat for r in part])
+                self.log(f"setup@{b}", len(part), t0)
+            except Exception as e:
+                for r in part:
+                    self.emit(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
+                    self.close(r.seq)
+                continue
+            for r, p in zip(part, prompts):
+                r.feat = None
+                if self.reqs.get(r.seq) is r:
+                    r.stream = self.bt.new_stream(p, noise_seed=r.noise_seed, adopt=True)
+                else:  # closed while its setup was pending
+                    self.bt.release_prompt(p)
+        return bool(calls)
+
+    def _decode(self, gate: bool = False) -> bool:
+        """One decode call over the ready head windows (earliest playback deadline first); False if nothing ran."""
+        ready = [r for r in self.reqs.values() if r.stream is not None and r.windows]
+        if not ready:
+            return False
+        now = self.clock()
+        if gate:
+            heads = [r.windows[0] for r in ready]
+            if not (any(h[2] == 0 for h in heads) or any(h[1] for h in heads) or len(ready) >= min(self.min_batch, len(self.reqs))
+                    or now - min(h[3] for h in heads) >= self.max_wait):
+                return False
+        dl = {r.seq: r.audio.deadline(r.windows[0][3], self.policy) for r in ready}
+        sel = [self.reqs[k] for k in choose_windows([(d, k) for k, d in dl.items()], self.policy)]
+        if self.note is not None:
+            self.note(f"slack {len(sel)} {(min(dl[r.seq] for r in sel) - now) * 1000:.1f}")
+        items = []
+        for r in sel:
+            tokens, last, _, _ = r.windows.popleft()
+            items.append((r.stream, tokens, last))
+        try:
+            t0 = time.perf_counter()
+            wavs = self.bt.decode(items)
+            self.log("decode", len(items), t0)
+        except Exception as e:
+            for r in sel:
+                self.emit(("error", r.seq, f"token2wav: {type(e).__name__}: {e}"))
+                self.close(r.seq)
+            return True
+        sent = self.clock()
+        for r, (_, _, last), wav in zip(sel, items, wavs):
+            if len(wav):
+                self.emit(("audio", r.seq, r.offset, wav))
+                r.offset += len(wav)
+                r.audio.sent(len(wav), sent)
+            if last:
+                self.emit(("done", r.seq))
+                self.close(r.seq)
+        return True
 
 
 def worker_main(inq, outq, cfg: dict) -> None:
@@ -243,8 +425,27 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor
 
-        # CPU-only processes (no CUDA context); a few malloc arenas each, so varied audio sizes do not keep growing the heap
+        # CPU-only processes (no CUDA context); a few malloc arenas each, so varied audio sizes do not keep growing the heap.
+        # oneDNN's primitive cache (1024 shape-keyed entries; the resampler's conv1d is planned per input length) is off:
+        # its content followed the recent mix of voice lengths, so RSS rose and then decayed by ~1-2% whenever the mix
+        # changed; off, it costs nothing measurable and the features are bit-identical.  A fixed mmap threshold keeps
+        # large job buffers out of the heap (glibc's dynamic threshold otherwise moves them in, and the heap creeps).
+        # Measured: results/engine_dev/r7_memory (tools/spike/feature_scenario_rss.py over the robustness sequence).
+        # The allocator is jemalloc: with glibc (even with the fixed threshold) per-process RSS still crept ~+0.3 MB per
+        # 1000 jobs for the whole run (1.07-1.15% at the soak's length), with jemalloc it plateaus (0.58-0.90% over 32,000
+        # jobs, bit-identical features, the same job time).  A missing library fails the start rather than silently
+        # running another allocator.
         os.environ.setdefault("MALLOC_ARENA_MAX", str(cfg.get("feature_malloc_arenas", 2)))
+        os.environ.setdefault("ONEDNN_PRIMITIVE_CACHE_CAPACITY", str(cfg.get("feature_onednn_cache", 0)))
+        os.environ.setdefault("MALLOC_MMAP_THRESHOLD_", str(cfg.get("feature_mmap_threshold", 131072)))
+        alloc = cfg.get("feature_allocator", "jemalloc")
+        if alloc == "jemalloc":
+            lib = cfg.get("feature_jemalloc_path", JEMALLOC)
+            if not os.path.isfile(lib):
+                raise RuntimeError(f"feature_allocator jemalloc: {lib} not found")
+            os.environ["LD_PRELOAD"] = lib  # the spawned feature processes only; this process keeps its allocator
+        elif alloc != "glibc":
+            raise ValueError(f"feature_allocator must be 'jemalloc' or 'glibc', not {alloc!r}")
         pool = ProcessPoolExecutor(cfg["feature_processes"], mp_context=mp.get_context("spawn"), initializer=_feat_init,
                                    initargs=(model_dir, cfg.get("spk_threads", 8), cfg.get("feature_gpu_tokens", True)))
         ref = open(f"{model_dir}/assets/HT_ref_audio.wav", "rb").read()
@@ -289,15 +490,18 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         pool.submit(_feat_job, ref).add_done_callback(cpu_done)
         return out
 
-    min_batch, max_wait = cfg.get("t2w_min_batch", 8), cfg.get("t2w_max_wait_ms", 40.0) / 1000
     policy = Policy(setup_calls_when_busy=cfg.get("t2w_setup_calls_when_busy", 1), max_decode_rows=cfg.get("t2w_max_decode_rows"),
                     first_slack_s=cfg.get("t2w_first_slack_ms", 250.0) / 1000)
-    reqs: dict[int, _Req] = {}
 
-    def drop(seq: int) -> None:  # a request leaves the worker: its stream's cache slots go back (fast DiT)
-        r = reqs.pop(seq, None)
-        if r is not None and r.stream is not None:
-            bt.release_stream(r.stream)
+    def resolve(fut):
+        """A done feature future -> the prompt features on this process's stream (raises for unusable audio)."""
+        if cfg.get("feature_processes", 0):  # finished on the S3 thread's stream: record them on this one
+            f = fut.result()
+            for x in f:
+                x.record_stream(torch.cuda.current_stream())
+            return f
+        return tuple(x.cuda(non_blocking=True) if x.device.type == "cpu" else x for x in fut.result())
+
     wake = threading.Event()
     msgs: deque = deque()
     prof_path = cfg.get("profile_path")
@@ -317,6 +521,14 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         wake.set()
         return f
 
+    def note(line: str) -> None:
+        if prof is not None:
+            prof.write(f"{time.time():.4f} {line}\n")
+
+    loop = WorkerLoop(bt, outq.put, resolve, lambda ready: setup_calls(ready, SETUP_T, ROW_LIMIT), policy, mode=cfg.get("t2w_policy", "edf"),
+                      min_batch=cfg.get("t2w_min_batch", 8), max_wait=cfg.get("t2w_max_wait_ms", 40.0) / 1000, log=log, note=note)
+    reqs = loop.reqs
+
     def reader():
         while True:
             m = inq.get()
@@ -326,44 +538,6 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                 return
 
     threading.Thread(target=reader, daemon=True).start()
-
-    def decode_ready() -> bool:
-        """One decode call over the ready head windows (earliest playback deadline first); False if nothing ran."""
-        ready = [r for r in reqs.values() if r.stream is not None and r.windows]
-        if not ready:
-            return False
-        now = time.perf_counter()
-        heads = [r.windows[0] for r in ready]
-        if not (any(h[2] == 0 for h in heads) or any(h[1] for h in heads) or len(ready) >= min(min_batch, len(reqs))
-                or now - min(h[3] for h in heads) >= max_wait):
-            return False
-        dl = {r.seq: r.audio.deadline(r.windows[0][3], policy) for r in ready}
-        sel = [reqs[k] for k in choose_windows([(d, k) for k, d in dl.items()], policy)]
-        if prof is not None:
-            prof.write(f"{time.time():.4f} slack {len(sel)} {(min(dl[r.seq] for r in sel) - now) * 1000:.1f}\n")
-        items = []
-        for r in sel:
-            tokens, last, _, _ = r.windows.popleft()
-            items.append((r.stream, tokens, last))
-        try:
-            t0 = time.perf_counter()
-            wavs = bt.decode(items)
-            log("decode", len(items), t0)
-        except Exception as e:
-            for r in sel:
-                outq.put(("error", r.seq, f"token2wav: {type(e).__name__}: {e}"))
-                drop(r.seq)
-            return True
-        sent = time.perf_counter()
-        for r, (_, _, last), wav in zip(sel, items, wavs):
-            if len(wav):
-                outq.put(("audio", r.seq, r.offset, wav))
-                r.offset += len(wav)
-                r.audio.sent(len(wav), sent)
-            if last:
-                outq.put(("done", r.seq))
-                drop(r.seq)
-        return True
 
     def parent_watch(ppid: int):  # the engine died without a stop message (SIGKILL / SIGTERM to its PID only)
         import os
@@ -388,7 +562,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
             return {"feature_processes": 0, "feature_rss_by_pid": {}, "feature_rss_kib": None}
         by_pid = {str(p): _rss_kib(p) for p in (getattr(pool, "_processes", None) or {})}
         whole = len(by_pid) == n and all(v is not None for v in by_pid.values())
-        return {"feature_processes": n, "feature_rss_by_pid": by_pid, "feature_rss_kib": sum(by_pid.values()) if whole else None}
+        return {"feature_processes": n, "feature_rss_by_pid": by_pid, "feature_rss_kib": sum(by_pid.values()) if whole else None,
+                "feature_allocator": cfg.get("feature_allocator", "jemalloc")}
 
     while True:
         now_s = time.monotonic()
@@ -399,6 +574,7 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                                       "t2w_cache_slots_used": (fast.pool.in_use() - fast.scratch) if fast is not None else None,
                                       "t2w_cnn_rows_free": len(fast.cnn_free) if fast is not None else None,
                                       "t2w_gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
+                                      "t2w_gpu_memory_allocated_bytes": int(torch.cuda.memory_allocated()),
                                       "t2w_dit_graph_calls": fast.counts["graph"] if fast is not None else None,
                                       "t2w_dit_eager_calls": fast.counts["eager"] if fast is not None else None,
                                       "t2w_rss_kib": _rss_kib(os.getpid()), **feature_rss(),
@@ -412,69 +588,13 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                 return
             if kind == "open":
                 _, seq, ref, seed = m
-                if cfg.get("feature_processes", 0):
-                    fut = open_features(ref)
-                else:
-                    fut = pool.submit(feats, ref)
-                reqs[seq] = _Req(seq, seed, features=fut, t_open=time.perf_counter())
+                loop.open(seq, seed, open_features(ref) if cfg.get("feature_processes", 0) else pool.submit(feats, ref))
             elif kind == "window":
-                _, seq, tokens, last, index = m
-                if seq in reqs:
-                    reqs[seq].windows.append((tokens, last, index, time.perf_counter()))
+                loop.window(*m[1:])
             elif kind == "close":
-                drop(m[1])
-        worked = False
+                loop.close(m[1])
         with torch.inference_mode():
-            for r in [r for r in reqs.values() if r.stream is None and r.feat is None and r.features.done()]:
-                try:
-                    if cfg.get("feature_processes", 0):  # finished on the S3 thread's stream: record them on this one
-                        f = r.features.result()
-                        for x in f:
-                            x.record_stream(torch.cuda.current_stream())
-                    else:
-                        f = tuple(x.cuda(non_blocking=True) if x.device.type == "cpu" else x for x in r.features.result())
-                except Exception as e:
-                    outq.put(("error", r.seq, f"reference audio: {type(e).__name__}: {e}", "bad_request"))  # an input error, typed across IPC
-                    drop(r.seq)
-                    continue
-                r.feat, r.t_feat = f, time.perf_counter()
-                if prof is not None:
-                    prof.write(f"{time.time():.4f} features_ready 1 {(r.t_feat - r.t_open) * 1000:.1f}\n")
-            # pending setups of every voice whose features are ready, batched per frame bucket, oldest first
-            groups: dict[int, list] = {}
-            for r in sorted((r for r in reqs.values() if r.stream is None and r.feat is not None), key=lambda r: r.t_feat):
-                groups.setdefault(next((b for b in SETUP_T if b >= r.feat[3].shape[1]), -r.feat[3].shape[1]), []).append(r)
-            calls = []
-            for b, items in groups.items():
-                # small groups ride the setup graphs (row limits); larger ones run as fewer, bigger eager calls bounded
-                # by a frame budget (they are compute-bound, and one call beats many for every request's first audio)
-                per = max(1, ROW_LIMIT.get(b, 2) // 2)
-                if len(items) > per:
-                    per = max(per, SETUP_FRAME_BUDGET // (2 * max(abs(b), 1)))
-                calls += [(items[k].t_feat, (b, items[k:k + per])) for k in range(0, len(items), per)]
-            waiting = any(r.stream is not None and r.windows and r.audio.started for r in reqs.values())
-            decode_first, run = plan_tick(waiting, calls, policy)
-            if decode_first:
-                worked |= decode_ready()
-            for b, part in run:
-                try:
-                    t0 = time.perf_counter()
-                    prompts = bt.setup_many([r.feat for r in part])
-                    log(f"setup@{b}", len(part), t0)
-                except Exception as e:
-                    for r in part:
-                        outq.put(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
-                        drop(r.seq)
-                    continue
-                for r, p in zip(part, prompts):
-                    r.feat = None
-                    if r.seq in reqs:
-                        r.stream = bt.new_stream(p, noise_seed=r.noise_seed, adopt=True)
-                    else:  # closed while its setup ran
-                        bt.release_prompt(p)
-                worked = True
-            if not decode_first:
-                worked |= decode_ready()
+            worked = loop.tick()
         if not worked and not msgs:
             wake.wait(0.002)
             wake.clear()

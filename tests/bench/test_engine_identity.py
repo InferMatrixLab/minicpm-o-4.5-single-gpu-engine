@@ -122,3 +122,73 @@ def test_served_identity_mismatch_fails_before_load(tmp_path, monkeypatch):
     with ok:
         ev = ok.evidence()
     assert ev["served_identity_problems"] == [] and ev["served_identity"]["engine_tree_sha256"] == want["engine_tree_sha256"]
+
+
+def _fake_python(dirpath: Path, dists: str) -> Path:
+    """An executable that answers the distributions query with ``dists`` (from a file next to it, so it can drift)."""
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "dists").write_text(dists)
+    py = dirpath / "python"
+    py.write_text('#!/bin/bash\ncat "$(dirname "$0")/dists"\n')
+    py.chmod(0o755)
+    return py
+
+
+def test_interpreter_is_resolved_once_and_bound_to_launch_fingerprint_and_served_identity(tmp_path, monkeypatch):
+    """B15: the candidate's ENGINE_PYTHON (else this tree's .venv-engine, else the main checkout's) is launched,
+    fingerprinted, put in the manifest and declared as served identity (path and installed distributions)."""
+    cli.env_distributions_sha256.cache_clear()
+    py = _fake_python(tmp_path / "envA" / "bin", "dists-A")
+    env = {"ENGINE_PYTHON": str(py)}
+    assert cli.engine_python(env) == str(py)
+    assert cli.engine_python({"ENGINE_PYTHON": str(tmp_path / "missing" / "python")}) == cli.ENGINE_PYTHON  # the launcher's fallback
+    assert cli.engine_python({}) in (str(cli.ROOT / ".venv-engine" / "bin" / "python"), cli.ENGINE_PYTHON)
+    want = cli.served_identity_expected("track_s_fast", env)
+    assert want["python"] == str(py) and want["python_dists_sha256"] == "dists-A"
+    cand = cli.make_candidate({"adapter": "engine", "config": "track_s_fast", "label": "envA", "mps": "off", "env": env})
+    spec = cli.server_spec(cand, 18999, 0)
+    assert spec.env["ENGINE_PYTHON"] == str(py) and spec.expected_identity == want
+    seen = []
+    monkeypatch.setattr(cli, "env_fingerprint", lambda p: seen.append(p) or {"freeze_sha256": f"freeze:{p}"})
+    fp = cli.execution_fingerprints("engine", env)
+    assert fp["envs"]["engine"] == f"freeze:{py}" and str(py) in seen
+    assert cli.adapter_python("engine", env) == str(py)
+
+
+def test_package_drift_at_the_same_path_changes_the_resume_digest(tmp_path, monkeypatch):
+    cli.env_distributions_sha256.cache_clear()
+    py = _fake_python(tmp_path / "envB" / "bin", "dists-1")
+    env = {"ENGINE_PYTHON": str(py)}
+    cand = cli.make_candidate({"adapter": "engine", "config": "track_s_fast", "label": "envB", "mps": "off", "env": env})
+    cell = cli.make_cell(cand, 1, 2, "tuning", 0, 180.0, 0)
+    monkeypatch.setattr(cli, "env_fingerprint", lambda p: {"freeze_sha256": Path(p).with_name("dists").read_text() if p == str(py) else "bench"})
+    spec1 = cli.build_experiment(cell, "performance", "restart", True, True, True, False)
+    (py.parent / "dists").write_text("dists-2")  # same interpreter path, other packages
+    cli.env_distributions_sha256.cache_clear()
+    spec2 = cli.build_experiment(cell, "performance", "restart", True, True, True, False)
+    assert spec1["fingerprints"]["engine"]["served_identity"]["python_dists_sha256"] == "dists-1"
+    assert spec2["fingerprints"]["engine"]["served_identity"]["python_dists_sha256"] == "dists-2"
+    assert spec_base_digest(spec1) != spec_base_digest(spec2)  # a declared cell is not resumed under the drifted environment
+
+
+def test_foreign_interpreter_or_drifted_packages_stop_the_server_before_load(tmp_path, monkeypatch):
+    import os
+    import socket
+
+    import pytest
+
+    import bench.servers
+    from bench.servers import Server, ServerSpec
+
+    monkeypatch.setattr(bench.servers, "gpu_memory_used_mib", lambda gpu: None)
+    fake = ROOT / "tests" / "bench" / "fake_engine_server.py"
+    want = cli.served_identity_expected("fake")
+    for override in ({"python": "/different/env/bin/python"}, {"python_dists_sha256": "0" * 64}):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        srv = Server(ServerSpec(name="fake", cmd=[sys.executable, str(fake), str(port)], port=port, gpu=0, info_path="/info", expected_identity=want,
+                                env={"FAKE_INFO_OVERRIDE": json.dumps(override)}), log_path=tmp_path / f"srv{port}.log")
+        assert os.environ.get("FAKE_INFO_OVERRIDE") is None
+        with pytest.raises(RuntimeError, match="served identity differs"):
+            srv.start()

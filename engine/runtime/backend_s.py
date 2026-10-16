@@ -80,6 +80,8 @@ class LiveS:
     cancelled: bool = False
     finished: bool = False
     timeline: list | None = None
+    t_admit: float = 0.0  # when the engine loop admitted it (the prefill lane ages from here)
+    audio: object = None  # t2w_sched.AudioState: the playback clock of the audio handed to the client
 
     def emit(self, ev) -> None:
         self.loop.call_soon_threadsafe(self.out.put_nowait, ev)
@@ -103,7 +105,10 @@ class TrackSBackend:
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
                  feature_processes: int = 0, thinker_fp8: bool = False, talker_k_max: int = 4, prefill_graphs: bool = False,
                  t2w_euler_graphs: bool = False, split_threads: bool = False, t2w_fast_dit: bool = False, t2w_fast_slots: int = 49152,
-                 t2w_mps_sm_percent: int = 0, thinker_lazy: bool = False, profile: bool = False):
+                 t2w_mps_sm_percent: int = 0, thinker_lazy: bool = False, profile: bool = False, t2w_policy: str = "edf",
+                 t2w_setup_calls_when_busy: int = 1, t2w_max_decode_rows: int | None = None, t2w_first_slack_ms: float = 250.0,
+                 prefill_token_budget: int | None = 8192, prefill_max_age_ms: float = 250.0, prefill_slack_floor_ms: float | None = 300.0,
+                 feature_gpu_tokens: bool = True, feature_allocator: str = "jemalloc"):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -118,6 +123,21 @@ class TrackSBackend:
 
         torch.backends.cudnn.allow_tf32 = False  # AC-3.4: Token2Wav against FP32 (see engine.models.token2wav.strict_fp32)
         import sys
+
+        from engine.runtime.t2w_sched import PrefillPolicy
+
+        # scheduler knobs (task17), validated before any model is loaded
+        if feature_allocator not in ("jemalloc", "glibc"):
+            raise ValueError(f"feature_allocator must be 'jemalloc' or 'glibc', not {feature_allocator!r}")
+        if t2w_policy not in ("edf", "legacy"):
+            raise ValueError(f"t2w_policy must be 'edf' or 'legacy', not {t2w_policy!r}")
+        if int(t2w_setup_calls_when_busy) < 1 or (t2w_max_decode_rows is not None and int(t2w_max_decode_rows) < 1) or t2w_first_slack_ms < 0:
+            raise ValueError("t2w_setup_calls_when_busy and t2w_max_decode_rows must be >= 1, t2w_first_slack_ms >= 0")
+        if (prefill_token_budget is not None and int(prefill_token_budget) < 1) or prefill_max_age_ms < 0 or \
+                (prefill_slack_floor_ms is not None and prefill_slack_floor_ms < 0):
+            raise ValueError("prefill_token_budget must be >= 1 (or null), prefill_max_age_ms and prefill_slack_floor_ms >= 0")
+        self.prefill_policy = PrefillPolicy(token_budget=prefill_token_budget, max_age_s=prefill_max_age_ms / 1000,
+                                            slack_floor_s=None if prefill_slack_floor_ms is None else prefill_slack_floor_ms / 1000)
 
         # two launch-bound host threads (Thinker/Talker and Token2Wav) share the GIL; hand it over often
         sys.setswitchinterval(switch_interval_s)
@@ -165,7 +185,10 @@ class TrackSBackend:
                                           "t2w_max_wait_ms": t2w_max_wait_ms, "feature_workers": feature_workers,
                                           "profile_path": t2w_profile_path, "feature_processes": feature_processes,
                                           "t2w_euler_graphs": t2w_euler_graphs, "t2w_fast_dit": t2w_fast_dit,
-                                          "t2w_fast_slots": t2w_fast_slots, "mps_sm_percent": t2w_mps_sm_percent}, self._on_t2w)
+                                          "t2w_fast_slots": t2w_fast_slots, "mps_sm_percent": t2w_mps_sm_percent, "t2w_policy": t2w_policy,
+                                          "t2w_setup_calls_when_busy": t2w_setup_calls_when_busy, "t2w_max_decode_rows": t2w_max_decode_rows,
+                                          "t2w_first_slack_ms": t2w_first_slack_ms, "feature_gpu_tokens": feature_gpu_tokens,
+                                          "feature_allocator": feature_allocator}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
@@ -336,7 +359,7 @@ class TrackSBackend:
                             if not lv.wants_audio:
                                 self.live.pop(lv.seq, None)
                                 lv.finished = True
-                    rows = [lv for lv in list(self.live.values()) if not lv.thinker_done]
+                    rows = self._prefill_lane([lv for lv in list(self.live.values()) if not lv.thinker_done])
                     if rows:
                         self._timed("thinker", self._thinker_step, rows)
                 self.talker_wake.set()
@@ -384,6 +407,9 @@ class TrackSBackend:
                         lv.cancelled = True
 
     def _admit(self, lv: LiveS) -> None:
+        from engine.runtime.t2w_sched import AudioState
+
+        lv.t_admit, lv.audio = _now(), AudioState()
         if lv.wants_audio:
             from engine.token2wav_chunker import StreamChunker
 
@@ -425,6 +451,7 @@ class TrackSBackend:
         if kind == "audio":
             if lv.sample_offset == 0:
                 lv.mark("first_audio")
+            lv.audio.sent(len(m[3]), _now())
             lv.emit(AudioChunk(m[3], m[2]))
             lv.sample_offset = m[2] + len(m[3])
         elif kind == "done":
@@ -467,7 +494,7 @@ class TrackSBackend:
     def _tick(self) -> None:
         for lv in [x for x in self.live.values() if x.cancelled and not x.finished]:
             self._release(lv)
-        rows = [x for x in self.live.values() if not x.thinker_done]
+        rows = self._prefill_lane([x for x in self.live.values() if not x.thinker_done])
         if self.thinker_lazy and rows and not any(self._thinker_urgent(x) for x in rows):
             rows = []  # every Talker already holds a chunk beyond the one it decodes: give this tick to the Talker
         self._timed("thinker", self._thinker_step, rows)
@@ -479,6 +506,22 @@ class TrackSBackend:
             self.live.pop(lv.seq, None)
             if self.t2wp is None:
                 self.t2w_wake.set()
+
+    def _prefill_lane(self, rows: list) -> list:
+        """The Thinker rows of this tick: every decoding row, and the pending prefills the bounded first-chunk lane
+        admits (``t2w_sched.choose_prefills``: oldest first within the token budget, aged ones always, none but aged
+        ones while a continuing stream's buffered playback is below the slack floor)."""
+        pending = [lv for lv in rows if lv.pending_prefill]
+        if not pending:
+            return rows
+        from engine.runtime.t2w_sched import choose_prefills
+
+        now = _now()
+        slacks = [lv.audio.slack(now) for lv in list(self.live.values()) + list(self.audio_live.values())
+                  if lv.audio is not None and lv.audio.started and not lv.finished and not lv.cancelled]
+        take = set(choose_prefills([(lv.t_admit, len(lv.prompt_ids), lv.seq) for lv in pending], now, min(slacks, default=None),
+                                   self.prefill_policy))
+        return [lv for lv in rows if not lv.pending_prefill or lv.seq in take]
 
     # thinker -----------------------------------------------------------------------------------
     @staticmethod
@@ -758,6 +801,7 @@ class TrackSBackend:
             lv.mark(f"window_decoded:{len(items)}")
             wav = wav.astype(np.float32)
             if len(wav):
+                lv.audio.sent(len(wav), _now())
                 lv.emit(AudioChunk(wav, lv.sample_offset))
                 lv.sample_offset += len(wav)
 

@@ -27,6 +27,22 @@ audio.
 | Fast DiT solve (headline `track_s_fast`) | `engine/runtime/dit_fast.py`, `engine/runtime/dit_kernels.py` | `BatchedToken2Wav._solve` (reference DiT module) | attention caches as page-size-1 slots with the reference trimming as slot bookkeeping, packed ragged rows, CUDA graphs per (rows, tokens) bucket: FP16 mels within the AC-3.4 FP16 bound for setups, staggered streams, ramped first windows and merged finals; every slot returned (`tests/engine/test_dit_fast.py`, `tests/engine/test_token2wav_stream.py::test_fast_dit_matches_eager`) |
 | Prompt features (worker) | `engine/runtime/t2w_worker.py::prompt_front_end` + `finish_prompt` | `stepaudio2.Token2wav._prepare_prompt` | identical tensors (`tests/engine/test_token2wav_stream.py::test_split_prompt_features_equal_reference`) |
 
+## Scheduling (task17) and robustness evidence (AC-6)
+
+- **Playback clock** (`engine/runtime/t2w_sched.py AudioState`): the harness stall model. A stream's buffer runs out at `max(previous exhaustion, delivery) + seconds delivered`; the worker and the engine keep one per request, from the audio they hand on.
+- **Token2Wav worker** (`engine/runtime/t2w_worker.py WorkerLoop`, `t2w_policy: "edf"`):
+  - work-conserving: every ready window is decoded in the tick it becomes ready, earliest playback deadline first (`t2w_max_decode_rows` may cap a call);
+  - a setup never runs ahead of a waiting continuation window: the tick decodes first, then runs at most `t2w_setup_calls_when_busy` setup calls;
+  - setups run oldest first.
+  - `"legacy"` keeps the rounds 4–5 order (every setup first, then a decode held for `t2w_min_batch` windows or `t2w_max_wait_ms`), for comparison.
+- **Engine tick** (`backend_s.TrackSBackend._prefill_lane`, `t2w_sched.choose_prefills`): the bounded first-chunk lane.
+  - Every decoding row runs every tick.
+  - Pending Thinker prefills run oldest first within `prefill_token_budget` tokens; one that has waited `prefill_max_age_ms` always runs.
+  - While a continuing stream has less than `prefill_slack_floor_ms` of buffered playback, only aged prefills run.
+  - `null` budget and floor give the rounds 4–6 behaviour (every pending prefill each tick).
+- **Tests** (CPU): `tests/engine_api/test_t2w_sched.py`, `test_t2w_worker_loop.py` (the production loop with a fake model and clock) and `test_prefill_lane.py`.
+- **Robustness** (`tools/robustness.py`, replay with `tools/robustness_replay.py`): the module docstring lists the scenarios, the predeclared memory rule (±1% of the first sample at or after 60 s, over every later sample and the drained endpoint; CUDA allocated bytes back within 16 MiB of the warmed baseline) and the per-request artifacts (`requests.jsonl`, `wire.jsonl.gz`) the verdict can be rebuilt from.
+
 ## Environments
 
 See `engine/env/README.md`. The engine runs in `.venv-engine` (torch 2.13, transformers 5.14, flashinfer 0.7). The HF
