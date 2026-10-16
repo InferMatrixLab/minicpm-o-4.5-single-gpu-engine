@@ -60,21 +60,29 @@ def media_payloads(n: int) -> list[dict]:
 
 
 async def raw_stream(url: str, payload: dict, cancel_after_audio: bool = False) -> dict:
+    """One streamed request; a stream the server cuts (dropped connection, truncated chunked body) is recorded as
+    ``broken`` (a failure of every scenario), never raised."""
     t0 = time.perf_counter()
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url + "/v1/chat/completions", json=payload) as r:
-            status, audio, done = r.status, 0, False
-            if status != 200:
-                return {"status": status, "audio_events": 0, "done": False, "s": time.perf_counter() - t0}
-            async for line in r.content:
-                if line.startswith(b"data: [DONE]"):
-                    done = True
-                    break
-                if b'"modality": "audio"' in line:
-                    audio += 1
-                    if cancel_after_audio:
+    status, audio, done, broken, error = None, 0, False, False, None
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url + "/v1/chat/completions", json=payload) as r:
+                status = r.status
+                if status != 200:
+                    return {"status": status, "audio_events": 0, "done": False, "broken": False, "s": time.perf_counter() - t0}
+                async for line in r.content:
+                    if line.startswith(b"data: [DONE]"):
+                        done = True
                         break
-    return {"status": status, "audio_events": audio, "done": done, "s": time.perf_counter() - t0}
+                    if b'"error"' in line[:40]:
+                        error = line[:300].decode(errors="replace")
+                    if b'"modality": "audio"' in line:
+                        audio += 1
+                        if cancel_after_audio:
+                            break
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        broken, error = True, f"{type(e).__name__}: {e}"[:300]
+    return {"status": status, "audio_events": audio, "done": done, "broken": broken, "error": error, "s": time.perf_counter() - t0}
 
 
 async def run(a) -> dict:
@@ -85,15 +93,21 @@ async def run(a) -> dict:
     adapter = get_adapter("engine")
     report: dict = {"url": a.url, "idle_before": await metrics(a.url)}
     mixed = await asyncio.gather(*[raw_stream(a.url, p) for p in media_payloads(4 * 4)])
-    report["mixed"] = {"n": len(mixed), "ok": sum(m["status"] == 200 and m["done"] for m in mixed)}
+    report["mixed"] = {"n": len(mixed), "ok": sum(m["status"] == 200 and m["done"] for m in mixed), "broken": sum(m["broken"] for m in mixed),
+                       "errors": sorted({m["error"] for m in mixed if m.get("error")})[:5]}
     tts = canonical_requests(rows, sets.warmup(8))
     cancels = [raw_stream(a.url, adapter.build_payload(r), cancel_after_audio=(i % 2 == 0)) for i, r in enumerate(tts)]
     cres = await asyncio.gather(*cancels)
     report["cancel"] = {"cancelled": sum(1 for i, _ in enumerate(cres) if i % 2 == 0), "completed_ok": sum(c["done"] for i, c in enumerate(cres) if i % 2)}
     await asyncio.sleep(5)
     report["after_cancel"] = await metrics(a.url)
+    # eos-boundary: short targets whose codec lengths land on and next to Token2Wav window boundaries (8 + 25 k frames)
+    short = [cr for cr in canonical_requests(rows, sets.tuning(96)) if len(cr.row.target_text.split()) <= 6][:24]
+    eres = await asyncio.gather(*[raw_stream(a.url, adapter.build_payload(r)) for r in short])
+    report["eos_boundary"] = {"n": len(eres), "ok": sum(e["status"] == 200 and e["done"] and e["audio_events"] > 0 for e in eres)}
     over = await asyncio.gather(*[raw_stream(a.url, adapter.build_payload(r)) for r in canonical_requests(rows, sets.tuning(32)[:a.overload])])
-    report["overload"] = {"n": len(over), "statuses": sorted({o["status"] for o in over}), "ok": sum(o["status"] == 200 and o["done"] for o in over),
+    report["overload"] = {"n": len(over), "statuses": sorted({o["status"] for o in over if o["status"] is not None}), "broken": sum(o["broken"] for o in over),
+                          "ok": sum(o["status"] == 200 and o["done"] for o in over),
                           "rejected_503": sum(o["status"] == 503 for o in over)}
     samples = []
     reqs = canonical_requests(rows, sets.eval(a.concurrency))
@@ -120,17 +134,25 @@ async def run(a) -> dict:
     report["sustain"] = {
         "minutes": a.sustain_min, "requests": len(ms), "invalid": sum(not m.ok for m in ms),
         "stall_max_s": max((m.stall_s for m in ms if m.ok), default=None),
-        "idle_after": {k: idle.get(k) for k in ("live", "queued", "thinker_kv_pages_used", "talker_kv_pages_used")},
+        "idle_after": {k: idle.get(k) for k in ("live", "queued", "thinker_kv_pages_used", "talker_kv_pages_used", "audio_live", "t2w_requests",
+                                                "t2w_cache_slots_used")},
         "rss_drift": (idle["rss_kib"] - steady["rss_kib"]) / steady["rss_kib"] if steady.get("rss_kib") else None,
         "gpu_reserved_drift": (idle["gpu_memory_reserved_bytes"] - steady["gpu_memory_reserved_bytes"]) / steady["gpu_memory_reserved_bytes"]
-        if steady.get("gpu_memory_reserved_bytes") else None}
+        if steady.get("gpu_memory_reserved_bytes") else None,
+        "t2w_gpu_reserved_drift": (idle["t2w_gpu_memory_reserved_bytes"] - steady["t2w_gpu_memory_reserved_bytes"]) / steady["t2w_gpu_memory_reserved_bytes"]
+        if steady.get("t2w_gpu_memory_reserved_bytes") else None}
     s = report["sustain"]
     report["passed"] = {
         "mixed": report["mixed"]["ok"] == report["mixed"]["n"],
-        "cancel": report["cancel"]["completed_ok"] == len(tts) // 2 and report["after_cancel"].get("live") == 0,
-        "overload": set(report["overload"]["statuses"]) <= {200, 503} and report["overload"]["ok"] + report["overload"]["rejected_503"] == len(over),
+        "eos_boundary": report["eos_boundary"]["ok"] == report["eos_boundary"]["n"] > 0,
+        "cancel": report["cancel"]["completed_ok"] == len(tts) // 2 and report["after_cancel"].get("live") == 0
+        and not report["after_cancel"].get("t2w_requests") and not report["after_cancel"].get("t2w_cache_slots_used"),
+        "overload": set(report["overload"]["statuses"]) <= {200, 503} and not report["overload"]["broken"]
+        and report["overload"]["ok"] + report["overload"]["rejected_503"] == len(over),
         "sustain": s["invalid"] == 0 and (s["stall_max_s"] or 0) <= 2.0 and s["idle_after"]["live"] == 0 and s["idle_after"]["thinker_kv_pages_used"] == 0
-        and s["idle_after"]["talker_kv_pages_used"] == 0 and abs(s["rss_drift"] or 0) <= 0.01 and abs(s["gpu_reserved_drift"] or 0) <= 0.01}
+        and s["idle_after"]["talker_kv_pages_used"] == 0 and not s["idle_after"].get("audio_live") and not s["idle_after"].get("t2w_requests")
+        and not s["idle_after"].get("t2w_cache_slots_used") and abs(s["rss_drift"] or 0) <= 0.01 and abs(s["gpu_reserved_drift"] or 0) <= 0.01
+        and abs(s["t2w_gpu_reserved_drift"] or 0) <= 0.01}
     (out / "robustness.json").write_text(json.dumps({**report, "samples": samples}, indent=1))
     print(json.dumps({k: v for k, v in report.items() if k != "samples"}, indent=1))
     return report

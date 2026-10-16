@@ -23,6 +23,9 @@ audio.
 | Token2Wav graphs | `engine/runtime/dit_graph.py`, `engine/runtime/hift_graph.py` | eager batched path | mel 1e-4 (FP32), AC-3.4 FP16 bound for FP16/compiled; HiFT graphs == eager on equal mel |
 | Token2Wav worker process | `engine/runtime/t2w_worker.py` | in-process Token2Wav thread | same `BatchedToken2Wav`; requires MPS (see `docs/architecture_decision.md`) |
 | Graph decoders | `engine/runtime/thinker_decode.py`, `engine/runtime/talker_decode.py` | eager per-step paths | graph == eager exactly, with plans skipped between page crossings (`tests/engine/test_{thinker,talker}_decode.py`) |
+| Fused Thinker decode kernels | `engine/runtime/kernels.py` (Triton: residual add + norm, q/k norm + RoPE + v copy, SiLU-and-multiply) | the torch reference-rounding ops (`hf_rms_norm`, `hf_rope`) | every reference rounding reproduced with integer round-to-nearest-even (`tests/engine/test_kernels.py`); fused vs torch decode: same greedy tokens (`tests/engine/test_thinker_decode.py`); AC-3.1 greedy runs through this decoder (`tests/engine/test_thinker_gpu_parity.py`) |
+| Fast DiT solve (headline `track_s_fast`) | `engine/runtime/dit_fast.py`, `engine/runtime/dit_kernels.py` | `BatchedToken2Wav._solve` (reference DiT module) | attention caches as page-size-1 slots with the reference trimming as slot bookkeeping, packed ragged rows, CUDA graphs per (rows, tokens) bucket: FP16 mels within the AC-3.4 FP16 bound for setups, staggered streams, ramped first windows and merged finals; every slot returned (`tests/engine/test_dit_fast.py`, `tests/engine/test_token2wav_stream.py::test_fast_dit_matches_eager`) |
+| Prompt features (worker) | `engine/runtime/t2w_worker.py::prepare_prompt_overlapped` | `stepaudio2.Token2wav._prepare_prompt` | identical tensors (`tests/engine/test_token2wav_stream.py::test_overlapped_prompt_features_equal_reference`) |
 
 ## Environments
 

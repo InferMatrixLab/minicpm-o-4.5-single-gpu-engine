@@ -165,6 +165,17 @@ class TalkerDecoder:
 
     @torch.inference_mode()
     def decode_k(self, seqs: list[int], state: dict, k: int) -> torch.Tensor:
+        """K frames for ``seqs`` (see ``_decode_k``); more rows than the largest bucket run as consecutive slices."""
+        top = max(self.buckets)
+        if len(seqs) <= top:
+            return self._decode_k(seqs, state, k)
+        outs = []
+        for a in range(0, len(seqs), top):
+            part = {name: v[a:a + top] for name, v in state.items()}  # views: updated in place
+            outs.append(self._decode_k(seqs[a:a + top], part, k))
+        return torch.cat(outs, dim=1)
+
+    def _decode_k(self, seqs: list[int], state: dict, k: int) -> torch.Tensor:
         """K frames for ``seqs``. ``state`` holds per-row tensors ``codes, seeds, steps, history, live`` (updated in place).
 
         Returns [K, len(seqs)] codes (``PAD`` after a row's EOS), copied to the host once.

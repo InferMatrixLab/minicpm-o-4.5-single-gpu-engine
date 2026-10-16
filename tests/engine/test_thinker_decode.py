@@ -172,3 +172,30 @@ def test_fused_kernels_match_torch_step():
     a, b = runs[0][1], runs[1][1]
     cos = torch.nn.functional.cosine_similarity(a.flatten(1), b.flatten(1), dim=-1)
     assert float(cos.min()) > 0.999, float(cos.min())  # one-ulp norm differences accumulate through the KV (0.9998 at 24 steps)
+
+
+@torch.inference_mode()
+def test_more_rows_than_buckets_and_pad_release():
+    """More rows than the largest bucket decode as slices; releasing the scratch padding rows when idle returns every
+    page they held (no pages remain once the live rows are released too)."""
+    from engine.models.thinker import Thinker
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+    from engine.runtime.thinker_decode import ThinkerDecoder
+
+    th = Thinker.load(MODEL, device="cuda")
+    c = th.cfg
+    spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
+    kv = PagedKV(spec, 2048)
+    pre = DecoderRunner(th.w, spec, kv)
+    gen = torch.Generator(device="cuda").manual_seed(2)
+    prompts = [torch.randint(0, 150000, (5 + i,), device="cuda", generator=gen) for i in range(6)]
+    h = pre.forward(torch.cat([th.embed(p) for p in prompts]), kv.layout(list(range(6)), [p.numel() for p in prompts]))
+    ends = torch.cumsum(torch.tensor([p.numel() for p in prompts], device="cuda"), 0) - 1
+    first = torch.nn.functional.linear(h[ends], th.w["lm_head.weight"]).argmax(-1).tolist()
+    dec = ThinkerDecoder(th, kv, spec, buckets=(1, 2, 4))
+    toks, _ = dec.step(list(range(6)), first)  # 6 rows > bucket 4: slices of 4 and 2
+    assert len(toks) == 6
+    dec.release_pads()
+    for s in range(6):
+        kv.release(s)
+    assert kv.used_pages == 0

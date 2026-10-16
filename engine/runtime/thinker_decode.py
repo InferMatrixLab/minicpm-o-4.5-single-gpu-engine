@@ -141,8 +141,23 @@ class ThinkerDecoder:
 
     PAD_RESET = 64  # scratch rows restart (and the bucket re-plans) after this many steps: they hold at most 4 pages
 
+    def release_pads(self) -> None:
+        """Free every bucket's scratch padding rows (call when no request is decoding): their pages return to the pool."""
+        for bk in self.buckets.values():
+            for p in bk.pads:
+                if p in self.kv.lengths:
+                    self.kv.release(p)
+            bk.rows = None
+
     @torch.inference_mode()
     def step(self, seqs: list[int], tokens: list[int]) -> tuple[list[int], torch.Tensor]:
+        top = max(self.buckets)
+        if len(seqs) > top:  # more rows than the largest bucket: consecutive slices
+            parts = [self._step_rows(seqs[a:a + top], tokens[a:a + top]) for a in range(0, len(seqs), top)]
+            return [t for p in parts for t in p[0]], torch.cat([p[1] for p in parts])
+        return self._step_rows(seqs, tokens)
+
+    def _step_rows(self, seqs: list[int], tokens: list[int]) -> tuple[list[int], torch.Tensor]:
         """Feed ``tokens[i]`` to sequence ``seqs[i]``; returns (greedy next tokens, hidden states of the fed tokens [n, H]).
 
         The FlashInfer plan is redone only when the rows change or a row starts a new KV page (graph mode); otherwise the

@@ -189,7 +189,7 @@ class EngineServer:
     async def metrics(self, _):
         """Engine counters for the robustness suite: live requests, KV pages, memory; {} for backends without counters."""
         stats = getattr(self.backend, "stats", None)
-        return web.json_response({**(stats() if callable(stats) else {}), "cancelled_streams": self.cancelled})
+        return web.json_response({**(stats() if callable(stats) else {}), "cancelled_streams": self.cancelled, "failed_streams": getattr(self, "failed", 0)})
 
     async def models(self, _):
         return web.json_response({"object": "list", "data": [{"id": self.model_name, "object": "model"}]})
@@ -222,7 +222,7 @@ class EngineServer:
         except StopAsyncIteration:
             first = Done()
         await resp.prepare(request)
-        done, finished = None, False
+        done, finished, failure = None, False, None
         try:
             ev = first
             while True:
@@ -239,10 +239,23 @@ class EngineServer:
             finished = True
         except StopAsyncIteration:
             done, finished = done or Done(), True
+        except ConnectionResetError:  # the client went away while we wrote (handled below as a cancellation)
+            raise
+        except Exception as e:  # the engine failed this request after the stream began: an error event, then [DONE]
+            failure, finished = e, True
         finally:
             if not finished:  # the client went away (write failed or the handler was cancelled): cancel in the engine
                 self.cancelled += 1
                 await asyncio.shield(asyncio.ensure_future(events.aclose()))
+        if failure is not None:
+            self.failed = getattr(self, "failed", 0) + 1
+            try:
+                await resp.write(f"data: {json.dumps({'error': {'message': str(failure)[:500], 'type': 'server_error', 'code': 500}})}\n\n".encode())
+                await resp.write(b"data: [DONE]\n\n")
+                await resp.write_eof()
+            except ConnectionResetError:
+                pass
+            return resp
         await resp.write(self._chunk(req, created, choices=[{"index": 0, "delta": {}, "finish_reason": done.finish_reason}]))
         if include_usage:
             await resp.write(self._chunk(req, created, choices=[], usage=done.usage))

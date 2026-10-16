@@ -134,3 +134,31 @@ def test_disconnect_cancels_the_request():
 
     asyncio.run(_with_server(b, go))
     assert b.cancelled
+
+
+class FailsMidStream(Scripted):
+    async def generate(self, req):
+        yield TextDelta("Hello ")
+        yield AudioChunk(np.zeros(SR // 4, np.float32), 0)
+        raise RuntimeError("engine error: boom")
+
+
+def test_engine_failure_mid_stream_ends_with_an_error_event():
+    """An engine failure after the stream began is an OpenAI-style error event followed by [DONE] on a cleanly ended
+    chunked body (not a cut connection); the harness client records the error and the request as invalid."""
+    adapter = get_adapter("engine")
+
+    async def go(url):
+        async with aiohttp.ClientSession() as s:
+            async with s.post(url + "/v1/chat/completions", json=adapter.build_payload(_req())) as r:
+                body = (await r.read()).decode()
+        async with make_session(connections=2) as sess:
+            trace = await send_request(sess, url, adapter, _req(), timeout_s=30)
+        return body, trace
+
+    body, trace = asyncio.run(_with_server(FailsMidStream(), go))
+    lines = [ln for ln in body.split("\n\n") if ln.strip()]
+    assert lines[-1] == "data: [DONE]"
+    err = json.loads(lines[-2][len("data: "):])
+    assert err["error"]["type"] == "server_error" and "boom" in err["error"]["message"]
+    assert not request_metrics(trace).ok

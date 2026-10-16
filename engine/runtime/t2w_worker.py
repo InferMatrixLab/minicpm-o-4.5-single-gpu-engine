@@ -203,7 +203,16 @@ def worker_main(inq, outq, cfg: dict) -> None:
     threading.Thread(target=parent_watch, args=(os.getppid(),), daemon=True).start()
     outq.put(("ready",))
     torch.cuda.set_device(0)
+    last_stats = 0.0
     while True:
+        now_s = time.monotonic()
+        if now_s - last_stats >= 1.0:  # counters for the engine's /metrics (leak checks after a drain)
+            last_stats = now_s
+            fast = bt.fast
+            outq.put(("stats", None, {"t2w_requests": len(reqs), "t2w_streams": sum(r.stream is not None for r in reqs.values()),
+                                      "t2w_cache_slots_used": (fast.pool.in_use() - fast.scratch) if fast is not None else None,
+                                      "t2w_cnn_rows_free": len(fast.cnn_free) if fast is not None else None,
+                                      "t2w_gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved())}))
         while msgs:
             m = msgs.popleft()
             kind = m[0]

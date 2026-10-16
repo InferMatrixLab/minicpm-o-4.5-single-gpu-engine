@@ -174,6 +174,7 @@ class TrackSBackend:
                 self.t2w_batch.capture_graphs(self.t2w_batch.setup(self.t2w.features(model_dir / "assets" / "HT_ref_audio.wav")))
         self.frontend = MultimodalFrontend(model_dir, device=device)
         self.device, self.max_live, self.talker_k, self.talker_k_max = device, max_live, talker_k, talker_k_max
+        self.admitted = 0
         self.profile = profile
         self.timelines: dict[str, list[tuple[str, float]]] = {}  # request id -> (event, perf_counter), when profiling
         self.tick_profile: dict[str, list] = {}  # stage -> [calls, seconds], when profiling
@@ -236,9 +237,18 @@ class TrackSBackend:
 
     async def generate(self, req: EngineRequest):
         self._check_sampling(req)
-        with self._lock:
-            if len(self.live) + self.inbox.qsize() >= self.max_live:
+        with self._lock:  # an admission slot is taken here, before any await, and given back when the request ends
+            if self.admitted >= self.max_live:
                 raise Overloaded(f"{self.max_live} live requests")
+            self.admitted += 1
+        try:
+            async for ev in self._generate(req):
+                yield ev
+        finally:
+            with self._lock:
+                self.admitted -= 1
+
+    async def _generate(self, req: EngineRequest):
         wants = req.ref_audio is not None and "audio" in req.modalities
         fut = self.pool.submit(self._prepare, req.ref_audio) if wants and self.t2wp is None else None
         prompt, embeds = await asyncio.to_thread(self._prompt, req)
@@ -267,10 +277,11 @@ class TrackSBackend:
     def stats(self) -> dict:
         import resource
 
-        return {"live": len(self.live), "queued": self.inbox.qsize(), "thinker_kv_pages_used": self.tkv.used_pages,
+        return {"live": len(self.live), "queued": self.inbox.qsize(), "admitted": self.admitted, "thinker_kv_pages_used": self.tkv.used_pages,
                 "talker_kv_pages_used": self.akv.used_pages, "thinker_kv_pages": self.tkv.num_pages, "talker_kv_pages": self.akv.num_pages,
                 "gpu_memory_allocated_bytes": int(torch.cuda.memory_allocated()), "gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
-                "rss_max_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "rss_kib": _rss_kib()}
+                "rss_max_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "rss_kib": _rss_kib(), "audio_live": len(self.audio_live),
+                **getattr(self, "t2w_stats", {})}
 
     # --- engine thread ---------------------------------------------------------------------------
     def _run(self) -> None:
@@ -278,6 +289,8 @@ class TrackSBackend:
         while True:
             try:
                 while True:
+                    if not self.live:
+                        self.tdec.release_pads()  # idle: the decoders' scratch rows give their pages back
                     lv = self.inbox.get(block=not self.live, timeout=None if not self.live else 0)
                     try:
                         self._admit(lv)
@@ -301,6 +314,8 @@ class TrackSBackend:
         torch.cuda.set_device(torch.device(self.device).index or 0)
         while True:
             busy = any(not lv.thinker_done for lv in list(self.live.values()))
+            if not busy:
+                self.tdec.release_pads()
             try:
                 while True:
                     lv = self.inbox.get(block=not busy, timeout=None if not busy else 0)
@@ -391,6 +406,9 @@ class TrackSBackend:
     def _on_t2w(self, m) -> None:
         """Receiver thread (process mode): the worker's audio, completion and errors for each request."""
         kind, seq = m[0], m[1] if len(m) > 1 else None
+        if kind == "stats":
+            self.t2w_stats = m[2]
+            return
         lv = self.audio_live.get(seq)
         if lv is None:
             return
