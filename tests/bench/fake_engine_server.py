@@ -35,11 +35,19 @@ async def chat(request: web.Request) -> web.StreamResponse:
     return resp
 
 
+async def info(_):
+    """The served identity a real engine reports, for the test candidates' config name ("fake")."""
+    from bench.cli import served_identity_expected
+
+    return web.json_response(served_identity_expected("fake"))
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1])
     DELAY = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[2] == "--delay" else 0.001
     app = web.Application()
     app.router.add_get("/health", health)
+    app.router.add_get("/info", info)
     app.router.add_post("/v1/chat/completions", chat)
     web.run_app(app, host="127.0.0.1", port=port, print=None)
     print(json.dumps({"stopped": True}))

@@ -90,6 +90,12 @@ def _verify_run(run_dir: Path, label: str, spec: dict, recorded: dict, artifacts
         gpu_ev = ((summary.get("runtime_evidence") or {}).get("gpu") or {})
         if gpu_ev.get("gpu_uuid") != spec["hardware"].get("gpu_uuid"):
             p("run executed on a different GPU than the spec declares")
+        want = ((spec.get("fingerprints") or {}).get("engine") or {}).get("served_identity")
+        if want is not None:  # engine experiments declared since the served-identity check
+            served = (summary.get("runtime_evidence") or {}).get("served_identity") or {}
+            bad = [k for k, v in want.items() if served.get(k) != v]
+            if bad:
+                p(f"the served engine identity differs from the declared one on {bad}")
     ids = [r.get("request_id") for r in reqs]
     if ids != spec["measured_ids"]:
         p(f"request records ({len(ids)}) do not match the declared ordered IDs ({len(spec['measured_ids'])})")

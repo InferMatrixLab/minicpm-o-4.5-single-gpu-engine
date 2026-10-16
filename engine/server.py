@@ -343,22 +343,34 @@ def main(argv=None) -> int:
     mod, _, cls = (spec or "engine.runtime.backend:EngineBackend").partition(":")
     backend = getattr(__import__(mod, fromlist=[cls]), cls).from_config(a.config)
     srv = EngineServer(backend)
-    srv.info = served_identity(a.config)
+    srv.info = served_identity(a.config, spec or "engine.runtime.backend:EngineBackend", backend)
     web.run_app(srv.app, host=a.host, port=a.port, print=None)
 
 
-def served_identity(config: str | None) -> dict:
-    """What this process serves, in the harness's terms (``bench.cli.resolve_engine_deploy``): the config path and bytes
-    hash and the engine source tree hash, computed at startup from the files actually loaded."""
+def served_identity(config: str | None, backend_spec: str | None = None, backend=None) -> dict:
+    """What this process serves, in the harness's terms (``bench.cli.served_identity_expected``): the config path and
+    bytes hash, the backend actually instantiated, the engine source tree hash, and where it runs (CUDA device UUID and
+    name, interpreter, engine and Token2Wav worker PIDs), computed at startup from what was actually loaded."""
     import hashlib
+    import sys
 
     from bench.fingerprint import tree_sha256
 
     root = Path(__file__).resolve().parents[1]
     raw = Path(config).read_bytes() if config else None
+    device = {}
+    try:
+        import torch
+
+        if torch.cuda.is_initialized():  # the loaded backend's device (never opens a context of its own on device 0)
+            props = torch.cuda.get_device_properties(0)
+            device = {"device_uuid": f"GPU-{props.uuid}", "device_name": props.name}
+    except Exception:  # noqa: BLE001 - CPU-only test servers report no device
+        pass
+    t2wp = getattr(backend, "t2wp", None)
     return {"config_path": str(Path(config).resolve()) if config else None, "config_sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
-            "engine_tree_sha256": tree_sha256(root, ("engine",)), "pid": os.getpid()}
-    return 0
+            "backend": backend_spec, "engine_tree_sha256": tree_sha256(root, ("engine",)), "python": sys.executable, "pid": os.getpid(),
+            "t2w_worker_pid": getattr(getattr(t2wp, "proc", None), "pid", None), **device}
 
 
 if __name__ == "__main__":

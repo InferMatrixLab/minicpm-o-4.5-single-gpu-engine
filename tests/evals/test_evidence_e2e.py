@@ -45,7 +45,8 @@ def _free_port():
 @pytest.fixture(autouse=True)
 def fake_runtime(monkeypatch):
     def fake_spec(cand, port, gpu):
-        return ServerSpec(name=cand.candidate_id, cmd=[sys.executable, str(FAKE), str(port)], port=port, gpu=gpu, env=cand.env_dict())
+        return ServerSpec(name=cand.candidate_id, cmd=[sys.executable, str(FAKE), str(port)], port=port, gpu=gpu, env=cand.env_dict(),
+                          info_path="/info", expected_identity=cli.served_identity_expected(cand.config))
 
     def fake_gpu_processes(gpu):
         out = servers.subprocess.run(["pgrep", "-f", str(FAKE)], capture_output=True, text=True).stdout.split()

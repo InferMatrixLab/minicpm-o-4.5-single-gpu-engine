@@ -23,6 +23,8 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from engine.runtime.t2w_sched import AudioState, Policy, choose_windows, plan_tick
+
 
 _FEAT = None  # per feature process: an object with what ``Token2wav._prepare_prompt`` reads
 
@@ -58,6 +60,9 @@ def _feat_init(model_dir: str, spk_threads: int, gpu_tokens: bool = True) -> Non
     opt = onnxruntime.SessionOptions()
     opt.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
     opt.intra_op_num_threads = spk_threads
+    # every voice has its own length: ONNX Runtime's per-shape memory patterns would grow the process with each new one
+    # (the per-shape FFT plans of the front end are bounded and filled before load: _warm_shape_caches)
+    opt.enable_mem_pattern = False
     h.spk_model = onnxruntime.InferenceSession(f"{model_dir}/assets/token2wav/campplus.onnx", sess_options=opt, providers=["CPUExecutionProvider"])
     _FEAT = h
 
@@ -146,10 +151,38 @@ def _trim_heap() -> None:
 SETUP_FRAME_BUDGET = 16 * 512  # rows x frames per eager batched setup call (its new caches: ~2.7 GB in FP16)
 
 
+SHAPE_WARM_LENGTHS = 1200  # distinct input lengths: above the per-shape FFT caches' capacity (~750 entries measured)
+
+
+def _warm_shape_caches(n: int = SHAPE_WARM_LENGTHS, seed: int = 0) -> None:
+    """Fill the per-shape caches of the front end to capacity before load.  The batched FFTs of the Kaldi fbank, the S3
+    log-mel and the 24 kHz mel are planned per frame count and those plans are cached (bounded: fbank alone plateaus at
+    ~36 MB after ~750 distinct lengths, then +0.4 MB per further 750), so a process seeing new voice lengths grows until
+    the caches are full; warmed here with ``n`` distinct lengths of 1.5-25 s, it stays at that size.  Numerics are
+    unaffected (the same ops, the caches only hold plans)."""
+    import numpy as np
+    import s3tokenizer
+    import torch
+    import torchaudio
+    import torchaudio.compliance.kaldi as kaldi
+    from stepaudio2.flashcosyvoice.utils.audio import mel_spectrogram
+
+    rng = np.random.default_rng(seed)
+    if 16000 not in _RESAMPLE:
+        _RESAMPLE[16000] = torchaudio.transforms.Resample(orig_freq=16000, new_freq=24000)
+    for n16 in np.linspace(int(1.5 * 16000), int(25 * 16000), n).astype(int):
+        audio = torch.from_numpy(rng.standard_normal(int(n16)).astype(np.float32) * 0.1)
+        with torch.inference_mode():
+            kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
+            s3tokenizer.log_mel_spectrogram(audio)
+            mel_spectrogram(_RESAMPLE[16000](audio.unsqueeze(0)))
+    _trim_heap()
+
+
 def _feat_warm(ref: bytes):
-    """A warm-up job that holds its process for a while, so the pool starts every process (each runs one).  (A process's
-    native memory still grows by ~35 MB over its first ~200 real voices and then stays flat; warming with a 30 s voice or
-    150 synthetic voices of 1.5-20 s did not prevent it, so neither is done.)"""
+    """Warm a feature process before load (the per-shape caches, then two real jobs); the job also holds the process
+    for a while, so the pool starts every process (each runs one)."""
+    _warm_shape_caches()
     _feat_job(ref)
     time.sleep(2.0)
     return _feat_job(ref)
@@ -164,6 +197,9 @@ class _Req:
     windows: deque = field(default_factory=deque)  # (tokens, last, index, t_ready)
     offset: int = 0
     t_open: float = 0.0
+    feat: tuple | None = None  # the resolved prompt features (on this process's stream), once ready
+    t_feat: float = 0.0  # when the loop saw them ready (setups are taken oldest first)
+    audio: AudioState = field(default_factory=AudioState)  # first-audio state and playback clock (t2w_sched)
 
 
 def worker_main(inq, outq, cfg: dict) -> None:
@@ -254,6 +290,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         return out
 
     min_batch, max_wait = cfg.get("t2w_min_batch", 8), cfg.get("t2w_max_wait_ms", 40.0) / 1000
+    policy = Policy(setup_calls_when_busy=cfg.get("t2w_setup_calls_when_busy", 1), max_decode_rows=cfg.get("t2w_max_decode_rows"),
+                    first_slack_s=cfg.get("t2w_first_slack_ms", 250.0) / 1000)
     reqs: dict[int, _Req] = {}
 
     def drop(seq: int) -> None:  # a request leaves the worker: its stream's cache slots go back (fast DiT)
@@ -289,6 +327,44 @@ def _worker_main(inq, outq, cfg: dict) -> None:
 
     threading.Thread(target=reader, daemon=True).start()
 
+    def decode_ready() -> bool:
+        """One decode call over the ready head windows (earliest playback deadline first); False if nothing ran."""
+        ready = [r for r in reqs.values() if r.stream is not None and r.windows]
+        if not ready:
+            return False
+        now = time.perf_counter()
+        heads = [r.windows[0] for r in ready]
+        if not (any(h[2] == 0 for h in heads) or any(h[1] for h in heads) or len(ready) >= min(min_batch, len(reqs))
+                or now - min(h[3] for h in heads) >= max_wait):
+            return False
+        dl = {r.seq: r.audio.deadline(r.windows[0][3], policy) for r in ready}
+        sel = [reqs[k] for k in choose_windows([(d, k) for k, d in dl.items()], policy)]
+        if prof is not None:
+            prof.write(f"{time.time():.4f} slack {len(sel)} {(min(dl[r.seq] for r in sel) - now) * 1000:.1f}\n")
+        items = []
+        for r in sel:
+            tokens, last, _, _ = r.windows.popleft()
+            items.append((r.stream, tokens, last))
+        try:
+            t0 = time.perf_counter()
+            wavs = bt.decode(items)
+            log("decode", len(items), t0)
+        except Exception as e:
+            for r in sel:
+                outq.put(("error", r.seq, f"token2wav: {type(e).__name__}: {e}"))
+                drop(r.seq)
+            return True
+        sent = time.perf_counter()
+        for r, (_, _, last), wav in zip(sel, items, wavs):
+            if len(wav):
+                outq.put(("audio", r.seq, r.offset, wav))
+                r.offset += len(wav)
+                r.audio.sent(len(wav), sent)
+            if last:
+                outq.put(("done", r.seq))
+                drop(r.seq)
+        return True
+
     def parent_watch(ppid: int):  # the engine died without a stop message (SIGKILL / SIGTERM to its PID only)
         import os
 
@@ -304,6 +380,16 @@ def _worker_main(inq, outq, cfg: dict) -> None:
     outq.put(("ready",))
     torch.cuda.set_device(0)
     last_stats = 0.0
+
+    def feature_rss() -> dict:
+        """RSS of each feature process by PID (None when unreadable); the total is None unless every process was read."""
+        n = cfg.get("feature_processes", 0)
+        if not n:
+            return {"feature_processes": 0, "feature_rss_by_pid": {}, "feature_rss_kib": None}
+        by_pid = {str(p): _rss_kib(p) for p in (getattr(pool, "_processes", None) or {})}
+        whole = len(by_pid) == n and all(v is not None for v in by_pid.values())
+        return {"feature_processes": n, "feature_rss_by_pid": by_pid, "feature_rss_kib": sum(by_pid.values()) if whole else None}
+
     while True:
         now_s = time.monotonic()
         if now_s - last_stats >= 1.0:  # counters for the engine's /metrics (leak checks after a drain)
@@ -315,8 +401,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                                       "t2w_gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
                                       "t2w_dit_graph_calls": fast.counts["graph"] if fast is not None else None,
                                       "t2w_dit_eager_calls": fast.counts["eager"] if fast is not None else None,
-                                      "t2w_rss_kib": _rss_kib(os.getpid()),
-                                      "feature_rss_kib": sum(_rss_kib(p) or 0 for p in getattr(pool, "_processes", {}) or {}) or None}))
+                                      "t2w_rss_kib": _rss_kib(os.getpid()), **feature_rss(),
+                                      "t2w_stats_time": time.time()}))  # producer time: the checker rejects stale counters
         while msgs:
             m = msgs.popleft()
             kind = m[0]
@@ -339,10 +425,7 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                 drop(m[1])
         worked = False
         with torch.inference_mode():
-            # setups of every voice whose features are ready, batched per frame bucket
-            todo = [r for r in reqs.values() if r.stream is None and r.features.done()]
-            groups: dict[int, list] = {}
-            for r in todo:
+            for r in [r for r in reqs.values() if r.stream is None and r.feat is None and r.features.done()]:
                 try:
                     if cfg.get("feature_processes", 0):  # finished on the S3 thread's stream: record them on this one
                         f = r.features.result()
@@ -354,60 +437,44 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                     outq.put(("error", r.seq, f"reference audio: {type(e).__name__}: {e}", "bad_request"))  # an input error, typed across IPC
                     drop(r.seq)
                     continue
-                groups.setdefault(next((b for b in SETUP_T if b >= f[3].shape[1]), -f[3].shape[1]), []).append((r, f))
+                r.feat, r.t_feat = f, time.perf_counter()
                 if prof is not None:
-                    prof.write(f"{time.time():.4f} features_ready 1 {(time.perf_counter() - r.t_open) * 1000:.1f}\n")
+                    prof.write(f"{time.time():.4f} features_ready 1 {(r.t_feat - r.t_open) * 1000:.1f}\n")
+            # pending setups of every voice whose features are ready, batched per frame bucket, oldest first
+            groups: dict[int, list] = {}
+            for r in sorted((r for r in reqs.values() if r.stream is None and r.feat is not None), key=lambda r: r.t_feat):
+                groups.setdefault(next((b for b in SETUP_T if b >= r.feat[3].shape[1]), -r.feat[3].shape[1]), []).append(r)
+            calls = []
             for b, items in groups.items():
                 # small groups ride the setup graphs (row limits); larger ones run as fewer, bigger eager calls bounded
                 # by a frame budget (they are compute-bound, and one call beats many for every request's first audio)
                 per = max(1, ROW_LIMIT.get(b, 2) // 2)
                 if len(items) > per:
                     per = max(per, SETUP_FRAME_BUDGET // (2 * max(abs(b), 1)))
-                for k in range(0, len(items), per):
-                    part = items[k:k + per]
-                    try:
-                        t0 = time.perf_counter()
-                        prompts = bt.setup_many([f for _, f in part])
-                        log(f"setup@{b}", len(part), t0)
-                    except Exception as e:
-                        for r, _ in part:
-                            outq.put(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
-                            drop(r.seq)
-                        continue
-                    for (r, _), p in zip(part, prompts):
-                        if r.seq in reqs:
-                            r.stream = bt.new_stream(p, noise_seed=r.noise_seed, adopt=True)
-                        else:  # closed while its setup ran
-                            bt.release_prompt(p)
-                    worked = True
-            ready = [r for r in reqs.values() if r.stream is not None and r.windows]
-            if ready:
-                now = time.perf_counter()
-                heads = [r.windows[0] for r in ready]
-                go = (any(h[2] == 0 for h in heads) or any(h[1] for h in heads) or len(ready) >= min(min_batch, len(reqs))
-                      or now - min(h[3] for h in heads) >= max_wait)
-                if go:
-                    items = []
-                    for r in ready:
-                        tokens, last, _, _ = r.windows.popleft()
-                        items.append((r.stream, tokens, last))
-                    try:
-                        t0 = time.perf_counter()
-                        wavs = bt.decode(items)
-                        log("decode", len(items), t0)
-                    except Exception as e:
-                        for r in ready:
-                            outq.put(("error", r.seq, f"token2wav: {type(e).__name__}: {e}"))
-                            drop(r.seq)
-                        wavs = []
-                    for r, (_, _, last), wav in zip(ready, items, wavs):
-                        if len(wav):
-                            outq.put(("audio", r.seq, r.offset, wav))
-                            r.offset += len(wav)
-                        if last:
-                            outq.put(("done", r.seq))
-                            drop(r.seq)
-                    worked = True
+                calls += [(items[k].t_feat, (b, items[k:k + per])) for k in range(0, len(items), per)]
+            waiting = any(r.stream is not None and r.windows and r.audio.started for r in reqs.values())
+            decode_first, run = plan_tick(waiting, calls, policy)
+            if decode_first:
+                worked |= decode_ready()
+            for b, part in run:
+                try:
+                    t0 = time.perf_counter()
+                    prompts = bt.setup_many([r.feat for r in part])
+                    log(f"setup@{b}", len(part), t0)
+                except Exception as e:
+                    for r in part:
+                        outq.put(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
+                        drop(r.seq)
+                    continue
+                for r, p in zip(part, prompts):
+                    r.feat = None
+                    if r.seq in reqs:
+                        r.stream = bt.new_stream(p, noise_seed=r.noise_seed, adopt=True)
+                    else:  # closed while its setup ran
+                        bt.release_prompt(p)
+                worked = True
+            if not decode_first:
+                worked |= decode_ready()
         if not worked and not msgs:
             wake.wait(0.002)
             wake.clear()

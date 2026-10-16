@@ -93,7 +93,8 @@ def server_spec(cand: Candidate, port: int, gpu: int) -> ServerSpec:
     elif cand.adapter == "sglang-omni":
         spec = sglang_omni_spec(port, gpu, extra)
     elif cand.adapter == "engine":
-        spec = ServerSpec(name="engine", cmd=["bash", str(ROOT / "scripts" / "serve_engine.sh"), cand.config, str(port), *extra], port=port, gpu=gpu)
+        spec = ServerSpec(name="engine", cmd=["bash", str(ROOT / "scripts" / "serve_engine.sh"), cand.config, str(port), *extra], port=port, gpu=gpu,
+                          info_path="/info", expected_identity=served_identity_expected(cand.config))
     else:
         raise ValueError(cand.adapter)
     spec.env.update(cand.env_dict())
@@ -113,9 +114,19 @@ def resolved_deploy(adapter: str, config: str, extra: list[str], env: dict) -> d
     return d
 
 
+ENGINE_DEFAULT_BACKEND = "engine.runtime.backend:EngineBackend"  # engine/server.py when the config names none
+#: Launcher flags an engine candidate's extras may not carry: the config (and its backend) are the declared identity.
+ENGINE_RESERVED_FLAGS = ("--config", "--backend")
+
+
 def engine_config_path(config: str) -> Path:
-    """The engine JSON the serving launcher reads (``scripts/serve_engine.sh``: a path, or a name under configs/engine)."""
-    return Path(config) if config.startswith("/") or config.endswith(".json") else ROOT / "configs" / "engine" / f"{config}.json"
+    """The engine JSON the serving launcher reads (``scripts/serve_engine.sh`` runs from the repository root: an absolute
+    path, a ``*.json`` path relative to the root, or a name under configs/engine)."""
+    if config.startswith("/"):
+        return Path(config)
+    if config.endswith(".json"):
+        return ROOT / config
+    return ROOT / "configs" / "engine" / f"{config}.json"
 
 
 def resolve_engine_deploy(config: str) -> dict:
@@ -125,10 +136,18 @@ def resolve_engine_deploy(config: str) -> dict:
     script = ROOT / "scripts" / "serve_engine.sh"
     path = engine_config_path(config)
     raw = path.read_bytes() if path.is_file() else None
+    settings = json.loads(raw) if raw is not None else None
     return {"engine": "engine", "config": config, "config_path": str(path), "serve_script_sha256": _sha(script.read_text()) if script.exists() else None,
             "config_sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
-            "settings": json.loads(raw) if raw is not None else None,
+            "settings": settings,
+            "backend": (settings.get("backend") or ENGINE_DEFAULT_BACKEND) if isinstance(settings, dict) else None,
             "engine_tree_sha256": tree_sha256(ROOT, ("engine",))}
+
+
+def served_identity_expected(config: str) -> dict:
+    """What a correctly launched engine server reports at ``/info`` for this declared config."""
+    r = resolve_engine_deploy(config)
+    return {k: r[k] for k in ("config_sha256", "engine_tree_sha256", "backend")}
 
 
 def deploy_files_sha256(resolved: dict) -> tuple:
@@ -139,6 +158,12 @@ def deploy_files_sha256(resolved: dict) -> tuple:
 
 def make_candidate(d: dict) -> Candidate:
     base = Candidate.from_spec(d)
+    if base.adapter == "engine":
+        bad = [x for x in base.extra if x.split("=", 1)[0] in ENGINE_RESERVED_FLAGS]
+        if bad:
+            raise ValueError(f"engine extras may not override {bad}: the config (and the backend it names) is the declared identity")
+        if not engine_config_path(base.config).is_file():
+            raise ValueError(f"engine config {base.config!r} ({engine_config_path(base.config)}) does not exist")
     resolved = resolved_deploy(base.adapter, base.config, list(base.extra), base.env_dict())
     return Candidate.from_spec(d, deploy_files_sha256(resolved))
 
@@ -182,6 +207,8 @@ def build_experiment(cell: CellSpec, kind: str, cache_policy: str, strict: bool,
     """The experiment spec.  ``frozen_refs`` (references frozen before execution, e.g. the speech Q_ref, by content hash)
     are part of it, so every run's base digest binds them and they cannot be attached afterwards."""
     spec = _build_experiment(cell, kind, cache_policy, strict, save_audio, record_raw, sglang_stream)
+    if cell.candidate.adapter == "engine":  # every run must find this identity at the served /info before load
+        spec["fingerprints"]["engine"]["served_identity"] = served_identity_expected(cell.candidate.config)
     if frozen_refs:
         spec["frozen_refs"] = dict(frozen_refs)
     return spec

@@ -7,6 +7,7 @@ Each server is its own process group and is stopped as a group.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -27,6 +28,9 @@ class ServerSpec:
     health_path: str = "/health"
     startup_timeout_s: float = 2400.0
     env: dict = field(default_factory=dict)
+    #: a server reporting its resolved identity (the engine's /info): checked against ``expected_identity`` once healthy
+    info_path: str | None = None
+    expected_identity: dict | None = None
 
     @property
     def url(self) -> str:
@@ -173,12 +177,32 @@ class Server:
                     raise RuntimeError(f"{self.spec.name} exited with {self.proc.returncode} during startup; see {self.log_path}")
                 if _healthy(self.spec.url + self.spec.health_path):
                     self.startup_s = time.monotonic() - t0
+                    problems = self.identity_problems(self.served_identity())
+                    if problems:  # before any load: the process serves something other than the declaration
+                        raise RuntimeError(f"{self.spec.name}: the served identity differs from the declaration: {problems}")
                     return self
                 time.sleep(1)
             raise RuntimeError(f"{self.spec.name} not healthy after {self.spec.startup_timeout_s}s; see {self.log_path}")
         except BaseException:
             self.stop()  # never leave stage children behind
             raise
+
+    def served_identity(self) -> dict | None:
+        """The server's own report of what it serves (``info_path``), or None for servers without one."""
+        if not self.spec.info_path:
+            return None
+        try:
+            with urllib.request.urlopen(self.spec.url + self.spec.info_path, timeout=30) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:  # noqa: BLE001 - an unreadable identity is recorded, and fails the check
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def identity_problems(self, served: dict | None) -> list[str]:
+        if not self.spec.info_path:
+            return []
+        if not served or "error" in served:
+            return [f"served identity unreadable: {served}"]
+        return [f"served {k}={served.get(k)!r} != declared {v!r}" for k, v in (self.spec.expected_identity or {}).items() if served.get(k) != v]
 
     def evidence(self) -> dict:
         """Launch inputs and the resolved runtime state of this server, captured after startup."""
@@ -187,7 +211,9 @@ class Server:
         pids = descendants(self.proc.pid) if self.proc else set()
         gpu_procs = gpu_processes(self.spec.gpu)
         on_gpu = {p["pid"] for p in gpu_procs or []}
-        return {
+        served = self.served_identity()
+        ident = {"served_identity": served, "served_identity_problems": self.identity_problems(served)} if self.spec.info_path else {}
+        return {**ident,
             "server_pid": self.proc.pid if self.proc else None,
             "server_pgid": self.pgid,
             "launch_argv": list(self.spec.cmd),

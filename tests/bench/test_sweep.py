@@ -38,7 +38,8 @@ def fake_runtime(monkeypatch):
 
     def fake_spec(cand, port, gpu):
         calls.append({"candidate_id": cand.candidate_id, "extra": list(cand.extra), "env": cand.env_dict()})
-        return ServerSpec(name=cand.candidate_id, cmd=[sys.executable, str(FAKE), str(port)], port=port, gpu=gpu, env=cand.env_dict())
+        return ServerSpec(name=cand.candidate_id, cmd=[sys.executable, str(FAKE), str(port)], port=port, gpu=gpu, env=cand.env_dict(),
+                          info_path="/info", expected_identity=cli.served_identity_expected(cand.config))
 
     def fake_gpu_processes(gpu):
         # the fake server's own processes hold a direct (non-MPS) context

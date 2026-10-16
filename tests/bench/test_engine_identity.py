@@ -69,3 +69,56 @@ def test_engine_fingerprints_and_resume_bind_the_implementation(tmp_path, monkey
     spec3 = cli.build_experiment(cell2, "performance", "restart", True, True, True, False, {"speech_qref": {"path": "/q", "sha256": "ab"}})
     assert spec3["frozen_refs"]["speech_qref"]["sha256"] == "ab" and spec_base_digest(spec3) != spec_base_digest(spec2)
     assert "frozen_refs" not in spec2
+
+
+def test_reserved_flags_missing_config_and_relative_paths(tmp_path, monkeypatch):
+    """Extras may not override --config/--backend (the launcher's argparse takes the last one); a missing config fails at
+    declaration; a relative *.json resolves against the repository root, as the launcher (which runs there) does."""
+    import pytest
+
+    root = _tree(tmp_path)
+    monkeypatch.setattr(cli, "ROOT", root)
+    for extra in (["--config", str(root / "configs/engine/head.json")], ["--config=/x.json"], ["--backend", "a:B"], ["--backend=a:B"]):
+        with pytest.raises(ValueError, match="may not override"):
+            cli.make_candidate({"adapter": "engine", "config": "head", "extra": extra})
+    with pytest.raises(ValueError, match="does not exist"):
+        cli.make_candidate({"adapter": "engine", "config": "nope"})
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    rel = cli.resolve_engine_deploy("configs/engine/head.json")
+    assert rel["config_path"] == str(root / "configs/engine/head.json") and rel["config_sha256"]
+    assert rel["backend"] == cli.ENGINE_DEFAULT_BACKEND
+    (root / "configs" / "engine" / "tb.json").write_text(json.dumps({"backend": "engine.runtime.backend_s:TrackSBackend"}))
+    assert cli.served_identity_expected("tb")["backend"] == "engine.runtime.backend_s:TrackSBackend"
+
+
+def test_served_identity_mismatch_fails_before_load(tmp_path, monkeypatch):
+    """A server whose /info differs from the declaration is stopped by Server.start before any request is sent."""
+    import socket
+
+    import pytest
+
+    import bench.servers
+    from bench.servers import Server, ServerSpec
+
+    monkeypatch.setattr(bench.servers, "gpu_memory_used_mib", lambda gpu: None)  # the fake holds no GPU memory
+
+    fake = ROOT / "tests" / "bench" / "fake_engine_server.py"
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    want = cli.served_identity_expected("fake")
+    bad = {**want, "config_sha256": "0" * 64}
+    srv = Server(ServerSpec(name="fake", cmd=[sys.executable, str(fake), str(port)], port=port, gpu=0, info_path="/info", expected_identity=bad),
+                 log_path=tmp_path / "srv.log")
+    with pytest.raises(RuntimeError, match="served identity differs"):
+        srv.start()
+    from bench.servers import _healthy
+
+    assert not _healthy(f"http://127.0.0.1:{port}/health")  # stopped before any load
+    ok = Server(ServerSpec(name="fake", cmd=[sys.executable, str(fake), str(port)], port=port, gpu=0, info_path="/info", expected_identity=want),
+                log_path=tmp_path / "srv2.log")
+    with ok:
+        ev = ok.evidence()
+    assert ev["served_identity_problems"] == [] and ev["served_identity"]["engine_tree_sha256"] == want["engine_tree_sha256"]
