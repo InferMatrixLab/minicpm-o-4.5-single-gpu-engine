@@ -30,23 +30,36 @@ audio.
 ## Scheduling (task17) and robustness evidence (AC-6)
 
 - **Playback clock** (`engine/runtime/t2w_sched.py AudioState`): the harness stall model. A stream's buffer runs out at `max(previous exhaustion, delivery) + seconds delivered`; the worker and the engine keep one per request, from the audio they hand on.
-- **Token2Wav worker** (`engine/runtime/t2w_worker.py WorkerLoop`, `t2w_policy: "edf"`):
-  - work-conserving: every ready window is decoded in the tick it becomes ready, earliest playback deadline first (`t2w_max_decode_rows` may cap a call);
-  - a setup never runs ahead of a waiting continuation window: the tick decodes first, then runs at most `t2w_setup_calls_when_busy` setup calls;
-  - setups run oldest first.
-  - `"legacy"` keeps the rounds 4–5 order (every setup first, then a decode held for `t2w_min_batch` windows or `t2w_max_wait_ms`), for comparison.
-- **Engine tick** (`backend_s.TrackSBackend._prefill_lane`, `t2w_sched.choose_prefills`): the bounded first-chunk lane.
+- **Token2Wav worker** (`engine/runtime/t2w_worker.py WorkerLoop`, `t2w_policy`):
+  - `"edf"` is work-conserving: every ready window is decoded in the tick it becomes ready, earliest playback deadline first (`t2w_max_decode_rows` may cap a call).
+  - First-chunk lane (`t2w_first_lane_slack_ms`): pending prompt setups (new requests' first audio) run before the decode while every waiting continuation window keeps that much playback slack, rechecked before each setup call. Otherwise the tick decodes first and then runs at most `t2w_setup_calls_when_busy` setups. `null` gives round 7's decode-first rule.
+  - Setups run oldest first.
+  - `"r6"` is the named round-6 control: decode first, then bounded setups, with the batching gate and round 6's clock (first audio + seconds sent). `tests/engine_api/test_t2w_worker_loop.py::test_r6_control_makes_the_round6_decisions` checks it against the round-6 policy module recovered from git.
+  - `"legacy"` is rounds 4–5: every setup first, then a decode held for `t2w_min_batch` windows or `t2w_max_wait_ms`.
+- **Engine tick** (`backend_s.TrackSBackend._tick` / `_prefill_lane`, `t2w_sched.choose_prefills` / `choose_starts`): the bounded first-chunk lane.
   - Every decoding row runs every tick.
-  - Pending Thinker prefills run oldest first within `prefill_token_budget` tokens; one that has waited `prefill_max_age_ms` always runs.
-  - While a continuing stream has less than `prefill_slack_floor_ms` of buffered playback, only aged prefills run.
-  - `null` budget and floor give the rounds 4–6 behaviour (every pending prefill each tick).
-- **Tests** (CPU): `tests/engine_api/test_t2w_sched.py`, `test_t2w_worker_loop.py` (the production loop with a fake model and clock) and `test_prefill_lane.py`.
-- **Measured (L20X, K=5, 7be6f4a; `tools/sched_compare.py` over `results/engine_sweeps/r7_sched_cmp_gpu{2,3}`)**: `track_s_fast` (this policy) against `track_s_fast_legacy` (rounds 4–5).
+  - Pending Thinker prefills run oldest first within a hard `prefill_token_budget`. Aged requests count against it too. The oldest always progresses: a prompt that alone exceeds the budget is prefilled in budget-sized chunks, with its progress kept (`LiveS.prefilled`).
+  - A request is granted Thinker KV only while the pool holds its whole lifetime (prompt + reply) beside what running requests and the decoder's padding rows may still take. Requests are granted in admission order, so the others wait (backpressure) rather than exhaust the pool.
+  - While a continuing stream has less than `prefill_slack_floor_ms` of buffered playback, only prefills that have waited `prefill_max_age_ms` run, and they run after that tick's Thinker decode and Talker step.
+  - Talker chunk starts run earliest playback deadline first within `talker_start_budget` tokens per tick, at least one. A first chunk's deadline is its admission plus `prefill_max_age_ms`.
+  - `null` budget and floor give the rounds 4–6 behaviour (every pending prefill each tick); the KV check stays.
+  - `/metrics` publishes `prefill_token_budget`, `prefill_tokens_tick_max`, `prefill_chunked_ticks`, `prefill_kv_wait_ticks` and `talker_starts_deferred_ticks`.
+- **Tests** (CPU):
+  - `tests/engine_api/test_t2w_sched.py`, `test_t2w_worker_loop.py` (the production loop with a fake model and clock) and `test_prefill_lane.py`;
+  - `test_engine_tick.py`: the actual `_tick` with timed fake stage runners and the real KV accounting. It covers aged long prefills beside continuing speech (and the same workload unbounded, which stalls), KV backpressure, repeated arrivals, cancellation during a chunked prefill, and Talker start order.
+- **Measured, round 7 (diagnostic; L20X, K=5, 7be6f4a; `tools/sched_compare.py` over `results/engine_sweeps/r7_sched_cmp_gpu{2,3}`)**: round 7's policy against `track_s_fast_legacy` (rounds 4–5).
   - Throughput and RTF are within ±2.5% at every C.
-  - The largest stall is lower (at C=32, 0.16 s against 0.27 s).
-  - TTFA is worse from C=4 up: p95 −6% at C=4, −9% at C=8, −16% at C=16 and −8% at C=32; p50 −10% at C=32.
-  - The policy buys playback continuity with first-audio latency. Which knob costs the TTFA (`t2w_setup_calls_when_busy`, the prefill slack floor or the token budget) is not yet measured.
-- **Robustness** (`tools/robustness.py`, replay with `tools/robustness_replay.py`): the module docstring lists the scenarios, the predeclared memory rule (±1% of the first sample at or after 60 s, over every later sample and the drained endpoint; CUDA allocated bytes back within 16 MiB of the warmed baseline) and the per-request artifacts (`requests.jsonl`, `wire.jsonl.gz`) the verdict can be rebuilt from.
+  - The mean run-max stall is lower: at C=32, 0.16 s against 0.27 s (absolute 0.20 against 0.34 s).
+  - TTFA latency is higher from C=4 up: p95 +6.5% at C=4, +9.5% at C=8, +19.6% at C=16 and +8.7% at C=32; p50 +11% at C=32.
+- **Round 8 ablation (tuning IDs, K=3, C=4/16/32, 55af971; `tools/sched_select.py` over `results/engine_sweeps/r8_sched_abl_gpu{2,3}`)**: oriented point ratios against `track_s_fast_legacy` (>1 better). The rule fixed in advance chose `r8_abl_f`, now frozen as `track_s_fast`: the first-chunk lane at 100 ms of slack and no prefill slack floor.
+  - F (lane 100 ms, no floor): minimum ratio 0.997 over the 12 cells. At C=32 the TTFA p50/p95 ratios are 1.021/1.005. C=32 mean run-max stall 0.100 s (absolute 0.134 s), against the legacy policy's 0.212 s (0.243 s).
+  - D (decode first, no floor): minimum 0.880, at C=32 TTFA p95 (+13.6% latency); stall 0.103 s.
+  - C (decode first, floor 300 ms): minimum 0.857, at C=16 TTFA p95 (+16.7%); stall 0.114 s.
+  - E (lane 100 ms, floor 100 ms): minimum 0.980; stall 0.147 s.
+  - B (round 6 control): minimum 0.846, at C=32 TTFA p95 (+18.2%); stall 0.134 s.
+  - Attribution: the first-chunk lane recovers the C=32 TTFA (D to F: p95 ratio 0.880 to 1.005). The slack floor costs TTFA at C=16 (D to C: p95 1.007 to 0.857) and adds stall with the lane on (F to E: 0.100 to 0.147 s). Throughput and RTF are within ±2.5% for every variant.
+  - K=3 is below the development minimum for reported comparisons; the frozen policy is measured against the round 6 control at K=5 on the evaluation IDs (`sweeps/engine/r8_sched_cmp_gpu{2,3}.json`).
+- **Robustness** (`tools/robustness.py`, replay with `tools/robustness_replay.py`): the module docstring lists the scenarios, the predeclared memory rule (±1% of the first sample at or after 60 s, over every later sample and the drained endpoint; CUDA allocated bytes back within 16 MiB of the warmed baseline) and the artifacts (`requests.jsonl` with every request, cancellation and raw observation; `wire.jsonl.gz`). The replay rebuilds every scenario's verdict and the overall verdict from them with the same functions the live run uses.
 
 ## Environments
 

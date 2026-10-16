@@ -1,0 +1,37 @@
+{
+ "description": "Round-8 task17 comparison (predeclared in round-8-contract.md) on GPU3: the frozen policy (track_s_fast, chosen on tuning IDs by the contract's rule) against the named round-6 control (track_s_fast_r6), same revision, K=5, eval IDs; both configurations at each C on the same GPU",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 3,
+ "port": 18923,
+ "run_order_seed": 20261813,
+ "concurrencies": [
+  2,
+  8,
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r6",
+   "label": "r6-control",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  },
+  {
+   "adapter": "engine",
+   "config": "track_s_fast",
+   "label": "r8-frozen",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

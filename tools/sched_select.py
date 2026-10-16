@@ -8,6 +8,10 @@ TTFA p50, TTFA p95, throughput and RTF mean.  Rule: one configuration across all
 over C and the four metrics, among candidates whose every request is valid and whose C=32 mean run-max stall is at most
 the reference's; ties within 0.01 go to the lower C=32 mean run-max stall; if no candidate qualifies, the lowest C=32
 mean run-max stall.  Writes ``sched_select.json`` into the first sweep directory.
+
+The contract predeclares K=3 per cell, below ``bench.stats``' development minimum (K=5), so each side is checked with
+``validate_cell_runs`` (exactly run1..runK, valid, one configuration and workload) and the two sides' workloads are
+compared here; the rule uses only the point ratios, and the K=3 lower bounds are printed as indicative only.
 """
 
 import argparse
@@ -18,11 +22,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bench.stats import estimate  # noqa: E402
+from bench.stats import WORKLOAD_FIELDS, StatisticsInputError, _estimate_unchecked, validate_cell_runs  # noqa: E402
 from bench.verify import verify_cell  # noqa: E402
 
 METRICS = {"ttfa_p50": "ttfa_p50_s", "ttfa_p95": "ttfa_p95_s", "throughput": "throughput_frames_s", "rtf_mean": "rtf_mean"}
 TIE = 0.01
+
+
+def ratio(new: dict, ref: dict, metric: str):
+    ni = validate_cell_runs(new["runs"], new["k"], "candidate")
+    bi = validate_cell_runs(ref["runs"], ref["k"], "reference")
+    for f in WORKLOAD_FIELDS:
+        if ni[f] != bi[f]:
+            raise StatisticsInputError(f"candidate and reference differ on {f}: {ni[f]} vs {bi[f]}")
+    return _estimate_unchecked(new["runs"], ref["runs"], metric)
 
 
 def main(argv=None) -> int:
@@ -58,7 +71,7 @@ def main(argv=None) -> int:
             row["valid"] &= new["valid"]
             row["ratios"][c] = {}
             for name, metric in METRICS.items():
-                e = estimate(new["runs"], ref["runs"], metric, final=False, new_k=new["k"], base_k=ref["k"])
+                e = ratio(new, ref, metric)
                 row["ratios"][c][name] = {"point": e.point, "lcb95": e.lcb95}
         row["min_point"] = min((x["point"] for r in row["ratios"].values() for x in r.values()), default=None)
         sc = cells.get((lab, a.stall_c))
