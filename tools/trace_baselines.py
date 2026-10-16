@@ -209,8 +209,9 @@ def sglang_stage_rows(event_dir: Path) -> list[dict]:
     return out
 
 
-def kernel_summary(trace_files: list[str], audio_s: float) -> dict:
-    """GPU kernel time and CPU launch-side time per traced process from Chrome traces."""
+def kernel_summary(trace_files: list[str], audio_s: float, root: Path | None = None) -> dict:
+    """GPU kernel time and CPU launch-side time per traced process from Chrome traces, keyed by each trace's path under
+    ``root`` (stage processes write files with the same name, e.g. vllm-omni's per-stage trace_rank0.json.gz)."""
     procs = {}
     for f in trace_files:
         op = gzip.open if f.endswith(".gz") else open
@@ -222,7 +223,10 @@ def kernel_summary(trace_files: list[str], audio_s: float) -> dict:
                      and any(s in e.get("name", "") for s in ("Launch", "GraphLaunch", "Memcpy"))) / 1e6
         kts = [(e["ts"], e["ts"] + e.get("dur", 0)) for e in evs if e.get("ph") == "X" and e.get("cat") == "kernel"]
         span = (max(b for _, b in kts) - min(a for a, _ in kts)) / 1e6 if kts else 0.0
-        procs[Path(f).name] = {"gpu_kernel_s": gpu, "cpu_launch_s": launch, "kernel_span_s": span,
+        key = str(Path(f).relative_to(root)) if root is not None else str(f)
+        if key in procs:
+            raise ValueError(f"two traces map to {key}")
+        procs[key] = {"gpu_kernel_s": gpu, "cpu_launch_s": launch, "kernel_span_s": span,
                                "gpu_s_per_audio_s": gpu / audio_s if audio_s else None, "kernels": len(kts)}
     return {"audio_s": audio_s, "processes": procs, "gpu_s_per_audio_s_total": (sum(p["gpu_kernel_s"] for p in procs.values()) / audio_s) if audio_s else None}
 
@@ -241,7 +245,7 @@ def cmd_extract(a) -> int:
     summ = {"stack": meta["stack"], "concurrency": meta["concurrency"], "client_timing_window": client,
             "timing_window_frames_s": 25 * sum(r["duration_s"] for r in timing["requests"] if r["ok"]) / timing["wall_s"],
             "stages": {k: _pct([r.get(k) for r in rows]) for k in keys}, "per_request": rows,
-            "kernel_window": kernel_summary(files, audio) if files else {"error": "no torch traces found"}}
+            "kernel_window": kernel_summary(files, audio, d / "torch") if files else {"error": "no torch traces found"}}
     (d / "trace_summary.json").write_text(json.dumps(summ, indent=1))
     print(json.dumps({k: v for k, v in summ.items() if k != "per_request"}, indent=1)[:4000])
     return 0
