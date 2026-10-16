@@ -57,3 +57,18 @@ Under load the engine loop is launch-bound Python on both sides, and the two thr
 
 These numbers are indicative only. They were measured on a GPU shared with a scoring job. The baseline-equivalent
 measurement is the harness sweep (task13/task17).
+
+## Processes per engine (round 5)
+
+One engine on one GPU runs 7 GPU processes (headline `track_s_fast`). Each was kept only where a measurement shows it is needed:
+
+| Process | GPU memory (L20X) | Why it exists |
+|---|---|---|
+| Engine: API server, Thinker, Talker | ~57 GB | weights, paged KV, graphs |
+| Token2Wav worker | ~33 GB | flow (fast DiT) and HiFT, 65k-slot cache pool. In the engine process, its launch-heavy Python thread contends for the GIL with the Thinker/Talker loop. A separate process under MPS raised C=8 from 374–419 to 525–699 frames/s (round 4). |
+| 4 feature processes | ~1.3 GB each | CAMPPlus (CPU ONNX) plus the S3 tokenizer (GPU) for each reference voice, outside the worker's GIL. 4 match 12 (C=32 smoke: 1873 vs 1813 frames/s, TTFA 0.87 vs 0.97 s; C=1 equal), and 24 were no faster than 12: the wait for a voice is the worker loop, not the pool. Running the S3 tokenizer in a thread of the worker, with CPU-only feature processes and no extra CUDA context, measured slower (C=32 1638 frames/s, TTFA 1.0 s; C=1 TTFA +20 ms), so it is an option (`feature_gpu_tokens: false`), not the default. |
+| CUDA MPS server | <0.1 GB | lets the engine and the worker run kernels concurrently |
+
+The previous headline used 12 feature processes (15 GPU processes, ~10 GB more). Feature processes return freed heap to the OS after each job (`malloc_trim`), because their RSS crept up during a 30-minute soak.
+
+The codec tokens reach the worker as Python lists through a multiprocessing queue, not by a GPU-resident handoff. This was measured adequate (a window is 25 integers) but it is not the plan's planned transport (task10).
