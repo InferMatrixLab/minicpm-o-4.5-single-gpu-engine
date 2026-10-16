@@ -1,0 +1,31 @@
+{
+ "description": "L20X evaluation of the engine headline candidate (Track S, fast DiT, Token2Wav worker under MPS) on GPU3",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "gpu": 3,
+ "port": 18913,
+ "k": 5,
+ "run_order_seed": 20261603,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1,
+  2,
+  4,
+  8,
+  16,
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast",
+   "label": "track-s-fast-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
