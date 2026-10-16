@@ -377,3 +377,25 @@ def test_fast_dit_matches_eager(graphs, first_chunk):
             assert x.shape == y.shape
             errs.append(float((x - y).norm() / y.norm()))
     assert max(errs) <= 5e-3, errs  # AC-3.4 FP16 bound
+
+
+def test_overlapped_prompt_features_equal_reference():
+    """The feature process's ``prepare_prompt_overlapped`` (CAMPPlus overlapped, cached resampler) returns exactly the
+    reference ``Token2wav._prepare_prompt`` tensors."""
+    import types
+
+    import onnxruntime
+    import s3tokenizer
+    from stepaudio2.token2wav import Token2wav
+
+    from engine.runtime.t2w_worker import prepare_prompt_overlapped
+
+    d = MODEL / "assets" / "token2wav"
+    h = types.SimpleNamespace(audio_tokenizer=s3tokenizer.load_model(str(d / "speech_tokenizer_v2_25hz.onnx")).cuda().eval(),
+                              spk_model=onnxruntime.InferenceSession(str(d / "campplus.onnx"), providers=["CPUExecutionProvider"]),
+                              flow=types.SimpleNamespace(up_rate=2))
+    for wav in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav"):
+        with torch.inference_mode():
+            a, b = Token2wav._prepare_prompt(h, str(wav)), prepare_prompt_overlapped(h, str(wav))
+            for x, y in zip(a, b):
+                assert torch.equal(x, y)

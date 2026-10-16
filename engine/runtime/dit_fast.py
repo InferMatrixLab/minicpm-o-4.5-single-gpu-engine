@@ -32,12 +32,22 @@ from engine.runtime.dit_kernels import conv_gather, ln_mish, ln_mod, qk_norm_sca
 
 TRIM_SUFFIX = 100
 ROW_BUCKETS = (2, 4, 8, 16, 32, 64)  # request rows (2 x requests), excluding the two pad rows
-MAX_GRAPH_T = 56  # frames per row up to which a call can replay a graph (steady, first and final windows)
+MAX_GRAPH_T = 56  # frames per row of steady, first and final windows
+SETUP_TOKENS = 4096  # small row buckets also cover prompt setups (whole prompts, both CFG halves) up to this many tokens
+SETUP_ROWS = 8
+
+
+def bucket_top(rb: int) -> int:
+    """Most tokens (both halves) a row bucket's graphs take."""
+    return max(rb * MAX_GRAPH_T, SETUP_TOKENS if rb <= SETUP_ROWS else 0)
+
+
+TOP = max(bucket_top(rb) for rb in ROW_BUCKETS)
 
 
 def token_buckets(rb: int) -> list[int]:
-    """Token buckets (both halves) of a row bucket: multiples of 256 (128 below 512) up to rb * MAX_GRAPH_T."""
-    top = rb * MAX_GRAPH_T
+    """Token buckets (both halves) of a row bucket: multiples of 256 (128 below 512) up to ``bucket_top(rb)``."""
+    top = bucket_top(rb)
     out = [b for b in list(range(128, 512, 128)) + list(range(512, top, 256)) if b < top]
     return out + [top]
 
@@ -95,8 +105,7 @@ class FastDiT:
         self.dtype = next(est.parameters()).dtype
         assert self.dtype == torch.float16, "the fast DiT runs the FP16 flow"
         self.device, self.use_graphs = device, use_graphs
-        top = ROW_BUCKETS[-1] * MAX_GRAPH_T
-        self.scratch = top  # slots reserved for pad-row tokens (never attended by real rows)
+        self.scratch = TOP  # slots reserved for pad-row tokens (never attended by real rows)
         self.pool = SlotPool(n_slots + self.scratch, steps, self.depth, self.heads, self.hd, self.dtype, device)
         self.pad_slots = self.pool.alloc(self.scratch)
         n_rs = 2 * max_streams + ROW_BUCKETS[-1] + 2
@@ -187,7 +196,7 @@ class FastDiT:
 
     # --- planning -----------------------------------------------------------------------------------------------------
     def _bucket(self, n_rows: int, n_tok: int, max_t: int):
-        if not self.use_graphs or max_t > MAX_GRAPH_T or n_rows > ROW_BUCKETS[-1]:
+        if not self.use_graphs or n_rows > ROW_BUCKETS[-1]:
             return None
         rb = next(b for b in ROW_BUCKETS if b >= n_rows)
         nb = next((b for b in token_buckets(rb) if b >= n_tok), None)
@@ -277,7 +286,6 @@ class FastDiT:
             import flashinfer
 
             R = rb + 2
-            top = ROW_BUCKETS[-1] * MAX_GRAPH_T
             if "kv_idx" not in self._gbuf:
                 self._gbuf["kv_idx"] = torch.zeros(self._kv_capacity(), dtype=torch.int32, device=self.device)
             ws = torch.empty(256 << 20, dtype=torch.uint8, device=self.device)
@@ -287,7 +295,7 @@ class FastDiT:
                 paged_kv_last_page_len_buf=torch.ones(R, dtype=torch.int32, device=self.device))
             # graph mode fixes its limits at the first plan: make it the largest (tokens and cached keys) this bucket
             # will see; later plans must fit within it
-            nb, cap = rb * MAX_GRAPH_T, self._kv_capacity()
+            nb, cap = bucket_top(rb), self._kv_capacity()
             qo = torch.tensor([0] * (rb // 2 + 1) + [nb // 2] * (rb // 2 + 1) + [nb], dtype=torch.int32, device=self.device)
             kv = torch.tensor([0] * (rb // 2 + 1) + [cap // 2] * (rb // 2 + 1) + [cap], dtype=torch.int32, device=self.device)
             idx = torch.tensor(self.pad_slots, dtype=torch.int32, device=self.device).repeat(cap // len(self.pad_slots) + 1)[:cap]
@@ -296,11 +304,11 @@ class FastDiT:
         return self._gw[rb]
 
     def _kv_capacity(self) -> int:
-        return 2 * ROW_BUCKETS[-1] * 1400 + ROW_BUCKETS[-1] * MAX_GRAPH_T
+        return 2 * ROW_BUCKETS[-1] * 1400 + TOP
 
     def _static_bufs(self, rb: int, nb: int) -> dict:
         R, half = rb + 2, nb // 2
-        top = ROW_BUCKETS[-1] * MAX_GRAPH_T
+        top = TOP
         if "x0" not in self._gbuf:
             g = self._gbuf
             g["x0"] = torch.zeros(top // 2, self.mel, dtype=self.dtype, device=self.device)

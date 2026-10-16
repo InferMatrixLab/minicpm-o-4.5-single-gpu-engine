@@ -103,7 +103,7 @@ class TrackSBackend:
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
                  feature_processes: int = 0, thinker_fp8: bool = False, talker_k_max: int = 4, prefill_graphs: bool = False,
                  t2w_euler_graphs: bool = False, split_threads: bool = False, t2w_fast_dit: bool = False, t2w_fast_slots: int = 49152,
-                 profile: bool = False):
+                 t2w_mps_sm_percent: int = 0, profile: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -165,7 +165,7 @@ class TrackSBackend:
                                           "t2w_max_wait_ms": t2w_max_wait_ms, "feature_workers": feature_workers,
                                           "profile_path": t2w_profile_path, "feature_processes": feature_processes,
                                           "t2w_euler_graphs": t2w_euler_graphs, "t2w_fast_dit": t2w_fast_dit,
-                                          "t2w_fast_slots": t2w_fast_slots}, self._on_t2w)
+                                          "t2w_fast_slots": t2w_fast_slots, "mps_sm_percent": t2w_mps_sm_percent}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
