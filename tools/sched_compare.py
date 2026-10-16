@@ -4,9 +4,11 @@
 
 Each pair of cells (same C, labels NEW_LABEL and BASE_LABEL) is verified from its artifacts and compared with
 ``bench.stats.compare_cells`` (run-level bootstrap of the oriented ratio NEW over BASE, >1 is better for NEW; development
-mode, the declared K).  Also the means over the measured runs of the stall and inter-chunk gap metrics, and, when an
-envelope is given, both cells' point and lower bound against the envelope's winner cell.  Writes ``sched_compare.json``
-into the first sweep directory.
+mode, the declared K), with the change in the metric itself (``change``: for latency-type metrics -- TTFA, RTF -- NEW's
+latency over BASE's minus one, i.e. 1/ratio - 1; for throughput ratio - 1).  Also, per cell, the mean over the measured
+runs of each run's maximum stall / inter-chunk gap ("mean run-max") and the largest over all its runs ("abs max"), and,
+when an envelope is given, both cells' point and lower bound against the envelope's winner cell (diagnostic: the
+envelope's recorded identity is not reconciled here).  Writes ``sched_compare.json`` into the first sweep directory.
 """
 
 import argparse
@@ -21,6 +23,7 @@ from bench.stats import compare_cells  # noqa: E402
 
 METRICS = {"throughput": "throughput_frames_s", "ttfa_p50": "ttfa_p50_s", "ttfa_p95": "ttfa_p95_s", "rtf_mean": "rtf_mean"}
 EXTRA = ("stall_mean_s", "stall_max_s", "inter_chunk_gap_p95_s", "inter_chunk_gap_max_s", "e2e_p95_s")
+LOWER_IS_BETTER = ("ttfa_p50", "ttfa_p95", "rtf_mean")
 
 
 def _cells(sweeps):
@@ -32,9 +35,12 @@ def _cells(sweeps):
     return out
 
 
+def _runs(cell, key):
+    return [r[key] for r in json.loads((cell / "result.json").read_text())["measured_runs"]]
+
+
 def _mean(cell, key):
-    res = json.loads((cell / "result.json").read_text())
-    return statistics.fmean(r[key] for r in res["measured_runs"])
+    return statistics.fmean(_runs(cell, key))
 
 
 def main(argv=None):
@@ -55,7 +61,8 @@ def main(argv=None):
         row = {"C": c, "new_cell": str(new), "base_cell": str(base), "new_vs_base": {}, "means": {}, "vs_envelope": {}}
         for name, metric in METRICS.items():
             e = compare_cells(new, base, metric, final=False)
-            row["new_vs_base"][name] = {"point": round(e.point, 4), "lcb95": round(e.lcb95, 4), "k": [e.k_new, e.k_base]}
+            change = (1 / e.point - 1) if name in LOWER_IS_BETTER else (e.point - 1)
+            row["new_vs_base"][name] = {"point": round(e.point, 4), "lcb95": round(e.lcb95, 4), "change": round(change, 4), "k": [e.k_new, e.k_base]}
             row["means"][name] = {a.new: _mean(new, metric), a.base: _mean(base, metric)}
             if env:
                 ref = env["cells"][str(c)][name]["cell"]
@@ -63,7 +70,8 @@ def main(argv=None):
                                             for lab, x in ((a.new, compare_cells(new, ref, metric, final=False)),
                                                            (a.base, compare_cells(base, ref, metric, final=False)))}
         for k in EXTRA:
-            row["means"][k] = {a.new: _mean(new, k), a.base: _mean(base, k)}
+            row["means"][k] = {a.new: _mean(new, k), a.base: _mean(base, k)}  # for *_max_s: the mean run-max
+        row["abs_max"] = {k: {a.new: max(_runs(new, k)), a.base: max(_runs(base, k))} for k in ("stall_max_s", "inter_chunk_gap_max_s")}
         rows.append(row)
         print(f"C={c}")
         for name in METRICS:
@@ -72,8 +80,11 @@ def main(argv=None):
             if env:
                 v = row["vs_envelope"][name]
                 env_s = "  vs envelope " + ", ".join(f"{lab} {v[lab]['point']}/{v[lab]['lcb95']}" for lab in (a.new, a.base))
-            print(f"  {name:<10} {a.new}/{a.base} point {r['point']:<7} lcb95 {r['lcb95']:<7} means {m[a.new]:.4g} vs {m[a.base]:.4g}{env_s}")
-        print("  " + "  ".join(f"{k} {row['means'][k][a.new]:.3f}/{row['means'][k][a.base]:.3f}" for k in EXTRA))
+            print(f"  {name:<10} {a.new}/{a.base} point {r['point']:<7} lcb95 {r['lcb95']:<7} change {100 * r['change']:+.1f}% "
+                  f"means {m[a.new]:.4g} vs {m[a.base]:.4g}{env_s}")
+        print("  mean run-max / abs max: " + "  ".join(f"{k} {row['means'][k][a.new]:.3f}/{row['means'][k][a.base]:.3f} "
+                                                      f"(abs {row['abs_max'][k][a.new]:.3f}/{row['abs_max'][k][a.base]:.3f})"
+                                                      for k in ("stall_max_s", "inter_chunk_gap_max_s")))
     out = Path(a.sweeps[0]) / "sched_compare.json"
     out.write_text(json.dumps({"new": a.new, "base": a.base, "sweeps": a.sweeps, "envelope": a.envelope, "rows": rows}, indent=1))
     return 0

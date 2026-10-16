@@ -34,9 +34,9 @@ class Backend:
     alloc_leak (32 MiB of live CUDA tensors kept per request inside an unchanged reservation) |
     warm_reserved (a large fixed reservation; allocations return) | spike (engine RSS +5% for a few readings)."""
 
-    def __init__(self, mode="ok", frames=None, stats_fault=None, delay=0.01, procs=2):
+    def __init__(self, mode="ok", frames=None, stats_fault=None, delay=0.01, procs=2, max_live=None):
         self.mode, self.frames, self.n, self.live, self.fault, self.delay = mode, frames or [33], 0, 0, stats_fault, delay
-        self.reads, self.procs = 0, procs
+        self.reads, self.procs, self.chunked, self.max_live = 0, procs, 0, max_live
 
     def stats(self):
         import time
@@ -51,7 +51,8 @@ class Backend:
              "feature_rss_kib": None if self.fault == "child_missing" else 500 * self.procs,
              "gpu_memory_allocated_bytes": 10 << 30, "gpu_memory_reserved_bytes": (40 if self.fault == "warm_reserved" else 20) << 30,
              "t2w_gpu_memory_allocated_bytes": (5 << 30) + (self.n * (32 << 20) if self.fault == "alloc_leak" else 0),
-             "t2w_gpu_memory_reserved_bytes": 30 << 30, "t2w_stats_time": time.time() - (60 if self.fault == "stale" else 0)}
+             "t2w_gpu_memory_reserved_bytes": 30 << 30, "t2w_stats_time": time.time() - (60 if self.fault == "stale" else 0),
+             "prefill_token_budget": 2048, "prefill_tokens_tick_max": 2048 if self.chunked else 64, "prefill_chunked_ticks": self.chunked}
         if self.fault == "omit":
             del m["t2w_cnn_rows_free"]
         if self.fault == "null":
@@ -59,9 +60,16 @@ class Backend:
         return m
 
     async def generate(self, req):
+        if self.max_live is not None and self.live >= self.max_live:
+            from engine.server import Overloaded
+
+            raise Overloaded("engine at its admission limit")
         self.n += 1
         self.live += 1
         frames = self.frames[(self.n - 1) % len(self.frames)]  # this request's frame count, fixed at its start
+        prompt = max(5, len(str(req.messages)) // 4)  # about a token per four characters
+        if prompt > 2048:
+            self.chunked += 1  # a prompt over the budget is prefilled in chunks
         try:
             yield TextDelta("Hello.")
             x = (0.2 * np.sin(np.arange(SR // 4) * 0.05)).astype(np.float32)
@@ -71,7 +79,7 @@ class Backend:
                 if self.mode == "error_after_audio":
                     raise RuntimeError("engine error: boom")
                 yield AudioChunk(x, len(x) // 2 if self.mode == "overlap" else len(x))
-            yield Done("stop", {"prompt_tokens": 5, "completion_tokens": 2, "audio_frames": frames})
+            yield Done("stop", {"prompt_tokens": prompt, "completion_tokens": 2, "audio_frames": frames})
         finally:
             self.live -= 1
 
@@ -302,7 +310,7 @@ def test_replay_rebuilds_a_full_run_and_rejects_edits(monkeypatch, tmp_path):
         await srv.start_server()
         try:
             return await rb.run(SimpleNamespace(url=f"http://127.0.0.1:{srv.port}", out=str(tmp_path), config=cfg, gpu_uuid="GPU-a", acceptance=False,
-                                                sustain_min=0.03, concurrency=2, overload=4, eos_n=6))
+                                                sustain_min=0.03, concurrency=2, overload=4, eos_n=6, no_long_prefill=True))
         finally:
             await srv.close()
     rep = asyncio.run(go())
@@ -312,7 +320,7 @@ def test_replay_rebuilds_a_full_run_and_rejects_edits(monkeypatch, tmp_path):
     assert ok["rebuilt"]["sustain"]["requests"] == rep["sustain"]["requests"] and ok["rebuilt"]["eos_boundary"]["n"] == 6
     # an edited stored metric: the replay of its wire bytes disagrees (and the artifact hash changed)
     lines = (tmp_path / "requests.jsonl").read_text().splitlines()
-    i = next(k for k, line in enumerate(lines) if '"scenario": "sustain"' in line)
+    i = next(k for k, line in enumerate(lines) if '"scenario": "sustain"' in line and '"record": "request"' in line)
     r = json.loads(lines[i])
     r["metrics"]["stall_s"] += 1.0
     lines[i] = json.dumps(r)
@@ -327,3 +335,202 @@ def test_replay_rebuilds_a_full_run_and_rejects_edits(monkeypatch, tmp_path):
     assert any("no wire record" in p for p in rr.verify(tmp_path)["problems"])
     (tmp_path / "requests.jsonl").unlink()
     assert not rr.verify(tmp_path)["ok"]
+
+
+# --- B17c: the replay rebuilds the whole verdict; consistent edits (hashes recomputed) are still caught -------------------
+def _full_run(monkeypatch, out, **kw):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(rb, "gpu_query", lambda u: {"sku": "X", "uuid": u, "driver": "1", "index": 0, "memory_used_mib": 100.0} if u else None)
+    monkeypatch.setattr(rb, "LONG_N", 2)
+    monkeypatch.setattr(rb, "LONG_STREAMS", 2)
+    monkeypatch.setattr(rb, "LONG_PROMPT_WORDS", 2500)
+    monkeypatch.setattr(rb, "REF_S", 0.5)
+    monkeypatch.setattr(rb, "SAMPLE_S", 0.3)
+    be = Backend(delay=0.3, procs=4, frames=[32, 33, 34, 40], max_live=64)  # replies long enough for a client to leave mid-stream
+    cfg = str(ROOT / "configs" / "engine" / "track_s_fast.json")
+
+    async def go():
+        from engine.server import served_identity
+
+        es = EngineServer(be)
+        es.info = {**served_identity(cfg, "engine.runtime.backend_s:TrackSBackend"), "device_uuid": "GPU-a"}
+        srv = TestServer(es.app)
+        await srv.start_server()
+        try:
+            return await rb.run(SimpleNamespace(url=f"http://127.0.0.1:{srv.port}", out=str(out), config=cfg, gpu_uuid="GPU-a", acceptance=False,
+                                                sustain_min=0.05, concurrency=2, overload=100, eos_n=6, no_long_prefill=False, **kw))
+        finally:
+            await srv.close()
+    return asyncio.run(go())
+
+
+def _mutate(src, dst, records=None, wires=None, report=None):
+    """A copy of a run with records / wire records / the report edited and every hash recomputed (a consistent edit)."""
+    import gzip
+    import json
+    import shutil
+
+    shutil.copytree(src, dst)
+    recs = [json.loads(x) for x in (dst / "requests.jsonl").read_text().splitlines() if x.strip()]
+    with gzip.open(dst / "wire.jsonl.gz", "rt") as f:
+        ws = [json.loads(x) for x in f.read().splitlines() if x.strip()]
+    recs = records(recs) if records else recs
+    ws = wires(ws) if wires else ws
+    (dst / "requests.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    with gzip.open(dst / "wire.jsonl.gz", "wt") as f:
+        f.write("".join(json.dumps(w) + "\n" for w in ws))
+    rep = json.loads((dst / "robustness.json").read_text())
+    rep["artifacts"].update({"records": len(recs), "requests.jsonl": rb._sha_file(dst / "requests.jsonl"), "wire.jsonl.gz": rb._sha_file(dst / "wire.jsonl.gz")})
+    if report:
+        report(rep)
+    (dst / "robustness.json").write_text(json.dumps(rep))
+    return dst
+
+
+def test_replay_rebuilds_every_verdict_and_rejects_consistent_edits(monkeypatch, tmp_path):
+    import tools.robustness_replay as rr
+
+    src = tmp_path / "run"
+    rep = _full_run(monkeypatch, src)
+    assert rep["overall"], {k: v for k, v in rep["passed"].items() if not v}
+    assert rep["long_prefill"]["passed"] and rep["cancel"]["cancelled_with_audio"] == rep["cancel"]["cancelled_sent"] > 0
+    ok = rr.verify(src)
+    assert ok["ok"], ok["problems"][:5]
+    assert set(ok["rebuilt"]) >= {"mixed", "cancel", "eos_boundary", "fallback", "overload", "sustain", "long_prefill", "overall"}
+
+    def edit_snapshot(scen, label, fn, which=0):
+        def f(recs):
+            hits = [r for r in recs if r.get("record") == "snapshot" and r["scenario"] == scen and r["label"] == label]
+            fn(hits[which]["m"])
+            return recs
+        return f
+
+    cases = {
+        # a memory sample 5% higher in the middle of the load: the envelope fails, the report says it passed
+        "sample": dict(records=edit_snapshot("sustain", "sample", lambda m: m.update(rss_kib=m["rss_kib"] * 1.05), which=-1)),
+        # the drained endpoint kept 100 MiB of live allocations
+        "endpoint": dict(records=edit_snapshot("sustain", "endpoint", lambda m: m.update(t2w_gpu_memory_allocated_bytes=m["t2w_gpu_memory_allocated_bytes"] + (100 << 20)))),
+        # a fallback whose before-reading lacks the eager-call counter (a missing counter is not zero)
+        "fallback": dict(records=edit_snapshot("fallback", "before", lambda m: m.pop("t2w_dit_eager_calls"))),
+        # another engine was served
+        "identity": dict(records=edit_snapshot("run", "identity", lambda m: m["served"].update(config_sha256="0" * 64))),
+        # an acceptance label on a short development run
+        "short_acceptance": dict(records=edit_snapshot("run", "workload", lambda m: m.update(mode="acceptance")), report=lambda r: r.update(mode="acceptance")),
+    }
+
+    def omit_fallback(recs):
+        return [r for r in recs if r["scenario"] != "fallback" and not (r.get("label") == "phase" and r["m"]["name"] == "fallback")]
+
+    cases["omitted_phase"] = dict(records=omit_fallback, wires=lambda ws: [w for w in ws if w["scenario"] != "fallback"],
+                                  report=lambda r: (r.pop("fallback"), r["passed"].pop("fallback"), r.update(mode="acceptance")))
+
+    def pause(recs, ws):  # one client waits 1 s before its next request: both its record and wire move consistently
+        i = [k for k, r in enumerate(recs) if r["scenario"] == "sustain" and r["record"] == "request" and r.get("client") == 0][1]
+        rid = recs[i]["request_id"]
+        for x in [recs[i]] + [w for w in ws if w["request_id"] == rid and w["scenario"] == "sustain"]:
+            x["t_dispatch"] += 1.0
+            x["t_complete"] += 1.0
+            if "trace" in x:
+                x["trace"]["t_dispatch"] += 1.0
+        return recs, ws
+
+    box = {}
+    cases["refill_pause"] = dict(records=lambda recs: box.setdefault("r", recs), wires=lambda ws: pause(box["r"], ws)[1])
+
+    def skew(recs):
+        r = next(r for r in recs if r["scenario"] == "sustain" and r["record"] == "request")
+        r["t_complete"] += 0.25
+        return recs
+
+    cases["timestamp"] = dict(records=skew)
+    cases["extra_wire"] = dict(wires=lambda ws: ws + [ws[-1]])
+    cases["duplicate"] = dict(records=lambda recs: recs[:3] + [next(r for r in recs if r["scenario"] == "mixed")] + recs[3:])
+    for name, kw in cases.items():
+        res = rr.verify(_mutate(src, tmp_path / name, **kw))
+        assert not res["ok"], name
+    # the specific failures are named
+    assert any("rss_kib" in p for p in rr.verify(tmp_path / "sample")["problems"])
+    assert any("fallback" in p for p in rr.verify(tmp_path / "fallback")["problems"])
+    assert any("identity.matches" in p for p in rr.verify(tmp_path / "identity")["problems"])
+    assert any("geometry" in p or "overall" in p for p in rr.verify(tmp_path / "short_acceptance")["problems"])
+    assert any("without fallback" in p or "overall" in p for p in rr.verify(tmp_path / "omitted_phase")["problems"])
+    assert any("continuity" in p or "max_refill_gap" in p for p in rr.verify(tmp_path / "refill_pause")["problems"])
+    assert any("t_complete" in p for p in rr.verify(tmp_path / "timestamp")["problems"])
+    assert any("without a request record" in p for p in rr.verify(tmp_path / "extra_wire")["problems"])
+    assert any("duplicate" in p for p in rr.verify(tmp_path / "duplicate")["problems"])
+
+
+def test_live_verdicts_reject_the_review_probes():
+    """Fallback with a missing before-counter; an acceptance report holding only one scenario."""
+    rec = {"record": "request", "metrics": {"request_id": "x", "ok": True, "invalid_reasons": [], "duration_s": 1.0, "ttfa_s": 0.1, "rtf": 0.5,
+                                            "e2e_s": 1.0, "stall_s": 0.0, "first_chunk_s": 0.3, "inter_chunk_gaps_s": []}}
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(rb.RequestMetrics)}
+    rec["metrics"] = {k: v for k, v in rec["metrics"].items() if k in fields} | {k: None for k in fields - set(rec["metrics"])}
+    assert not rb.verdict_fallback([rec], {}, {"t2w_dit_eager_calls": 7})["passed"]
+    ov = rb.verdict_overall({"mode": "acceptance", "mixed": {"passed": True}, "identity": {"matches": True}, "gpu": {"matches": True}, "baseline_problems": []})
+    assert not ov["overall"] and any("without sustain" in p for p in ov["problems"])
+
+
+# --- B17d: a cancellation counts only after valid audio -------------------------------------------------------------------
+def _sse_server(events, status=200, delay=0.05):
+    from aiohttp import web
+
+    async def h(request):
+        await request.read()
+        if status != 200:
+            return web.Response(status=status, text="no")
+        r = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await r.prepare(request)
+        for e in events:
+            await r.write(e if isinstance(e, bytes) else f"data: {e}\n\n".encode())
+            await asyncio.sleep(delay)
+        return r
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", h)
+    return app
+
+
+def _audio_event(offset, n, wav=None):
+    import base64
+    import json
+
+    from bench.audio import encode_wav_pcm16
+
+    data = wav if wav is not None else encode_wav_pcm16((0.1 * np.sin(np.arange(n) * 0.05)).astype(np.float32))
+    return json.dumps({"choices": [{"delta": {"content": base64.b64encode(data).decode()}}], "modality": "audio",
+                       "audio_offset_samples": offset, "num_samples": n})
+
+
+def _cancel(app):
+    async def go():
+        srv = TestServer(app)
+        await srv.start_server()
+        try:
+            return await rb.cancel_stream(f"http://127.0.0.1:{srv.port}", get_adapter("engine"), {"stream": True}, "c")
+        finally:
+            await srv.close()
+    return asyncio.run(go())
+
+
+def test_cancel_parser_requires_valid_audio_before_the_disconnect():
+    text = '{"choices": [{"delta": {"content": "Hi"}}]}'
+    good = _cancel(_sse_server([text, _audio_event(0, 2400), _audio_event(2400, 2400), "[DONE]"]))
+    assert good["cancel_problems"] == [] and good["unique_samples"] == 2400 and good["t_disconnect"] >= good["t_dispatch"]
+    cases = {
+        "malformed": ['{"modality": "audio"}', "[DONE]"],
+        "header_only": [_audio_event(0, 0), "[DONE]"],
+        "corrupt": [_audio_event(0, 2400, wav=b"RIFF\x00\x01garbage-not-a-wav"), _audio_event(2400, 2400)],
+        "wrong_offset": [_audio_event(480, 2400), _audio_event(2880, 2400)],
+        "error_first": ['{"error": {"message": "boom"}}', _audio_event(0, 2400)],
+        "unparseable": [b"data: {not json\n\n", _audio_event(0, 2400)],
+    }
+    for name, ev in cases.items():
+        res = _cancel(_sse_server(ev))
+        assert res["cancel_problems"], (name, res)
+    assert "audio_gap" in _cancel(_sse_server(cases["wrong_offset"]))["cancel_problems"]
+    assert "error" in _cancel(_sse_server(cases["error_first"]))["cancel_problems"]
+    assert "http_503" in _cancel(_sse_server([], status=503))["cancel_problems"]
