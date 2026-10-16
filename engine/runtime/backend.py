@@ -78,6 +78,14 @@ class Live:
         self.loop.call_soon_threadsafe(self.out.put_nowait, ev)
 
 
+def check_prompt_length(backend, n_prompt: int, req) -> None:
+    """A prompt plus its reply must fit one Thinker sequence of the backend's graph decoder (``tdec.max_len``, 8192 by
+    default); otherwise the request is an HTTP 400 (never a silent truncation)."""
+    limit = int(getattr(getattr(backend, "tdec", None), "max_len", 8192))
+    if n_prompt + req.max_tokens > limit:
+        raise BadRequest(f"prompt of {n_prompt} tokens plus max_tokens {req.max_tokens} exceeds the engine's context of {limit}")
+
+
 class EngineBackend:
     def __init__(self, model_dir: Path = MODEL_DIR, device: str = "cuda", max_live: int = 64, thinker_pages: int = 8192, talker_pages: int = 8192,
                  page_size: int = 16, float16_flow: bool = False):
@@ -121,17 +129,6 @@ class EngineBackend:
         return cls(**cfg)
 
     # --- request side ----------------------------------------------------------------------------
-    def _context_limit(self) -> int:
-        """Most tokens (prompt plus reply) one Thinker sequence holds in this engine's graph decoder."""
-        dec = getattr(self, "tdec", None)
-        return int(getattr(dec, "max_len", 8192))
-
-    def _check_length(self, n_prompt: int, req: EngineRequest) -> None:
-        from engine.server import BadRequest
-
-        if n_prompt + req.max_tokens > self._context_limit():
-            raise BadRequest(f"prompt of {n_prompt} tokens plus max_tokens {req.max_tokens} exceeds the engine's context of {self._context_limit()}")
-
     def _prompt(self, req: EngineRequest) -> tuple[list[int], torch.Tensor | None]:
         """Prompt token IDs, and the Thinker input embeddings when the request carries media (None for text-only prompts).
 
@@ -142,7 +139,7 @@ class EngineBackend:
             msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else "".join(p["text"] for p in m["content"])}
                     for m in req.messages]
             ids = self.tok(self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, **kw))["input_ids"]
-            self._check_length(len(ids), req)
+            check_prompt_length(self, len(ids), req)
             return ids, None
         from engine.media import parts_to_native
 
@@ -151,7 +148,7 @@ class EngineBackend:
         with self._lock:
             inputs = self.frontend.build_prompt(msgs, use_tts_template=kw["use_tts_template"], enable_thinking=kw["enable_thinking"],
                                                 max_slice_nums=pk.get("max_slice_nums"), use_image_id=pk.get("use_image_id"), max_inp_length=None)
-            self._check_length(int(inputs["input_ids"].shape[1]), req)
+            check_prompt_length(self, int(inputs["input_ids"].shape[1]), req)
             emb = self.frontend.embed(inputs)
         return inputs["input_ids"][0].tolist(), emb
 

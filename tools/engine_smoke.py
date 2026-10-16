@@ -115,4 +115,15 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import os
+    import traceback
+
+    try:
+        asyncio.run(main())
+        code = 0
+    except BaseException:
+        traceback.print_exc()
+        code = 1
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)  # the engine's threads and its Token2Wav worker must not keep a failed run (and its GPU memory) alive

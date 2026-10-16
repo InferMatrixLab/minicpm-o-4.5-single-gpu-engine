@@ -15,6 +15,7 @@ Token2Wav itself is ``engine.runtime.token2wav_batch.BatchedToken2Wav`` (same pe
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -36,41 +37,45 @@ def _rss_kib(pid: int) -> int | None:
     return None
 
 
-def _feat_init(model_dir: str, spk_threads: int) -> None:
-    """Feature-process initializer: the S3 tokenizer (GPU) and CAMPPlus (CPU ONNX) only, no flow."""
+def _feat_init(model_dir: str, spk_threads: int, gpu_tokens: bool = True) -> None:
+    """Feature-process initializer: CAMPPlus (CPU ONNX) and the fbank/mel front ends, plus the S3 tokenizer on the GPU
+    when ``gpu_tokens`` (one CUDA context per feature process; the S3 encoder is launch-heavy Python, and in a thread of
+    the worker it contends for the worker's GIL: measured slower).  Without it the process is CPU only and the worker
+    finishes the prompt (``finish_prompt``)."""
     import types
 
     import onnxruntime
-    import s3tokenizer
 
     import torch
 
     torch.set_num_threads(2)  # torch defaults to one thread per core: a dozen such processes oversubscribe the host
     global _FEAT
     h = types.SimpleNamespace()
-    h.audio_tokenizer = s3tokenizer.load_model(f"{model_dir}/assets/token2wav/speech_tokenizer_v2_25hz.onnx").cuda().eval()
+    if gpu_tokens:
+        import s3tokenizer
+
+        h.audio_tokenizer = s3tokenizer.load_model(f"{model_dir}/assets/token2wav/speech_tokenizer_v2_25hz.onnx").cuda().eval()
     opt = onnxruntime.SessionOptions()
     opt.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
     opt.intra_op_num_threads = spk_threads
     h.spk_model = onnxruntime.InferenceSession(f"{model_dir}/assets/token2wav/campplus.onnx", sess_options=opt, providers=["CPUExecutionProvider"])
-    h.flow = types.SimpleNamespace(up_rate=2)  # the flow's token-to-mel rate (flow.yaml), all _prepare_prompt reads of it
     _FEAT = h
 
 
 _RESAMPLE: dict = {}
 
 
-def prepare_prompt_overlapped(h, prompt_wav: str):
-    """``stepaudio2.Token2wav._prepare_prompt`` step for step (same inputs, same ops, identical outputs), with the CPU
-    CAMPPlus run (ONNX Runtime releases the GIL) overlapping the S3 tokenizer and the 24 kHz mel, and the 16 -> 24 kHz
-    ``Resample`` transform built once per rate (the reference rebuilds the same kernel every call)."""
-    from concurrent.futures import ThreadPoolExecutor
-
+def prompt_front_end(h, prompt_wav: str) -> tuple:
+    """The CPU part of ``stepaudio2.Token2wav._prepare_prompt``, step for step (same inputs, same ops): the S3 log-mel
+    (with its length), the CAMPPlus embedding (a future of the numpy array ONNX returns) and the 24 kHz prompt mel before the
+    final replicate padding.  ``finish_prompt`` completes it on the GPU.  The 16 -> 24 kHz ``Resample`` transform is
+    built once per rate (the reference rebuilds the same kernel every call)."""
     import s3tokenizer
-    import torch
     import torchaudio
     import torchaudio.compliance.kaldi as kaldi
     from stepaudio2.flashcosyvoice.utils.audio import mel_spectrogram
+
+    from concurrent.futures import ThreadPoolExecutor
 
     global _SPK_POOL
     if "_SPK_POOL" not in globals():
@@ -78,25 +83,36 @@ def prepare_prompt_overlapped(h, prompt_wav: str):
     audio = s3tokenizer.load_audio(prompt_wav, sr=16000)
     spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
     spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
-    spk = _SPK_POOL.submit(h.spk_model.run, None, {h.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()})
+    # CAMPPlus (ONNX Runtime releases the GIL) overlaps the S3 mel and tokens and the 24 kHz mel; resolved last
+    spk = _SPK_POOL.submit(lambda: h.spk_model.run(None, {h.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()})[0])
     mels = s3tokenizer.log_mel_spectrogram(audio)
     mels, mels_lens = s3tokenizer.padding([mels])
-    tokens, tokens_lens = h.audio_tokenizer.quantize(mels.cuda(), mels_lens.cuda())
     audio, sample_rate = torchaudio.load(prompt_wav, backend="soundfile")
     audio = audio.mean(dim=0, keepdim=True)
     if sample_rate != 24000:
         if sample_rate not in _RESAMPLE:
             _RESAMPLE[sample_rate] = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=24000)
         audio = _RESAMPLE[sample_rate](audio)
-    prompt_mels = mel_spectrogram(audio).transpose(1, 2).squeeze(0).unsqueeze(0).cuda()
+    prompt_mel = mel_spectrogram(audio).transpose(1, 2).squeeze(0)
+    return mels, mels_lens, spk, prompt_mel
+
+
+def finish_prompt(audio_tokenizer, front: tuple, up_rate: int = 2) -> tuple:
+    """The GPU part: S3 tokens of the log-mel (batch 1, as the reference), the CAMPPlus embedding and the prompt mel on
+    the GPU, the mel replicate-padded to ``up_rate`` x the token count.  Equal to ``Token2wav._prepare_prompt``."""
+    import torch
+
+    mels, mels_lens, spk, prompt_mel = front
+    tokens, tokens_lens = audio_tokenizer.quantize(mels.cuda(), mels_lens.cuda())
+    spk_emb = torch.tensor(spk.result() if hasattr(spk, "result") else spk, device="cuda")
+    prompt_mels = prompt_mel.unsqueeze(0).cuda()
     prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device="cuda")
-    prompt_mels = torch.nn.functional.pad(prompt_mels, (0, 0, 0, tokens.shape[1] * h.flow.up_rate - prompt_mels.shape[1]), mode="replicate")
-    spk_emb = torch.tensor(spk.result()[0], device="cuda")
+    prompt_mels = torch.nn.functional.pad(prompt_mels, (0, 0, 0, tokens.shape[1] * up_rate - prompt_mels.shape[1]), mode="replicate")
     return tokens, tokens_lens, spk_emb, prompt_mels, prompt_mels_lens
 
 
 def _feat_job(ref: bytes):
-    """``Token2Wav.features`` in a feature process; tensors come back on the CPU."""
+    """The CPU front end of ``Token2Wav.features`` in a feature process (the HF 16 kHz PCM16 path)."""
     import io
     import tempfile
 
@@ -107,8 +123,10 @@ def _feat_job(ref: bytes):
     wav16, _ = librosa.load(io.BytesIO(ref), sr=16000, mono=True)
     with tempfile.NamedTemporaryFile(suffix=".wav") as f, torch.inference_mode():
         sf.write(f.name, wav16, 16000)  # PCM_16, as in init_token2wav_cache
-        out = prepare_prompt_overlapped(_FEAT, f.name)
-    return tuple(x.cpu() for x in out)
+        front = prompt_front_end(_FEAT, f.name)
+        if getattr(_FEAT, "audio_tokenizer", None) is None:  # CPU only: resolve the embedding before it crosses processes
+            return front[:2] + (front[2].result(),) + front[3:]
+        return ("done",) + tuple(x.cpu() for x in finish_prompt(_FEAT.audio_tokenizer, front))  # the whole prompt, on the CPU
 
 
 SETUP_FRAME_BUDGET = 16 * 512  # rows x frames per eager batched setup call (its new caches: ~2.7 GB in FP16)
@@ -133,6 +151,25 @@ class _Req:
 
 
 def worker_main(inq, outq, cfg: dict) -> None:
+    """The worker process: a fatal error is written out (flushed), reported to the engine (``fatal``: its audio requests
+    fail instead of waiting) and ends the process without waiting on the feature processes."""
+    import sys
+    import traceback
+
+    try:
+        _worker_main(inq, outq, cfg)
+    except BaseException:
+        tb = traceback.format_exc()
+        sys.stderr.write("token2wav worker failed:\n" + tb)
+        sys.stderr.flush()
+        try:
+            outq.put(("fatal", None, tb[-2000:]))
+            time.sleep(1.0)  # let the queue's feeder thread deliver it
+        finally:
+            os._exit(1)
+
+
+def _worker_main(inq, outq, cfg: dict) -> None:
     import torch
 
     from engine.models.token2wav import Token2Wav
@@ -154,13 +191,52 @@ def worker_main(inq, outq, cfg: dict) -> None:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor
 
+        # CPU-only processes (no CUDA context); a few malloc arenas each, so varied audio sizes do not keep growing the heap
+        os.environ.setdefault("MALLOC_ARENA_MAX", str(cfg.get("feature_malloc_arenas", 2)))
         pool = ProcessPoolExecutor(cfg["feature_processes"], mp_context=mp.get_context("spawn"), initializer=_feat_init,
-                                   initargs=(model_dir, cfg.get("spk_threads", 8)))
+                                   initargs=(model_dir, cfg.get("spk_threads", 8), cfg.get("feature_gpu_tokens", True)))
         ref = open(f"{model_dir}/assets/HT_ref_audio.wav", "rb").read()
         for f in [pool.submit(_feat_warm, ref) for _ in range(cfg["feature_processes"])]:
             f.result()  # every process started, its models loaded and its kernels warm
     else:
         pool = ThreadPoolExecutor(cfg.get("feature_workers", 4), thread_name_prefix="t2w-features")
+    # S3 tokens of the reference voices: one thread with its own CUDA stream, so they overlap the decode loop
+    from concurrent.futures import Future
+
+    tok_pool = ThreadPoolExecutor(1, thread_name_prefix="s3-tokens")
+    tok_stream = torch.cuda.Stream()
+
+    def _tokens(front):
+        with torch.cuda.stream(tok_stream), torch.inference_mode():
+            out = finish_prompt(t2w.ref.audio_tokenizer, front)
+        tok_stream.synchronize()
+        return out
+
+    def open_features(ref: bytes) -> Future:
+        """CPU front end in a feature process, then S3 tokens on the GPU in this process (one future for both)."""
+        out: Future = Future()
+
+        def gpu_done(g):
+            e = g.exception()
+            out.set_exception(e) if e is not None else out.set_result(g.result())
+            wake.set()
+
+        def cpu_done(f):
+            e = f.exception()
+            if e is not None:
+                out.set_exception(e)
+                wake.set()
+                return
+            res = f.result()
+            if res[0] == "done":  # the feature process ran the S3 tokens itself
+                out.set_result(tuple(x.cuda(non_blocking=True) for x in res[1:]))
+                wake.set()
+                return
+            tok_pool.submit(_tokens, res).add_done_callback(gpu_done)
+
+        pool.submit(_feat_job, ref).add_done_callback(cpu_done)
+        return out
+
     min_batch, max_wait = cfg.get("t2w_min_batch", 8), cfg.get("t2w_max_wait_ms", 40.0) / 1000
     reqs: dict[int, _Req] = {}
 
@@ -208,8 +284,6 @@ def worker_main(inq, outq, cfg: dict) -> None:
                 time.sleep(5)
                 os._exit(0)
 
-    import os
-
     threading.Thread(target=parent_watch, args=(os.getppid(),), daemon=True).start()
     outq.put(("ready",))
     torch.cuda.set_device(0)
@@ -237,8 +311,7 @@ def worker_main(inq, outq, cfg: dict) -> None:
             if kind == "open":
                 _, seq, ref, seed = m
                 if cfg.get("feature_processes", 0):
-                    fut = pool.submit(_feat_job, ref)
-                    fut.add_done_callback(lambda _f: wake.set())
+                    fut = open_features(ref)
                 else:
                     fut = pool.submit(feats, ref)
                 reqs[seq] = _Req(seq, seed, features=fut, t_open=time.perf_counter())
@@ -255,7 +328,12 @@ def worker_main(inq, outq, cfg: dict) -> None:
             groups: dict[int, list] = {}
             for r in todo:
                 try:
-                    f = tuple(x.cuda(non_blocking=True) if x.device.type == "cpu" else x for x in r.features.result())
+                    if cfg.get("feature_processes", 0):  # finished on the S3 thread's stream: record them on this one
+                        f = r.features.result()
+                        for x in f:
+                            x.record_stream(torch.cuda.current_stream())
+                    else:
+                        f = tuple(x.cuda(non_blocking=True) if x.device.type == "cpu" else x for x in r.features.result())
                 except Exception as e:
                     outq.put(("error", r.seq, f"reference audio: {type(e).__name__}: {e}", "bad_request"))  # an input error, typed across IPC
                     drop(r.seq)

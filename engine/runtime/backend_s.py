@@ -410,6 +410,11 @@ class TrackSBackend:
         if kind == "stats":
             self.t2w_stats = m[2]
             return
+        if kind == "fatal":  # the Token2Wav worker died: every request still owed audio fails now
+            for lv in list(self.audio_live.values()):
+                lv.emit(RuntimeError(f"token2wav worker failed: {m[2].strip().splitlines()[-1] if m[2] else ''}"))
+            self.audio_live.clear()
+            return
         lv = self.audio_live.get(seq)
         if lv is None:
             return

@@ -379,16 +379,17 @@ def test_fast_dit_matches_eager(graphs, first_chunk):
     assert max(errs) <= 5e-3, errs  # AC-3.4 FP16 bound
 
 
-def test_overlapped_prompt_features_equal_reference():
-    """The feature process's ``prepare_prompt_overlapped`` (CAMPPlus overlapped, cached resampler) returns exactly the
-    reference ``Token2wav._prepare_prompt`` tensors."""
+def test_split_prompt_features_equal_reference():
+    """The feature path of the worker, split into a CPU front end (feature processes, no CUDA) and the GPU S3 tokens in
+    the worker (``prompt_front_end`` + ``finish_prompt``), returns exactly the reference ``Token2wav._prepare_prompt``
+    tensors."""
     import types
 
     import onnxruntime
     import s3tokenizer
     from stepaudio2.token2wav import Token2wav
 
-    from engine.runtime.t2w_worker import prepare_prompt_overlapped
+    from engine.runtime.t2w_worker import finish_prompt, prompt_front_end
 
     d = MODEL / "assets" / "token2wav"
     h = types.SimpleNamespace(audio_tokenizer=s3tokenizer.load_model(str(d / "speech_tokenizer_v2_25hz.onnx")).cuda().eval(),
@@ -396,6 +397,9 @@ def test_overlapped_prompt_features_equal_reference():
                               flow=types.SimpleNamespace(up_rate=2))
     for wav in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav"):
         with torch.inference_mode():
-            a, b = Token2wav._prepare_prompt(h, str(wav)), prepare_prompt_overlapped(h, str(wav))
+            a = Token2wav._prepare_prompt(h, str(wav))
+            front = prompt_front_end(h, str(wav))
+            assert all(not (isinstance(x, torch.Tensor) and x.is_cuda) for x in front)  # the front end stays on the CPU
+            b = finish_prompt(h.audio_tokenizer, front)
             for x, y in zip(a, b):
                 assert torch.equal(x, y)

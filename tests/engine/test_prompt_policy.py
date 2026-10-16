@@ -48,12 +48,12 @@ class _Frontend:
         return torch.zeros(inputs["input_ids"].shape[1], 4)
 
 
-def _backend(n_tokens, max_len=8192):
+def _backend(n_tokens, max_len=8192, cls=None):
     import threading
 
     from engine.runtime.backend import EngineBackend
 
-    b = EngineBackend.__new__(EngineBackend)
+    b = (cls or EngineBackend).__new__(cls or EngineBackend)
     b.frontend, b._lock, b.tdec = _Frontend(n_tokens), threading.Lock(), SimpleNamespace(max_len=max_len)
     return b
 
@@ -69,6 +69,14 @@ def test_backend_passes_the_policy_and_rejects_prompts_beyond_the_context():
     long = _backend(8100)
     with pytest.raises(BadRequest, match="exceeds the engine's context"):
         EngineBackend._prompt(long, parse_request(_body(max_tokens=256)))
+    # the Track S backend builds prompts through the same code (it borrows EngineBackend._prompt)
+    from engine.runtime.backend_s import TrackSBackend
+
+    s = _backend(300, cls=TrackSBackend)
+    ids, _ = s._prompt(parse_request(_body(mm_processor_kwargs=NATIVE_POLICY)))
+    assert len(ids) == 300 and s.frontend.calls[-1]["max_slice_nums"] == 1
+    with pytest.raises(BadRequest):
+        _backend(8100, cls=TrackSBackend)._prompt(parse_request(_body(max_tokens=256)))
 
 
 @pytest.mark.skipif(not (ROOT / "results" / "engine_parity" / "mm_samples.pkl").exists(), reason="multimodal fixtures not generated")
