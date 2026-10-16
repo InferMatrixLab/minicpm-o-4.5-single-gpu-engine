@@ -121,18 +121,37 @@ class EngineBackend:
         return cls(**cfg)
 
     # --- request side ----------------------------------------------------------------------------
+    def _context_limit(self) -> int:
+        """Most tokens (prompt plus reply) one Thinker sequence holds in this engine's graph decoder."""
+        dec = getattr(self, "tdec", None)
+        return int(getattr(dec, "max_len", 8192))
+
+    def _check_length(self, n_prompt: int, req: EngineRequest) -> None:
+        from engine.server import BadRequest
+
+        if n_prompt + req.max_tokens > self._context_limit():
+            raise BadRequest(f"prompt of {n_prompt} tokens plus max_tokens {req.max_tokens} exceeds the engine's context of {self._context_limit()}")
+
     def _prompt(self, req: EngineRequest) -> tuple[list[int], torch.Tensor | None]:
-        """Prompt token IDs, and the Thinker input embeddings when the request carries media (None for text-only prompts)."""
+        """Prompt token IDs, and the Thinker input embeddings when the request carries media (None for text-only prompts).
+
+        Media prompts use the request's processor policy (``mm_processor_kwargs``: image slicing, image IDs) and are never
+        truncated: a prompt that does not fit the engine's context is rejected (HTTP 400) before inference."""
         kw = {"use_tts_template": True, "enable_thinking": False, **req.chat_template_kwargs}
         if not any(isinstance(m["content"], list) and any(p["type"] != "text" for p in m["content"]) for m in req.messages):
             msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else "".join(p["text"] for p in m["content"])}
                     for m in req.messages]
-            return self.tok(self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, **kw))["input_ids"], None
+            ids = self.tok(self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, **kw))["input_ids"]
+            self._check_length(len(ids), req)
+            return ids, None
         from engine.media import parts_to_native
 
         msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else parts_to_native(m["content"])} for m in req.messages]
+        pk = getattr(req, "processor_kwargs", None) or {}
         with self._lock:
-            inputs = self.frontend.build_prompt(msgs, use_tts_template=kw["use_tts_template"], enable_thinking=kw["enable_thinking"])
+            inputs = self.frontend.build_prompt(msgs, use_tts_template=kw["use_tts_template"], enable_thinking=kw["enable_thinking"],
+                                                max_slice_nums=pk.get("max_slice_nums"), use_image_id=pk.get("use_image_id"), max_inp_length=None)
+            self._check_length(int(inputs["input_ids"].shape[1]), req)
             emb = self.frontend.embed(inputs)
         return inputs["input_ids"][0].tolist(), emb
 

@@ -40,6 +40,7 @@ from aiohttp import web
 SAMPLE_RATE = 24000
 MAX_TOKENS_LIMIT = 4096
 PART_TYPES = {"text", "image_url", "input_audio", "audio_url", "video_url"}
+PROCESSOR_FIELDS = ("max_slice_nums", "use_image_id")  # the checkpoint processor's image policy (native Daily-Omni frames: 1, False)
 TALKER_FIELDS = {"temperature": (0.0, 5.0), "top_p": (0.0, 1.0), "top_k": (1, 6562), "repetition_penalty": (0.5, 5.0),
                  "repetition_window": (0, 512), "min_new_tokens": (0, 4096), "max_new_tokens": (1, 4096)}
 
@@ -64,6 +65,7 @@ class EngineRequest:
     ref_audio: bytes | None
     talker_sampling: dict
     stream: bool
+    processor_kwargs: dict = field(default_factory=dict)  # validated mm_processor_kwargs (image slicing policy)
 
 
 @dataclass
@@ -192,10 +194,18 @@ def parse_request(body) -> EngineRequest:
     seed = body.get("seed")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
         raise BadRequest("seed must be an integer")
+    pk = body.get("mm_processor_kwargs") or {}
+    if not isinstance(pk, dict) or set(pk) - set(PROCESSOR_FIELDS):
+        raise BadRequest(f"mm_processor_kwargs accepts {sorted(PROCESSOR_FIELDS)}")
+    if pk.get("max_slice_nums") is not None and (isinstance(pk["max_slice_nums"], bool) or not isinstance(pk["max_slice_nums"], int)
+                                                 or pk["max_slice_nums"] < 1):
+        raise BadRequest("mm_processor_kwargs.max_slice_nums must be a positive integer")
+    if pk.get("use_image_id") is not None and not isinstance(pk["use_image_id"], bool):
+        raise BadRequest("mm_processor_kwargs.use_image_id must be a boolean")
     return EngineRequest(request_id=f"chatcmpl-{uuid.uuid4().hex}", messages=msgs, modalities=mods,
                          max_tokens=_number(body, "max_tokens", int, 1, MAX_TOKENS_LIMIT, 256),
                          temperature=_number(body, "temperature", float, 0.0, 2.0, 0.0), seed=seed, chat_template_kwargs=ctk,
-                         ref_audio=ref_bytes, talker_sampling=talker, stream=stream)
+                         ref_audio=ref_bytes, talker_sampling=talker, stream=stream, processor_kwargs=dict(pk))
 
 
 def _err(status: int, message: str, kind: str) -> web.Response:

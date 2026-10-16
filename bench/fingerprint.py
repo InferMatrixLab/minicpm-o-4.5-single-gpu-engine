@@ -40,11 +40,12 @@ def tree_sha256(root: str | Path, subdirs: tuple[str, ...], suffixes: tuple[str,
     return h.hexdigest()
 
 
-def repo_fingerprint(path: str | Path) -> dict:
-    """Commit plus a hash of the tracked working-tree diff (dirty content, not just a flag)."""
+def repo_fingerprint(path: str | Path, paths: tuple[str, ...] = ()) -> dict:
+    """Commit plus a hash of the tracked working-tree diff (dirty content, not just a flag), optionally limited to
+    ``paths`` (the parts a measurement depends on)."""
     path = str(path)
     commit = _run(["git", "rev-parse", "HEAD"], cwd=path).strip()
-    diff = _run(["git", "diff", "HEAD", "--binary"], cwd=path)
+    diff = _run(["git", "diff", "HEAD", "--binary", *(["--", *paths] if paths else [])], cwd=path)
     return {"commit": commit or None, "dirty": bool(diff.strip()), "diff_sha256": hashlib.sha256(diff.encode()).hexdigest()}
 
 

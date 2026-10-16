@@ -54,7 +54,7 @@ def test_config_bytes_and_engine_source_change_the_candidate(tmp_path, monkeypat
 def test_engine_fingerprints_and_resume_bind_the_implementation(tmp_path, monkeypatch):
     root = _tree(tmp_path)
     monkeypatch.setattr(cli, "ROOT", root)
-    monkeypatch.setattr(cli, "repo_fingerprint", lambda p: {"commit": "c0", "dirty": False, "diff_sha256": "d0"} if Path(p) == root
+    monkeypatch.setattr(cli, "repo_fingerprint", lambda p, paths=(): {"commit": "c0", "dirty": False, "diff_sha256": "d0"} if Path(p) == root
                         else {"commit": "x", "dirty": False, "diff_sha256": "x"})
     fp = cli.execution_fingerprints("engine")
     assert fp["engine"]["repo"]["commit"] == "c0" and fp["engine"]["tree_sha256"]

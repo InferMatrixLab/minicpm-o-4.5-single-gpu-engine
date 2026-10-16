@@ -161,11 +161,14 @@ ADAPTER_PYTHON = {"vllm-omni": DEFAULT_PYTHONS["vllm-omni"], "sglang-omni": DEFA
 SERVE_SCRIPTS = {"vllm-omni": "serve_vllm_omni.sh", "sglang-omni": "serve_sglang_omni.sh", "engine": "serve_engine.sh"}
 
 
+ENGINE_RUN_PATHS = ("engine", "configs/engine", "scripts")  # what an engine run executes from this repository
+
+
 def execution_fingerprints(adapter_name: str) -> dict:
     """Everything outside the candidate that the measurement depends on (for the engine also its implementation tree and
     this repository's commit and dirty-content hash; baseline experiments keep their earlier fields)."""
     scripts = ROOT / "scripts"
-    extra = {"engine": {"tree_sha256": tree_sha256(ROOT, ("engine",)), "repo": repo_fingerprint(ROOT)}} if adapter_name == "engine" else {}
+    extra = {"engine": {"tree_sha256": tree_sha256(ROOT, ("engine",)), "repo": repo_fingerprint(ROOT, ENGINE_RUN_PATHS)}} if adapter_name == "engine" else {}
     return {**extra,
         "harness_tree_sha256": tree_sha256(ROOT, ("bench", "scripts")),
         "repos": {"vllm-omni": repo_fingerprint(VLLM_OMNI), "sglang-omni": repo_fingerprint(SGLANG_OMNI)},
