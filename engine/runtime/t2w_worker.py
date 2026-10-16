@@ -23,7 +23,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from engine.runtime.t2w_sched import AudioState, Policy, choose_windows, plan_tick
+from engine.runtime.t2w_sched import AudioState, Policy, choose_windows, first_lane_open, plan_tick
 
 
 _FEAT = None  # per feature process: an object with what ``Token2wav._prepare_prompt`` reads
@@ -260,6 +260,9 @@ def setup_calls(ready: list, setup_t, row_limit: dict, frame_budget: int = SETUP
     return calls
 
 
+MODES = ("edf", "r6", "legacy")
+
+
 class WorkerLoop:
     """The worker's per-request state and scheduling over injected parts, so the production loop runs in CPU tests.
 
@@ -268,15 +271,19 @@ class WorkerLoop:
     ``calls_for``: ready requests, oldest first -> [(bucket, requests)] setup calls; ``clock``: the worker clock.
 
     mode "edf" (task17, the default): work-conserving -- every ready window is decoded in the tick it is ready, earliest
-    playback deadline first (``Policy.max_decode_rows`` may cap a call); a setup never runs ahead of a waiting
-    continuation window (decode first, then at most ``Policy.setup_calls_when_busy`` setup calls); setups oldest first.
+    playback deadline first (``Policy.max_decode_rows`` may cap a call); pending setups (new requests' first audio) run
+    before the decode while every waiting continuation window keeps ``Policy.first_lane_slack_s`` of slack, otherwise
+    after it and at most ``Policy.setup_calls_when_busy`` of them; setups oldest first.
+    mode "r6" (the round-6 control): decode first whenever a continuation waits, then at most ``setup_calls_when_busy``
+    setups, the decode held by the ``min_batch`` / ``max_wait`` gate, deadlines on round 6's clock (first audio + seconds
+    sent).
     mode "legacy" (rounds 4-5, kept for the scheduler comparison): every pending setup first, then a decode held until
     ``min_batch`` windows wait, a first or last window is among them, or the oldest waited ``max_wait``."""
 
     def __init__(self, bt, emit, resolve, calls_for, policy: Policy, mode: str = "edf", min_batch: int = 8, max_wait: float = 0.04,
                  clock=time.perf_counter, log=None, note=None):
-        if mode not in ("edf", "legacy"):
-            raise ValueError(f"t2w_policy must be 'edf' or 'legacy', not {mode!r}")
+        if mode not in MODES:
+            raise ValueError(f"t2w_policy must be one of {MODES}, not {mode!r}")
         self.bt, self.emit, self.resolve, self.calls_for, self.policy, self.mode = bt, emit, resolve, calls_for, policy, mode
         self.min_batch, self.max_wait, self.clock = min_batch, max_wait, clock
         self.log = log or (lambda kind, n, t0: None)
@@ -305,13 +312,30 @@ class WorkerLoop:
         if self.mode == "legacy":
             worked = self._setups([c for _, c in calls])
             return self._decode(gate=True) or worked
-        waiting = any(r.stream is not None and r.windows and r.audio.started for r in self.reqs.values())
-        decode_first, run = plan_tick(waiting, calls, self.policy)
-        worked = self._decode() if decode_first else False
-        worked = self._setups(run) or worked
-        if not decode_first:
-            worked = self._decode() or worked
+        if self.mode == "r6":
+            waiting = any(r.stream is not None and r.windows and r.audio.started for r in self.reqs.values())
+            decode_first, run = plan_tick(waiting, calls, self.policy)
+            worked = self._decode(gate=True) if decode_first else False
+            worked = self._setups(run) or worked
+            if not decode_first:
+                worked = self._decode(gate=True) or worked
+            return worked
+        order = [c for _, c in sorted(calls, key=lambda x: x[0])]
+        worked = False
+        while order and first_lane_open(self._waiting_deadline(), self.clock(), self.policy):
+            worked = self._setups([order.pop(0)]) or worked  # the first-chunk lane, rechecked before every call
+        worked = self._decode() or worked
+        if order:  # a continuation was short of slack: a bounded share of setups now, the rest in later ticks
+            worked = self._setups(order[:max(1, self.policy.setup_calls_when_busy)]) or worked
         return worked
+
+    def _deadline(self, r) -> float:
+        a = r.audio
+        return a.deadline_r6(r.windows[0][3], self.policy) if self.mode == "r6" else a.deadline(r.windows[0][3], self.policy)
+
+    def _waiting_deadline(self) -> float | None:
+        """The earliest deadline of a waiting continuation window (a request that already sent audio), or None."""
+        return min((self._deadline(r) for r in self.reqs.values() if r.stream is not None and r.windows and r.audio.started), default=None)
 
     def _resolve_ready(self) -> None:
         for r in [r for r in self.reqs.values() if r.stream is None and r.feat is None and r.features.done()]:
@@ -355,7 +379,7 @@ class WorkerLoop:
             if not (any(h[2] == 0 for h in heads) or any(h[1] for h in heads) or len(ready) >= min(self.min_batch, len(self.reqs))
                     or now - min(h[3] for h in heads) >= self.max_wait):
                 return False
-        dl = {r.seq: r.audio.deadline(r.windows[0][3], self.policy) for r in ready}
+        dl = {r.seq: self._deadline(r) for r in ready}
         sel = [self.reqs[k] for k in choose_windows([(d, k) for k, d in dl.items()], self.policy)]
         if self.note is not None:
             self.note(f"slack {len(sel)} {(min(dl[r.seq] for r in sel) - now) * 1000:.1f}")
@@ -490,8 +514,9 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         pool.submit(_feat_job, ref).add_done_callback(cpu_done)
         return out
 
+    lane = cfg.get("t2w_first_lane_slack_ms")
     policy = Policy(setup_calls_when_busy=cfg.get("t2w_setup_calls_when_busy", 1), max_decode_rows=cfg.get("t2w_max_decode_rows"),
-                    first_slack_s=cfg.get("t2w_first_slack_ms", 250.0) / 1000)
+                    first_slack_s=cfg.get("t2w_first_slack_ms", 250.0) / 1000, first_lane_slack_s=None if lane is None else lane / 1000)
 
     def resolve(fut):
         """A done feature future -> the prompt features on this process's stream (raises for unusable audio)."""

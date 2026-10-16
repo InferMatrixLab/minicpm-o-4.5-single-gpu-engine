@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -225,7 +226,164 @@ def test_row_cap_serves_the_stream_closest_to_underrun():
 
 
 def test_unknown_policy_mode_is_rejected():
-    import pytest
-
     with pytest.raises(ValueError):
         WorkerLoop(None, None, None, None, Policy(), mode="fifo")
+
+
+def _speaking(loop, clock, seq=0, buffered_s=2.0):
+    """A stream that already sent ``buffered_s`` of audio and has a continuation window waiting."""
+    loop.open(seq, seq, Fut())
+    loop.tick()
+    loop.reqs[seq].audio.sent(int(buffered_s * SR), clock.t)
+    loop.window(seq, list(range(25)), False, 1)
+
+
+def test_first_lane_runs_setups_before_the_decode_while_continuations_have_slack():
+    loop, bt, clock, out = _loop(policy=Policy(first_lane_slack_s=0.1), slots=256)
+    _speaking(loop, clock)
+    for s in range(1, 4):
+        loop.open(s, s, Fut())
+    n = len(bt.calls)
+    loop.tick()
+    kinds = [c[0] for c in bt.calls[n:]]
+    assert kinds[0] == "setup" and kinds[-1] == "decode"  # new voices first, then the continuation (2 s of slack)
+
+
+def test_first_lane_closes_when_a_continuation_runs_short_and_is_rechecked_per_call():
+    """0.25 s of slack, 0.08 s per setup call, a 0.1 s lane floor: two setup calls fit before the decode must run, then
+    at most ``setup_calls_when_busy`` after it."""
+    loop, bt, clock, out = _loop(policy=Policy(first_lane_slack_s=0.1, setup_calls_when_busy=1), slots=256)
+    _speaking(loop, clock, buffered_s=0.25)
+    loop.calls_for = lambda ready: [(512, [r]) for r in ready]  # one setup call per voice
+    for s in range(1, 6):
+        loop.open(s, s, Fut())
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[0] for c in bt.calls[n:]] == ["setup", "setup", "decode", "setup"]
+    # without the lane (the round-7 rule): decode first whenever a continuation waits
+    loop, bt, clock, out = _loop(policy=Policy(first_lane_slack_s=None), slots=256)
+    _speaking(loop, clock, buffered_s=5.0)
+    loop.calls_for = lambda ready: [(512, [r]) for r in ready]
+    for s in range(1, 4):
+        loop.open(s, s, Fut())
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[0] for c in bt.calls[n:]] == ["decode", "setup"]
+
+
+def _round6_module():
+    """The round-6 policy module (07e1bd3), recovered from git; None if the commit is unavailable."""
+    import importlib.util
+    import subprocess
+    import tempfile
+
+    root = Path(__file__).resolve().parents[2]
+    try:
+        src = subprocess.run(["git", "-C", str(root), "show", "07e1bd3:engine/runtime/t2w_sched.py"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    f = Path(tempfile.mkdtemp()) / "t2w_sched_r6.py"
+    f.write_text(src)
+    spec = importlib.util.spec_from_file_location("t2w_sched_r6", f)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["t2w_sched_r6"] = mod  # dataclasses resolve their module while the class is built
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class Round6Oracle:
+    """Round 6's worker tick (07e1bd3 ``_worker_main``: plan_tick, then ``decode_ready`` with its batching gate), over
+    the round-6 policy module and the same fake model; the reference the ``r6`` control is checked against."""
+
+    def __init__(self, mod, bt, clock, min_batch=8, max_wait=0.04):
+        self.m, self.bt, self.clock, self.min_batch, self.max_wait = mod, bt, clock, min_batch, max_wait
+        self.policy = mod.Policy()
+        self.reqs, self.out = {}, []
+
+    def open(self, seq):
+        self.reqs[seq] = {"seq": seq, "stream": None, "windows": [], "audio": self.m.AudioState(), "t_feat": self.clock(), "offset": 0}
+
+    def window(self, seq, tokens, last, index):
+        if seq in self.reqs:
+            self.reqs[seq]["windows"].append((tokens, last, index, self.clock()))
+
+    def decode_ready(self):
+        ready = [r for r in self.reqs.values() if r["stream"] is not None and r["windows"]]
+        if not ready:
+            return False
+        now = self.clock()
+        heads = [r["windows"][0] for r in ready]
+        if not (any(h[2] == 0 for h in heads) or any(h[1] for h in heads) or len(ready) >= min(self.min_batch, len(self.reqs))
+                or now - min(h[3] for h in heads) >= self.max_wait):
+            return False
+        dl = {r["seq"]: r["audio"].deadline(r["windows"][0][3], self.policy) for r in ready}
+        sel = [self.reqs[k] for k in self.m.choose_windows([(d, k) for k, d in dl.items()], self.policy)]
+        items = []
+        for r in sel:
+            tokens, last, _, _ = r["windows"].pop(0)
+            items.append((r["stream"], tokens, last))
+        wavs = self.bt.decode(items)
+        sent = self.clock()
+        for r, (_, _, last), wav in zip(sel, items, wavs):
+            self.out.append(("audio", r["seq"], r["offset"], len(wav)))
+            r["offset"] += len(wav)
+            r["audio"].sent(len(wav), sent)
+            if last:
+                self.out.append(("done", r["seq"]))
+                self.bt.release_stream(self.reqs.pop(r["seq"])["stream"])
+        return True
+
+    def tick(self):
+        ready = sorted((r for r in self.reqs.values() if r["stream"] is None), key=lambda r: r["t_feat"])
+        calls = [(r["t_feat"], (512, [r])) for r in ready]
+        waiting = any(r["stream"] is not None and r["windows"] and r["audio"].started for r in self.reqs.values())
+        decode_first, run = self.m.plan_tick(waiting, calls, self.policy)
+        if decode_first:
+            self.decode_ready()
+        for _, part in run:
+            self.bt.setup_many([object() for _ in part])
+            for r in part:
+                r["stream"] = self.bt.new_stream(None, noise_seed=0, adopt=True)
+        if not decode_first:
+            self.decode_ready()
+
+
+def test_r6_control_makes_the_round6_decisions():
+    """The ``r6`` mode against the round-6 implementation on one scripted trace (bursts of arrivals, continuing streams
+    with a stall and a refill, a last window): the same setup/decode call sequence and the same audio."""
+    mod = _round6_module()
+    if mod is None:
+        pytest.skip("commit 07e1bd3 not available")
+    script = []  # (time, action, args)
+    for s in range(6):
+        script.append((0.05 * s, "open", (s,)))
+    for s in range(6):
+        for k in range(8):
+            script.append((0.3 + 0.45 * k + 0.01 * s + (1.5 if s == 2 and k > 3 else 0.0), "window", (s, list(range(8 if k == 0 else 25)), k == 7, k)))
+    for s in range(6, 14):
+        script.append((1.2 + 0.07 * s, "open", (s,)))
+        for k in range(3):
+            script.append((1.9 + 0.07 * s + 0.4 * k, "window", (s, list(range(8 if k == 0 else 25)), k == 2, k)))
+    script.sort(key=lambda x: x[0])
+
+    def drive(tick, open_, window, clock):
+        i = 0
+        while clock.t < 12.0:
+            while i < len(script) and script[i][0] <= clock.t:
+                _, act, args = script[i]
+                open_(*args) if act == "open" else window(*args)
+                i += 1
+            tick()
+            clock.t += 0.003
+
+    loop, bt, clock, out = _loop("r6", slots=256)
+    loop.calls_for = lambda ready: [(512, [r]) for r in ready]
+    drive(loop.tick, lambda s: loop.open(s, s, Fut()), loop.window, clock)
+    clock2 = Clock()
+    bt2 = FakeBT(clock2, slots=256)
+    ref = Round6Oracle(mod, bt2, clock2)
+    drive(ref.tick, ref.open, ref.window, clock2)
+    norm = [(m[0], m[1], m[2], len(m[3])) if m[0] == "audio" else m for m in out]
+    assert [c[:2] for c in bt.calls] == [c[:2] for c in bt2.calls]
+    assert [round(c[2], 6) for c in bt.calls] == [round(c[2], 6) for c in bt2.calls]
+    assert norm == ref.out and len(ref.out) > 60

@@ -57,6 +57,8 @@ class LiveS:
     prompt_embeds: torch.Tensor | None = None
     # thinker
     pending_prefill: bool = True
+    prefilled: int = 0  # prompt tokens already in the Thinker KV (a long prompt is prefilled in budget-sized chunks)
+    prefill_now: int = 0  # prompt tokens the lane grants this tick
     generated: list[int] = field(default_factory=list)
     hidden: list[torch.Tensor] = field(default_factory=list)
     passed: int = 0
@@ -107,8 +109,9 @@ class TrackSBackend:
                  t2w_euler_graphs: bool = False, split_threads: bool = False, t2w_fast_dit: bool = False, t2w_fast_slots: int = 49152,
                  t2w_mps_sm_percent: int = 0, thinker_lazy: bool = False, profile: bool = False, t2w_policy: str = "edf",
                  t2w_setup_calls_when_busy: int = 1, t2w_max_decode_rows: int | None = None, t2w_first_slack_ms: float = 250.0,
-                 prefill_token_budget: int | None = 8192, prefill_max_age_ms: float = 250.0, prefill_slack_floor_ms: float | None = 300.0,
-                 feature_gpu_tokens: bool = True, feature_allocator: str = "jemalloc"):
+                 t2w_first_lane_slack_ms: float | None = None, prefill_token_budget: int | None = 2048, prefill_max_age_ms: float = 250.0,
+                 prefill_slack_floor_ms: float | None = 300.0, talker_start_budget: int | None = 1024, feature_gpu_tokens: bool = True,
+                 feature_allocator: str = "jemalloc"):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -129,15 +132,21 @@ class TrackSBackend:
         # scheduler knobs (task17), validated before any model is loaded
         if feature_allocator not in ("jemalloc", "glibc"):
             raise ValueError(f"feature_allocator must be 'jemalloc' or 'glibc', not {feature_allocator!r}")
-        if t2w_policy not in ("edf", "legacy"):
-            raise ValueError(f"t2w_policy must be 'edf' or 'legacy', not {t2w_policy!r}")
-        if int(t2w_setup_calls_when_busy) < 1 or (t2w_max_decode_rows is not None and int(t2w_max_decode_rows) < 1) or t2w_first_slack_ms < 0:
-            raise ValueError("t2w_setup_calls_when_busy and t2w_max_decode_rows must be >= 1, t2w_first_slack_ms >= 0")
+        from engine.runtime.t2w_worker import MODES
+
+        if t2w_policy not in MODES:
+            raise ValueError(f"t2w_policy must be one of {MODES}, not {t2w_policy!r}")
+        if int(t2w_setup_calls_when_busy) < 1 or (t2w_max_decode_rows is not None and int(t2w_max_decode_rows) < 1) or t2w_first_slack_ms < 0 \
+                or (t2w_first_lane_slack_ms is not None and t2w_first_lane_slack_ms < 0):
+            raise ValueError("t2w_setup_calls_when_busy and t2w_max_decode_rows must be >= 1, t2w_first_slack_ms and t2w_first_lane_slack_ms >= 0")
         if (prefill_token_budget is not None and int(prefill_token_budget) < 1) or prefill_max_age_ms < 0 or \
-                (prefill_slack_floor_ms is not None and prefill_slack_floor_ms < 0):
-            raise ValueError("prefill_token_budget must be >= 1 (or null), prefill_max_age_ms and prefill_slack_floor_ms >= 0")
+                (prefill_slack_floor_ms is not None and prefill_slack_floor_ms < 0) or (talker_start_budget is not None and int(talker_start_budget) < 1):
+            raise ValueError("prefill_token_budget and talker_start_budget must be >= 1 (or null), prefill_max_age_ms and prefill_slack_floor_ms >= 0")
         self.prefill_policy = PrefillPolicy(token_budget=prefill_token_budget, max_age_s=prefill_max_age_ms / 1000,
-                                            slack_floor_s=None if prefill_slack_floor_ms is None else prefill_slack_floor_ms / 1000)
+                                            slack_floor_s=None if prefill_slack_floor_ms is None else prefill_slack_floor_ms / 1000,
+                                            talker_start_budget=talker_start_budget)
+        self.sched = {"prefill_token_budget": prefill_token_budget, "prefill_tokens_tick_max": 0, "prefill_chunked_ticks": 0,
+                      "prefill_kv_wait_ticks": 0, "talker_starts_deferred_ticks": 0}  # scheduler counters for /metrics
 
         # two launch-bound host threads (Thinker/Talker and Token2Wav) share the GIL; hand it over often
         sys.setswitchinterval(switch_interval_s)
@@ -187,7 +196,8 @@ class TrackSBackend:
                                           "t2w_euler_graphs": t2w_euler_graphs, "t2w_fast_dit": t2w_fast_dit,
                                           "t2w_fast_slots": t2w_fast_slots, "mps_sm_percent": t2w_mps_sm_percent, "t2w_policy": t2w_policy,
                                           "t2w_setup_calls_when_busy": t2w_setup_calls_when_busy, "t2w_max_decode_rows": t2w_max_decode_rows,
-                                          "t2w_first_slack_ms": t2w_first_slack_ms, "feature_gpu_tokens": feature_gpu_tokens,
+                                          "t2w_first_slack_ms": t2w_first_slack_ms, "t2w_first_lane_slack_ms": t2w_first_lane_slack_ms,
+                                          "feature_gpu_tokens": feature_gpu_tokens,
                                           "feature_allocator": feature_allocator}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
@@ -305,7 +315,7 @@ class TrackSBackend:
                 "talker_kv_pages_used": self.akv.used_pages, "thinker_kv_pages": self.tkv.num_pages, "talker_kv_pages": self.akv.num_pages,
                 "gpu_memory_allocated_bytes": int(torch.cuda.memory_allocated()), "gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
                 "rss_max_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "rss_kib": _rss_kib(), "audio_live": len(self.audio_live),
-                **getattr(self, "t2w_stats", {})}
+                **self.sched, **getattr(self, "t2w_stats", {})}
 
     # --- engine thread ---------------------------------------------------------------------------
     def _run(self) -> None:
@@ -359,7 +369,7 @@ class TrackSBackend:
                             if not lv.wants_audio:
                                 self.live.pop(lv.seq, None)
                                 lv.finished = True
-                    rows = self._prefill_lane([lv for lv in list(self.live.values()) if not lv.thinker_done])
+                    rows, _ = self._prefill_lane([lv for lv in list(self.live.values()) if not lv.thinker_done])
                     if rows:
                         self._timed("thinker", self._thinker_step, rows)
                 self.talker_wake.set()
@@ -494,11 +504,16 @@ class TrackSBackend:
     def _tick(self) -> None:
         for lv in [x for x in self.live.values() if x.cancelled and not x.finished]:
             self._release(lv)
-        rows = self._prefill_lane([x for x in self.live.values() if not x.thinker_done])
+        rows, urgent = self._prefill_lane([x for x in self.live.values() if not x.thinker_done])
         if self.thinker_lazy and rows and not any(self._thinker_urgent(x) for x in rows):
             rows = []  # every Talker already holds a chunk beyond the one it decodes: give this tick to the Talker
-        self._timed("thinker", self._thinker_step, rows)
-        self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
+        if urgent:  # a continuing stream is short of playback: its next frames first, then the aged prefill slice
+            self._timed("thinker", self._thinker_step, [x for x in rows if not x.pending_prefill])
+            self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
+            self._timed("prefill", self._thinker_step, [x for x in rows if x.pending_prefill])
+        else:
+            self._timed("thinker", self._thinker_step, rows)
+            self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
         for lv in [x for x in list(self.live.values()) if x.utterance_done]:
             # the Thinker and Talker are done: free their KV; the Token2Wav thread emits the rest and Done
             self.tkv.release(lv.seq)
@@ -507,21 +522,48 @@ class TrackSBackend:
             if self.t2wp is None:
                 self.t2w_wake.set()
 
-    def _prefill_lane(self, rows: list) -> list:
-        """The Thinker rows of this tick: every decoding row, and the pending prefills the bounded first-chunk lane
-        admits (``t2w_sched.choose_prefills``: oldest first within the token budget, aged ones always, none but aged
-        ones while a continuing stream's buffered playback is below the slack floor)."""
-        pending = [lv for lv in rows if lv.pending_prefill]
-        if not pending:
-            return rows
-        from engine.runtime.t2w_sched import choose_prefills
+    def _min_slack(self, now: float) -> float | None:
+        """The least buffered playback among the continuing audio streams (None if none)."""
+        return min((lv.audio.slack(now) for lv in list(self.live.values()) + list(self.audio_live.values())
+                    if lv.audio is not None and lv.audio.started and not lv.finished and not lv.cancelled), default=None)
 
+    @staticmethod
+    def _growth(lv: LiveS) -> int:
+        """Thinker KV tokens a request may still add: the rest of its prompt and of its reply."""
+        return len(lv.prompt_ids) - lv.prefilled + max(0, lv.req.max_tokens - len(lv.generated)) + 1
+
+    def _prefill_lane(self, rows: list) -> tuple[list, bool]:
+        """The Thinker rows of this tick and whether a continuing stream is short of playback (``t2w_sched``): every
+        decoding row, and the prefill work the bounded first-chunk lane grants (``choose_prefills``: oldest first within
+        the hard token budget, chunking a prompt that alone exceeds it; only while the Thinker KV pool holds the
+        request's lifetime beside what running requests may still need; only aged ones below the slack floor).
+        ``lv.prefill_now`` is each granted request's share."""
+        from engine.runtime.t2w_sched import choose_prefills, low_slack
+
+        pending = [lv for lv in rows if lv.pending_prefill]
+        for lv in pending:
+            lv.prefill_now = 0
+        if not pending:
+            return rows, False
         now = _now()
-        slacks = [lv.audio.slack(now) for lv in list(self.live.values()) + list(self.audio_live.values())
-                  if lv.audio is not None and lv.audio.started and not lv.finished and not lv.cancelled]
-        take = set(choose_prefills([(lv.t_admit, len(lv.prompt_ids), lv.seq) for lv in pending], now, min(slacks, default=None),
-                                   self.prefill_policy))
-        return [lv for lv in rows if not lv.pending_prefill or lv.seq in take]
+        min_slack = self._min_slack(now)
+        free = len(self.tkv.free) - self.tdec.pad_pages_outstanding() - sum(
+            self.tkv.pages_needed(lv.seq, self._growth(lv)) for lv in rows if not lv.pending_prefill or lv.prefilled)
+        take = dict(choose_prefills([(lv.t_admit, len(lv.prompt_ids) - lv.prefilled, lv.seq,
+                                      0 if lv.prefilled else self.tkv.pages_needed(lv.seq, self._growth(lv))) for lv in pending],
+                                    now, min_slack, self.prefill_policy, free_pages=free))
+        urgent = low_slack(min_slack, self.prefill_policy)
+        for lv in pending:
+            lv.prefill_now = take.get(lv.seq, 0)
+        n = sum(take.values())
+        sc = self.sched
+        sc["prefill_tokens_tick_max"] = max(sc["prefill_tokens_tick_max"], n)
+        if any(0 < lv.prefill_now < len(lv.prompt_ids) - lv.prefilled for lv in pending):
+            sc["prefill_chunked_ticks"] += 1
+        oldest = min(pending, key=lambda lv: lv.t_admit)
+        if not oldest.prefill_now and not (urgent and now - oldest.t_admit < self.prefill_policy.max_age_s):
+            sc["prefill_kv_wait_ticks"] += 1  # the oldest waits for KV pages, not for the slack floor
+        return [lv for lv in rows if not lv.pending_prefill or lv.prefill_now], urgent and n > 0
 
     # thinker -----------------------------------------------------------------------------------
     @staticmethod
@@ -538,15 +580,9 @@ class TrackSBackend:
         dec = [lv for lv in rows if not lv.pending_prefill]
         results = []  # (lv, next token, hidden of the fed token or None)
         if pre:
-            embs = [lv.prompt_embeds.to(self.thinker.dtype) if lv.prompt_embeds is not None
-                    else self.thinker.embed(torch.tensor(lv.prompt_ids, device=self.device)) for lv in pre]
-            if len(pre) == 1 and self.tprefill is not None and self.tprefill.supports(embs[0].shape[0]):
-                last = self.tprefill.forward(embs[0], pre[0].seq)[-1:]  # graph-captured single-request prefill
-            else:
-                lay = self.tkv.layout([lv.seq for lv in pre], [len(lv.prompt_ids) for lv in pre])
-                last = self.trun.forward(torch.cat(embs), lay)[lay.last_token_index]
-            nxt = torch.nn.functional.linear(last, self.thinker.w["lm_head.weight"]).float().argmax(-1).tolist()
-            for lv, tok in zip(pre, nxt):
+            for lv, tok in zip(pre, self._prefill_forward(pre)):
+                if tok is None:
+                    continue  # a chunk of a long prompt: the rest in later ticks
                 lv.pending_prefill = False
                 lv.mark("prefilled")
                 results.append((lv, tok, None))
@@ -569,6 +605,33 @@ class TrackSBackend:
                 lv.chunk_index += 1
                 if last:
                     self._close_thinker(lv, passed_final=True)
+
+    def _prompt_embeds(self, lv: LiveS, a: int, b: int) -> torch.Tensor:
+        if lv.prompt_embeds is not None:
+            return lv.prompt_embeds[a:b].to(self.thinker.dtype)
+        return self.thinker.embed(torch.tensor(lv.prompt_ids[a:b], device=self.device))
+
+    def _prefill_forward(self, pre: list[LiveS]) -> list:
+        """Prefill each row's granted share of its prompt (``prefill_now``; the whole rest when not set) in one ragged
+        batch; returns each row's first reply token (greedy), or None while its prompt is not complete."""
+        ns = [lv.prefill_now or len(lv.prompt_ids) - lv.prefilled for lv in pre]
+        whole = all(lv.prefilled == 0 and n == len(lv.prompt_ids) for lv, n in zip(pre, ns))
+        if len(pre) == 1 and whole and self.tprefill is not None and self.tprefill.supports(ns[0]):
+            last = self.tprefill.forward(self._prompt_embeds(pre[0], 0, ns[0]), pre[0].seq)[-1:]  # graph-captured single-request prefill
+        else:
+            lay = self.tkv.layout([lv.seq for lv in pre], ns)
+            last = self.trun.forward(torch.cat([self._prompt_embeds(lv, lv.prefilled, lv.prefilled + n) for lv, n in zip(pre, ns)]), lay)
+            last = last[lay.last_token_index]
+        for lv, n in zip(pre, ns):
+            lv.prefilled += n
+            lv.prefill_now = 0
+        done = [i for i, lv in enumerate(pre) if lv.prefilled >= len(lv.prompt_ids)]
+        out = [None] * len(pre)
+        if done:
+            sel = last if len(done) == len(pre) else last[torch.tensor(done, device=last.device)]
+            for i, tok in zip(done, torch.nn.functional.linear(sel, self.thinker.w["lm_head.weight"]).float().argmax(-1).tolist()):
+                out[i] = tok
+        return out
 
     def _close_thinker(self, lv: LiveS, passed_final: bool = False) -> None:
         if not passed_final:
@@ -600,11 +663,26 @@ class TrackSBackend:
                 self.talker_wake.set()
 
     # talker ------------------------------------------------------------------------------------
+    def _talker_starts(self, starts: list[LiveS]) -> list[LiveS]:
+        """The chunk starts (Talker prefills) of this tick: earliest playback deadline first (a request without audio
+        yet: admission + ``max_age_s``, so first chunks lead unless a continuing stream is behind), within the per-tick
+        token budget (``t2w_sched.choose_starts``; at least one)."""
+        if not starts:
+            return starts
+        from engine.runtime.t2w_sched import choose_starts
+
+        pol = self.prefill_policy
+        keep = set(choose_starts([(lv.audio.t_exhaust if lv.audio is not None and lv.audio.started else lv.t_admit + pol.max_age_s,
+                                   len(lv.chunks[0].ids) + 2, lv.seq) for lv in starts], pol))
+        if len(keep) < len(starts):
+            self.sched["talker_starts_deferred_ticks"] += 1
+        return [lv for lv in starts if lv.seq in keep]
+
     def _talker_step(self, rows: list[LiveS]) -> None:
         from engine.talker_sampler import PAD, DecodeState, step
 
         eos = self.talker.cfg.eos
-        starts = [lv for lv in rows if not lv.talking and lv.chunks]
+        starts = self._talker_starts([lv for lv in rows if not lv.talking and lv.chunks])
         if starts:
             feeds = []
             for lv in starts:

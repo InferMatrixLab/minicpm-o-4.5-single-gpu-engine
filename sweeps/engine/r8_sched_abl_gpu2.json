@@ -1,0 +1,72 @@
+{
+ "description": "Round-8 task17 scheduler ablation (predeclared in round-8-contract.md) on tuning IDs, K=3, GPU2: legacy, the r6 control and four task17 variants (worker decode-first vs first-chunk lane 100 ms; prefill slack floor 300/100 ms/none), one revision; diagnostic, selects the frozen policy by the contract's rule",
+ "kind": "performance",
+ "id_set": "tuning",
+ "seed_index": 0,
+ "k": 3,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 2,
+ "port": 18922,
+ "run_order_seed": 20261802,
+ "concurrencies": [
+  4,
+  16
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_legacy",
+   "label": "A-legacy",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  },
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r6",
+   "label": "B-r6",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  },
+  {
+   "adapter": "engine",
+   "config": "r8_abl_c",
+   "label": "C-df-floor300",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  },
+  {
+   "adapter": "engine",
+   "config": "r8_abl_d",
+   "label": "D-df-nofloor",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  },
+  {
+   "adapter": "engine",
+   "config": "r8_abl_e",
+   "label": "E-lane100-floor100",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  },
+  {
+   "adapter": "engine",
+   "config": "r8_abl_f",
+   "label": "F-lane100-nofloor",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

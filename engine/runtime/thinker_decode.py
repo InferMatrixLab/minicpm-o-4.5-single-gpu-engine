@@ -141,6 +141,12 @@ class ThinkerDecoder:
 
     PAD_RESET = 64  # scratch rows restart (and the bucket re-plans) after this many steps: they hold at most 4 pages
 
+    def pad_pages_outstanding(self) -> int:
+        """KV pages the scratch padding rows may still take (each holds at most ``PAD_RESET`` tokens): the prefill
+        lane keeps them out of the pages it grants to requests."""
+        cap = -(-self.PAD_RESET // self.kv.page_size)
+        return sum(max(0, cap - len(self.kv.pages.get(p, []))) for bk in self.buckets.values() for p in bk.pads)
+
     def release_pads(self) -> None:
         """Free every bucket's scratch padding rows (call when no request is decoding): their pages return to the pool."""
         for bk in self.buckets.values():
