@@ -3,7 +3,7 @@
 # Usage: engine_quality_after.sh <wait-pid> <worktree>
 set -uo pipefail
 WAIT=$1; W=$2; Q=/workspace/cgzheng/cgzheng/qwen3_omni; OUT=$Q/results/engine_sweeps/quality_dev_gpu2
-while kill -0 "$WAIT" 2>/dev/null; do sleep 20; done
+[ "$WAIT" != 0 ] && while kill -0 "$WAIT" 2>/dev/null; do sleep 20; done
 for i in $(seq 60); do nvidia-smi -i 2 --query-compute-apps=pid --format=csv,noheader | grep -q . || break; sleep 5; done
 cd "$W"; source scripts/env.sh
 echo "[$(date +%T)] quality sweep start"

@@ -1,0 +1,27 @@
+{
+ "description": "Engine (track_s_fast) full-set speech quality at C=1 and C=32, seed 0 (GPU3), development evidence (no frozen Q_ref yet)",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 3,
+ "port": 18961,
+ "k": 1,
+ "run_order_seed": 20261604,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1,
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast",
+   "label": "track-s-fast-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

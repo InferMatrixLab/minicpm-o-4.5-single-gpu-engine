@@ -3,7 +3,7 @@
 # Usage: gpu_test_after.sh <wait-pid> <gpu> <log> <pytest args...>
 set -uo pipefail
 WAIT=$1; G=$2; LOG=$(realpath -m "$3"); shift 3
-while kill -0 "$WAIT" 2>/dev/null; do sleep 20; done
+[ "$WAIT" != 0 ] && while kill -0 "$WAIT" 2>/dev/null; do sleep 20; done
 for i in $(seq 60); do nvidia-smi -i "$G" --query-compute-apps=pid --format=csv,noheader | grep -q . || break; sleep 5; done
 cd /workspace/cgzheng/cgzheng/qwen3_omni; source scripts/env.sh
 echo "[$(date +%T)] start $*" > "$LOG"
