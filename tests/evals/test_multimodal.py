@@ -364,3 +364,21 @@ def test_daily_omni_sglang_form_is_the_native_video_request():
         assert Path(parts[0]["video_url"]["url"]).name == f"{r.daily_omni_video_id}_video.mp4" and Path(parts[0]["video_url"]["url"]).exists()
         assert parts[1:] == [c for c in native["messages"][0]["content"] if c["type"] == "text"]
         assert "mm_processor_kwargs" not in sgl and sgl["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_launch_from_a_worktree_copy_of_the_serve_script(tmp_path):
+    """A serve script launched from another checkout (frozen campaign worktree) counts as the declared launch only when
+    it is scripts/<name> there with the same bytes; a modified copy or another script does not."""
+    from evals.multimodal.suite import same_launch
+
+    here = Path(__file__).resolve().parents[2] / "scripts" / "serve_vllm_omni.sh"
+    want = ["bash", str(here), "minicpmo_4_5_turn.yaml", "18620"]
+    wt = tmp_path / "wt" / "scripts"
+    wt.mkdir(parents=True)
+    (wt / "serve_vllm_omni.sh").write_bytes(here.read_bytes())
+    assert same_launch(["bash", str(wt / "serve_vllm_omni.sh"), "minicpmo_4_5_turn.yaml", "18620"], want)
+    assert not same_launch(["bash", str(wt / "serve_vllm_omni.sh"), "minicpmo_4_5_turn_mrv2.yaml", "18620"], want)
+    (wt / "serve_vllm_omni.sh").write_bytes(here.read_bytes() + b"\nexport X=1\n")
+    assert not same_launch(["bash", str(wt / "serve_vllm_omni.sh"), "minicpmo_4_5_turn.yaml", "18620"], want)
+    (wt / "other.sh").write_bytes(here.read_bytes())
+    assert not same_launch(["bash", str(wt / "other.sh"), "minicpmo_4_5_turn.yaml", "18620"], want)

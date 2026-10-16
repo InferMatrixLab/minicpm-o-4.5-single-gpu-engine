@@ -172,7 +172,7 @@ def generation_problems(rep: dict, report_dir: Path | None = None) -> list[str]:
     if not ev.get("gpu_workers") or not ev.get("process_tree") or not {w.get("pid") for w in ev["gpu_workers"]} <= set(ev["process_tree"]):
         out.append("server evidence has no GPU workers of the launched process tree")
     hw = gen.get("hardware") or {}
-    if ev.get("launch_argv") != server_spec(cand, gen["port"], hw.get("gpu_index")).cmd:
+    if not same_launch(ev.get("launch_argv"), server_spec(cand, gen["port"], hw.get("gpu_index")).cmd):
         out.append("observed launch arguments are not the declared candidate's")
     if any((ev.get("launch_env") or {}).get(k) != v for k, v in c["env"]):
         out.append("observed launch environment lacks the declared candidate environment")
@@ -250,6 +250,24 @@ def coverage(ids: list[str], per: list[dict], expected_ids: list[str]) -> dict:
     complete = bool(expected_ids) and got == expected_ids == ids and not failed and len(set(got)) == len(got)
     return {"declared": len(expected_ids), "answered": len(got), "failed": len(failed), "failed_examples": failed[:5], "complete": complete,
             "ids_sha256": hashlib.sha256("\n".join(expected_ids).encode()).hexdigest()}
+
+
+def same_launch(got: list[str] | None, want: list[str]) -> bool:
+    """The observed launch is the declared one.  A serve script may come from another checkout of this repository (a
+    frozen campaign worktree): it then counts as the same argument only if it is ``scripts/<name>`` there with exactly
+    the bytes of this checkout's script."""
+    if got == want:
+        return True
+    if not got or len(got) != len(want):
+        return False
+    for g, w in zip(got, want):
+        if g == w:
+            continue
+        gp, wp = Path(g), Path(w)
+        if not (gp.name == wp.name and gp.parent.name == wp.parent.name == "scripts" and gp.is_file() and wp.is_file()
+                and gp.read_bytes() == wp.read_bytes()):
+            return False
+    return True
 
 
 def verify_mm_report(report_dir: str | Path, rescore: bool = True) -> tuple[dict, dict, list[str]]:

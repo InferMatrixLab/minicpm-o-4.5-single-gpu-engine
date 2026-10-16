@@ -103,7 +103,7 @@ class TrackSBackend:
                  t2w_profile_path: str | None = None, thinker_page_size: int | None = None, talker_page_size: int | None = None,
                  feature_processes: int = 0, thinker_fp8: bool = False, talker_k_max: int = 4, prefill_graphs: bool = False,
                  t2w_euler_graphs: bool = False, split_threads: bool = False, t2w_fast_dit: bool = False, t2w_fast_slots: int = 49152,
-                 t2w_mps_sm_percent: int = 0, profile: bool = False):
+                 t2w_mps_sm_percent: int = 0, thinker_lazy: bool = False, profile: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -175,6 +175,7 @@ class TrackSBackend:
         self.frontend = MultimodalFrontend(model_dir, device=device)
         self.device, self.max_live, self.talker_k, self.talker_k_max = device, max_live, talker_k, talker_k_max
         self.admitted = 0
+        self.thinker_lazy = thinker_lazy
         self.profile = profile
         self.timelines: dict[str, list[tuple[str, float]]] = {}  # request id -> (event, perf_counter), when profiling
         self.tick_profile: dict[str, list] = {}  # stage -> [calls, seconds], when profiling
@@ -459,7 +460,10 @@ class TrackSBackend:
     def _tick(self) -> None:
         for lv in [x for x in self.live.values() if x.cancelled and not x.finished]:
             self._release(lv)
-        self._timed("thinker", self._thinker_step, [x for x in self.live.values() if not x.thinker_done])
+        rows = [x for x in self.live.values() if not x.thinker_done]
+        if self.thinker_lazy and rows and not any(self._thinker_urgent(x) for x in rows):
+            rows = []  # every Talker already holds a chunk beyond the one it decodes: give this tick to the Talker
+        self._timed("thinker", self._thinker_step, rows)
         self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
         for lv in [x for x in list(self.live.values()) if x.utterance_done]:
             # the Thinker and Talker are done: free their KV; the Token2Wav thread emits the rest and Done
@@ -470,6 +474,13 @@ class TrackSBackend:
                 self.t2w_wake.set()
 
     # thinker -----------------------------------------------------------------------------------
+    @staticmethod
+    def _thinker_urgent(lv: LiveS) -> bool:
+        """A Thinker row that must step now: before its first text chunk (time to first audio), text-only, or its
+        Talker holds at most the chunk it is decoding.  Lazy mode steps the Thinker only when some row is urgent (and
+        then steps every active row, a step costs the same at any batch); greedy text makes this timing-only."""
+        return lv.pending_prefill or not lv.wants_audio or lv.chunk_index == 0 or len(lv.chunks) <= 1
+
     def _thinker_step(self, rows: list[LiveS]) -> None:
         if not rows:
             return
