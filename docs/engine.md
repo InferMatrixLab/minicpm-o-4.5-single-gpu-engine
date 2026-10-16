@@ -41,6 +41,11 @@ audio.
   - While a continuing stream has less than `prefill_slack_floor_ms` of buffered playback, only aged prefills run.
   - `null` budget and floor give the rounds 4–6 behaviour (every pending prefill each tick).
 - **Tests** (CPU): `tests/engine_api/test_t2w_sched.py`, `test_t2w_worker_loop.py` (the production loop with a fake model and clock) and `test_prefill_lane.py`.
+- **Measured (L20X, K=5, 7be6f4a; `tools/sched_compare.py` over `results/engine_sweeps/r7_sched_cmp_gpu{2,3}`)**: `track_s_fast` (this policy) against `track_s_fast_legacy` (rounds 4–5).
+  - Throughput and RTF are within ±2.5% at every C.
+  - The largest stall is lower (at C=32, 0.16 s against 0.27 s).
+  - TTFA is worse from C=4 up: p95 −6% at C=4, −9% at C=8, −16% at C=16 and −8% at C=32; p50 −10% at C=32.
+  - The policy buys playback continuity with first-audio latency. Which knob costs the TTFA (`t2w_setup_calls_when_busy`, the prefill slack floor or the token budget) is not yet measured.
 - **Robustness** (`tools/robustness.py`, replay with `tools/robustness_replay.py`): the module docstring lists the scenarios, the predeclared memory rule (±1% of the first sample at or after 60 s, over every later sample and the drained endpoint; CUDA allocated bytes back within 16 MiB of the warmed baseline) and the per-request artifacts (`requests.jsonl`, `wire.jsonl.gz`) the verdict can be rebuilt from.
 
 ## Environments
