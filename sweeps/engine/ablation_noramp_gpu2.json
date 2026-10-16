@@ -1,0 +1,26 @@
+{
+ "description": "Ablation: track_s_fast without the first-chunk ramp, C=1, tuning rows, seed 0 (development)",
+ "kind": "quality",
+ "id_set": "tuning",
+ "seed_index": 0,
+ "gpu": 2,
+ "port": 18962,
+ "k": 1,
+ "run_order_seed": 20261605,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_noramp",
+   "label": "track-s-fast-noramp-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
