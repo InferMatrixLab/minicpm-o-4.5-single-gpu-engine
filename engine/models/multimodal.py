@@ -94,6 +94,7 @@ class MultimodalFrontend:
         embed.weight.data = w["llm.model.embed_tokens.weight"]
         object.__setattr__(m, "llm", SimpleNamespace(model=SimpleNamespace(embed_tokens=embed), config=SimpleNamespace(hidden_size=cfg.hidden_size)))
         m.to(dtype).eval()
+        m.to(device)  # buffers built on the CPU (the resampler's NumPy sin-cos table) move as HF's model.to(device) moves them
         embed.to(device=device, dtype=dtype)
         self.m, self.cfg, self.device, self.dtype = m, cfg, device, dtype
         self.processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
