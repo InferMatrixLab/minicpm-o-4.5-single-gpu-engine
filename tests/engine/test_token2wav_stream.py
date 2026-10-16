@@ -332,3 +332,48 @@ def test_whole_euler_graph_matches_eager(float16, first_chunk):
         for x, y in zip(mels[1][j], mels[0][j]):
             assert x.shape == y.shape
             assert float((x - y).norm() / y.norm()) <= tol, j
+
+
+@pytest.mark.parametrize("graphs,first_chunk", [(False, 25), (True, 25), (True, 8)])
+def test_fast_dit_matches_eager(graphs, first_chunk):
+    """The fast DiT solve (slot-pool caches, packed ragged rows; ``engine.runtime.dit_fast``) gives the eager batched
+    FP16 mels within the AC-3.4 FP16 bound, setups included, for ragged prompts, staggered streams, ramped first
+    windows and merged finals; every cache slot is returned when the streams are released."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", float16=True, noise_seed=7)
+    feats = [ours.features(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav")]
+    gen = np.random.default_rng(8)
+    plans = []
+    for n in (120, 95, 70):
+        ch = StreamChunker(first_chunk=first_chunk)
+        plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
+    starts = [0, 1, 2]
+    mels = []
+    for bt in (BatchedToken2Wav(ours), BatchedToken2Wav(ours, use_graphs=graphs, fast_dit=True, fast_slots=8192)):
+        rec, flow = [], bt._flow
+        bt._flow = lambda sts, ws, last, *rest, flow=flow, rec=rec: (lambda m: rec.extend(zip([id(s) for s in sts], [x.float().cpu() for x in m])) or m)(
+            flow(sts, ws, last, *rest))
+        prompts = bt.setup_many(feats)
+        sts = [bt.new_stream(p, noise_seed=j, adopt=True) for j, p in enumerate(prompts)]
+        order = {id(st): j for j, st in enumerate(sts)}
+        for tick in range(max(s + len(p) for s, p in zip(starts, plans))):
+            items = [(sts[j], *plans[j][tick - s]) for j, s in enumerate(starts) if s <= tick < s + len(plans[j])]
+            bt.decode(items)
+        got = {j: [] for j in range(3)}
+        for sid, m in rec:
+            got[order[sid]].append(m)
+        mels.append(got)
+        if bt.fast is not None:
+            assert bt.fast.counts["graph" if graphs else "eager"] > 0, bt.fast.counts
+            for st in sts:
+                bt.release_stream(st)
+            assert bt.fast.pool.in_use() == bt.fast.scratch
+    errs = []
+    for j in range(3):
+        for x, y in zip(mels[1][j], mels[0][j]):
+            assert x.shape == y.shape
+            errs.append(float((x - y).norm() / y.norm()))
+    assert max(errs) <= 5e-3, errs  # AC-3.4 FP16 bound

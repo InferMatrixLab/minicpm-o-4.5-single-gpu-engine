@@ -95,10 +95,13 @@ def worker_main(inq, outq, cfg: dict) -> None:
     model_dir = cfg["model_dir"]
     t2w = Token2Wav(f"{model_dir}/assets/token2wav", float16=cfg.get("float16_flow", False), spk_threads=cfg.get("spk_threads", 8))
     bt = BatchedToken2Wav(t2w, use_graphs=cfg.get("t2w_graphs", False), compile_estimator=cfg.get("t2w_compile", False),
-                          euler_graphs=cfg.get("t2w_euler_graphs", False))
+                          euler_graphs=cfg.get("t2w_euler_graphs", False), fast_dit=cfg.get("t2w_fast_dit", False),
+                          fast_slots=cfg.get("t2w_fast_slots", 49152))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
-            bt.capture_graphs(bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav")))
+            p0 = bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav"))
+            bt.capture_graphs(p0)
+            bt.release_prompt(p0)
     if cfg.get("feature_processes", 0):  # features in their own processes (own GILs): parallel under load
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor
@@ -112,6 +115,11 @@ def worker_main(inq, outq, cfg: dict) -> None:
         pool = ThreadPoolExecutor(cfg.get("feature_workers", 4), thread_name_prefix="t2w-features")
     min_batch, max_wait = cfg.get("t2w_min_batch", 8), cfg.get("t2w_max_wait_ms", 40.0) / 1000
     reqs: dict[int, _Req] = {}
+
+    def drop(seq: int) -> None:  # a request leaves the worker: its stream's cache slots go back (fast DiT)
+        r = reqs.pop(seq, None)
+        if r is not None and r.stream is not None:
+            bt.release_stream(r.stream)
     wake = threading.Event()
     msgs: deque = deque()
     prof_path = cfg.get("profile_path")
@@ -178,7 +186,7 @@ def worker_main(inq, outq, cfg: dict) -> None:
                 if seq in reqs:
                     reqs[seq].windows.append((tokens, last, index, time.perf_counter()))
             elif kind == "close":
-                reqs.pop(m[1], None)
+                drop(m[1])
         worked = False
         with torch.inference_mode():
             # setups of every voice whose features are ready, batched per frame bucket
@@ -189,7 +197,7 @@ def worker_main(inq, outq, cfg: dict) -> None:
                     f = tuple(x.cuda(non_blocking=True) if x.device.type == "cpu" else x for x in r.features.result())
                 except Exception as e:
                     outq.put(("error", r.seq, f"reference audio: {type(e).__name__}: {e}"))
-                    reqs.pop(r.seq, None)
+                    drop(r.seq)
                     continue
                 groups.setdefault(next((b for b in SETUP_T if b >= f[3].shape[1]), -f[3].shape[1]), []).append((r, f))
             for b, items in groups.items():
@@ -207,10 +215,13 @@ def worker_main(inq, outq, cfg: dict) -> None:
                     except Exception as e:
                         for r, _ in part:
                             outq.put(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
-                            reqs.pop(r.seq, None)
+                            drop(r.seq)
                         continue
                     for (r, _), p in zip(part, prompts):
-                        r.stream = t2w.new_stream(p, noise_seed=r.noise_seed)
+                        if r.seq in reqs:
+                            r.stream = bt.new_stream(p, noise_seed=r.noise_seed, adopt=True)
+                        else:  # closed while its setup ran
+                            bt.release_prompt(p)
                     worked = True
             ready = [r for r in reqs.values() if r.stream is not None and r.windows]
             if ready:
@@ -230,7 +241,7 @@ def worker_main(inq, outq, cfg: dict) -> None:
                     except Exception as e:
                         for r in ready:
                             outq.put(("error", r.seq, f"token2wav: {type(e).__name__}: {e}"))
-                            reqs.pop(r.seq, None)
+                            drop(r.seq)
                         wavs = []
                     for r, (_, _, last), wav in zip(ready, items, wavs):
                         if len(wav):
@@ -238,7 +249,7 @@ def worker_main(inq, outq, cfg: dict) -> None:
                             r.offset += len(wav)
                         if last:
                             outq.put(("done", r.seq))
-                            reqs.pop(r.seq, None)
+                            drop(r.seq)
                     worked = True
         if not worked and not msgs:
             wake.wait(0.002)

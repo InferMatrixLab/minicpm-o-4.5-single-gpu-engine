@@ -108,8 +108,18 @@ def _block_chunk(block, x, c, cnn_cache, att_cache, mask, tr):
 
 
 class BatchedToken2Wav:
-    def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False):
+    def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
+                 fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96):
+        """``fast_dit``: the estimator solve of ``engine.runtime.dit_fast`` (slot-pool caches, packed ragged rows, CUDA
+        graphs with ``use_graphs``) in place of the reference-module solve; FP16 flow only.  Streams must then be made with
+        ``new_stream`` and released with ``release_stream``."""
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
+        self.fast = None
+        if fast_dit:
+            from engine.runtime.dit_fast import FastDiT
+
+            assert t2w.float16, "the fast DiT runs the FP16 flow"
+            self.fast = FastDiT(t2w.flow.decoder, t2w.n_timesteps, n_slots=fast_slots, max_streams=max_streams, use_graphs=use_graphs)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.merge_finals = True
         self.max_flow_streams = 32  # the staged per-step solve keeps a 32-stream call's transient memory small
@@ -123,7 +133,7 @@ class BatchedToken2Wav:
             self.enc_graphs = EncoderGraphs(self.flow.encoder, _encoder_core, self.dtype)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.graphs = self.euler = None
-        if use_graphs:
+        if use_graphs and self.fast is None:
             from engine.runtime.dit_graph import EstimatorGraphs, EulerGraphs
 
             est = self.flow.decoder.estimator
@@ -156,10 +166,37 @@ class BatchedToken2Wav:
                             mels[i] = m
             return self._prof("vocode", len(items), self._vocode, items, mels)
 
+    def new_stream(self, prompt, noise_seed: int = 0, adopt: bool = False):
+        """``Token2Wav.new_stream``; with the fast DiT the stream gets its own copy of the prompt's estimator caches, or
+        takes them over (``adopt``: the prompt is used once, as the engine's worker does)."""
+        if self.fast is None:
+            return self.t2w.new_stream(prompt, noise_seed=noise_seed)
+        fc = prompt.flow_cache
+        st = self.t2w.new_stream(prompt.__class__(**{**prompt.__dict__, "flow_cache": {k: v for k, v in fc.items() if k != "fast"}}),
+                                 noise_seed=noise_seed)
+        st.prompt = prompt
+        st.flow_cache["fast"] = fc["fast"] if adopt else self.fast.clone(fc["fast"])
+        if adopt:
+            fc["fast"] = None
+        return st
+
+    def release_stream(self, st) -> None:
+        """Return a finished or abandoned stream's estimator cache slots (fast DiT; a no-op otherwise)."""
+        if self.fast is not None and st is not None and st.flow_cache.get("fast") is not None:
+            self.fast.release(st.flow_cache["fast"])
+            st.flow_cache["fast"] = None
+
+    def release_prompt(self, prompt) -> None:
+        if self.fast is not None and prompt is not None and prompt.flow_cache.get("fast") is not None:
+            self.fast.release(prompt.flow_cache["fast"])
+            prompt.flow_cache["fast"] = None
+
     @torch.inference_mode()
     def capture_graphs(self, prompt) -> dict:
         """Capture every Token2Wav graph now (startup); ``prompt`` (any prepared one) supplies the cache dtypes."""
         n = {}
+        if self.fast is not None and self.fast.use_graphs:
+            n["dit"] = self.fast.capture_all()
         if self.graphs is not None:
             n["estimator"] = self.graphs.capture_all()
         if self.euler is not None:
@@ -204,14 +241,24 @@ class BatchedToken2Wav:
         spk = flow.spk_embed_affine_layer(F.normalize(torch.cat([st.prompt.spk for st in sts]), dim=1))
         h = flow.encoder_proj(self._prof("encoder", n, self._encoder, sts, flow.input_embedding(tok), last, valid))
         t_real = [2 * len(w) if fin else h.shape[1] for w, fin in zip(windows, lasts)] if merged else None
-        mel = self._prof("solve", n, self._solve, sts, h.transpose(1, 2).contiguous(), spk, None, not last, t_real)
+        if self.fast is not None:
+            mu = h.transpose(1, 2)
+            Ts = t_real if t_real is not None else [h.shape[1]] * n
+            mels = self._prof("solve", n, self.fast.solve, [st.flow_cache["fast"] for st in sts], [mu[i, :, :Ts[i]] for i in range(n)], spk, None,
+                              [not fin for fin in lasts])
+        else:
+            mel = self._prof("solve", n, self._solve, sts, h.transpose(1, 2).contiguous(), spk, None, not last, t_real)
         out = []
         for i, st in enumerate(sts):
             keep = st.prompt.mels.shape[1]
             c = st.flow_cache
-            c["estimator_att_cache"] = _trim(c["estimator_att_cache"], keep, 4)
+            if self.fast is None:
+                c["estimator_att_cache"] = _trim(c["estimator_att_cache"], keep, 4)
             c["conformer_att_cache"] = _trim(c["conformer_att_cache"], keep, 3)
-            out.append(mel[i:i + 1, :, :t_real[i]] if t_real is not None else mel[i:i + 1])
+            if self.fast is not None:
+                out.append(mels[i][None])
+            else:
+                out.append(mel[i:i + 1, :, :t_real[i]] if t_real is not None else mel[i:i + 1])
         assert all(len(w) - (0 if fin else PRE_LOOKAHEAD) <= h.shape[1] // 2 for w, fin in zip(windows, lasts))
         return out
 
@@ -278,6 +325,14 @@ class BatchedToken2Wav:
                                                         cnn_cache=None, att_cache=None)
                 h = flow.encoder_proj(h)
                 assert h.shape[1] == mels.shape[1], (h.shape, mels.shape)
+                if self.fast is not None:
+                    sts.append(StreamState(prompt=None, flow_cache={"conformer_cnn_cache": cnn.clone(), "conformer_att_cache": att.clone()},
+                                           hift_cache={}))
+                    hs.append(h.transpose(1, 2))
+                    conds.append(mels.transpose(1, 2))
+                    spks.append(flow.spk_embed_affine_layer(F.normalize(spk, dim=1)))
+                    lens.append(h.shape[1])
+                    continue
                 sts.append(StreamState(prompt=None, flow_cache={
                     "conformer_cnn_cache": cnn.clone(), "conformer_att_cache": att.clone(),
                     "estimator_cnn_cache": torch.zeros(steps, depth, 2, blk.conv.in_channels + blk.conv.out_channels, 2, device="cuda", dtype=dt),
@@ -287,6 +342,13 @@ class BatchedToken2Wav:
                 conds.append(mels.transpose(1, 2))
                 spks.append(flow.spk_embed_affine_layer(F.normalize(spk, dim=1)))
                 lens.append(h.shape[1])
+            if self.fast is not None:
+                caches = [self.fast.new_cache() for _ in sts]
+                for c, st, L in zip(caches, sts, lens):
+                    c.keep = L  # the trim length: the prompt's mel frames
+                    st.flow_cache["fast"] = c
+                self.fast.solve(caches, [x[0] for x in hs], torch.cat(spks), [x[0] for x in conds], [True] * len(sts))
+                return [self.t2w.prompt(f, st.flow_cache) for f, st in zip(feats_list, sts)]
             T = max(lens)
             padded = lambda xs: torch.cat([F.pad(x, (0, T - x.shape[2])) for x in xs])  # noqa: E731
             self._solve(sts, padded(hs).contiguous(), torch.cat(spks), cond=padded(conds).contiguous(), keep_cache=True, t_real=lens)
