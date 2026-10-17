@@ -71,8 +71,10 @@ def main(argv=None) -> int:
         os.environ.setdefault(k, v)  # as the worker sets them for its feature processes
     if os.environ.get("FEATURE_ALLOCATOR", "jemalloc") == "jemalloc":  # the worker's default (FEATURE_ALLOCATOR=glibc: without)
         os.environ["LD_PRELOAD"] = W.JEMALLOC
+        os.environ.setdefault("MALLOC_CONF", W.FEATURE_MALLOC_CONF)  # the worker's default (MALLOC_CONF= overrides)
+    warm_jobs = int(os.environ.get("FEATURE_WARM_JOBS", W.FEATURE_WARM_JOBS))
     pool = ProcessPoolExecutor(a.processes, mp_context=mp.get_context("spawn"), initializer=W._feat_init, initargs=(MODEL, 8, True))
-    for f in [pool.submit(W._feat_warm, voice) for _ in range(a.processes)]:
+    for f in [pool.submit(W._feat_warm, voice, warm_jobs) for _ in range(a.processes)]:
         f.result()
     pids = sorted(pool._processes)
     samples = []

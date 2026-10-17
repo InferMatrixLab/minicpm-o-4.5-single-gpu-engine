@@ -1,6 +1,6 @@
 """Rebuild a robustness run's whole verdict from its saved artifacts (written by tools/robustness.py).
 
-    python tools/robustness_replay.py DIR      # exit 0 when the rebuilt verdict equals the report
+    python tools/robustness_replay.py DIR      # exit 0 when the rebuilt verdict equals the report; writes DIR/replay.json
 
 From ``robustness.json``, ``requests.jsonl`` and ``wire.jsonl.gz`` alone (both read as streams, in their common write
 order):
@@ -254,7 +254,10 @@ def verify(out_dir: str | Path) -> dict:
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     res = verify(argv[0])
-    print(json.dumps(res, indent=1, default=str)[:20000])
+    (Path(argv[0]) / "replay.json").write_text(json.dumps(res, indent=1, default=str))  # the whole result
+    rebuilt = res["rebuilt"]
+    print(json.dumps({"ok": res["ok"], "problems": res["problems"], "overall": rebuilt.get("overall"), "passed": rebuilt.get("passed"),
+                      "written": str(Path(argv[0]) / "replay.json")}, indent=1, default=str))
     return 0 if res["ok"] else 1
 
 

@@ -171,6 +171,13 @@ def _trim_heap() -> None:
 
 
 JEMALLOC = "/lib/x86_64-linux-gnu/libjemalloc.so.2"  # the feature processes' allocator (system package libjemalloc2)
+# jemalloc returns freed pages at once (by default it keeps them for 10 s, so RSS follows the last seconds' job sizes:
+# +-0.3-0.6% between samples), and each feature process runs synthetic jobs before load until its heap has the layout
+# steady load leaves it in (without them RSS still rose ~0.7% in the first ~3 minutes of load, after the soak's 60 s
+# reference: the failed 53d1135 acceptance).  Measured over the robustness sequence (tools/spike/feature_scenario_rss.py,
+# results/engine_dev/r8_memory): per-PID max deviation 0.27-0.40% with both against 0.38-0.55%, the same job time.
+FEATURE_MALLOC_CONF = "dirty_decay_ms:0,muzzy_decay_ms:0"
+FEATURE_WARM_JOBS = 2000
 SETUP_FRAME_BUDGET = 16 * 512  # rows x frames per eager batched setup call (its new caches: ~2.7 GB in FP16)
 
 
@@ -234,12 +241,13 @@ def _warm_jobs(n: int, seed: int = 2) -> None:
         _feat_job(b.getvalue())
 
 
-def _feat_warm(ref: bytes):
-    """Warm a feature process before load (the per-shape FFT caches, the speaker model's arena at ARENA_WARM_S, then two
-    real jobs); the job also holds the process for a while, so the pool starts every process (each runs one)."""
+def _feat_warm(ref: bytes, warm_jobs: int = 0):
+    """Warm a feature process before load (the per-shape FFT caches, the speaker model's arena at ARENA_WARM_S,
+    ``warm_jobs`` synthetic jobs, then two real jobs); the job also holds the process for a while, so the pool starts
+    every process (each runs one)."""
     _warm_shape_caches()
     _warm_arena()
-    _warm_jobs(int(os.environ.get("FEATURE_WARM_JOBS", "0")))
+    _warm_jobs(warm_jobs)
     _feat_job(ref)
     time.sleep(2.0)
     return _feat_job(ref)
@@ -483,12 +491,14 @@ def _worker_main(inq, outq, cfg: dict) -> None:
             if not os.path.isfile(lib):
                 raise RuntimeError(f"feature_allocator jemalloc: {lib} not found")
             os.environ["LD_PRELOAD"] = lib  # the spawned feature processes only; this process keeps its allocator
+            os.environ["MALLOC_CONF"] = cfg.get("feature_malloc_conf", FEATURE_MALLOC_CONF)  # read by jemalloc only
         elif alloc != "glibc":
             raise ValueError(f"feature_allocator must be 'jemalloc' or 'glibc', not {alloc!r}")
         pool = ProcessPoolExecutor(cfg["feature_processes"], mp_context=mp.get_context("spawn"), initializer=_feat_init,
                                    initargs=(model_dir, cfg.get("spk_threads", 8), cfg.get("feature_gpu_tokens", True)))
         ref = open(f"{model_dir}/assets/HT_ref_audio.wav", "rb").read()
-        for f in [pool.submit(_feat_warm, ref) for _ in range(cfg["feature_processes"])]:
+        warm = cfg.get("feature_warm_jobs", FEATURE_WARM_JOBS)
+        for f in [pool.submit(_feat_warm, ref, warm) for _ in range(cfg["feature_processes"])]:
             f.result()  # every process started, its models loaded and its kernels warm
     else:
         pool = ThreadPoolExecutor(cfg.get("feature_workers", 4), thread_name_prefix="t2w-features")
