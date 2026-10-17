@@ -534,3 +534,25 @@ def test_cancel_parser_requires_valid_audio_before_the_disconnect():
     assert "audio_gap" in _cancel(_sse_server(cases["wrong_offset"]))["cancel_problems"]
     assert "error" in _cancel(_sse_server(cases["error_first"]))["cancel_problems"]
     assert "http_503" in _cancel(_sse_server([], status=503))["cancel_problems"]
+
+
+def test_quiet_gc_restores_the_collector_and_sustain_reports_loop_health(monkeypatch):
+    """No automatic collection while clients run (a full collection over the held records stalls every client), the
+    collector restored afterwards (also on an error), and the generator's own loop lag reported with the verdict."""
+    import gc
+
+    assert gc.isenabled()
+    try:
+        with rb.quiet_gc():
+            assert not gc.isenabled()
+            raise RuntimeError
+    except RuntimeError:
+        pass
+    assert gc.isenabled() and gc.get_freeze_count() == 0
+    monkeypatch.setattr(rb, "gpu_memory_used_mib", lambda u: 100.0 if u else None)
+    be = Backend(delay=0.05)
+    res, _, _ = _run(be, lambda u: rb.scenario_sustain(u, get_adapter("engine"), _reqs(3), 2, 0.05, "GPU-x", be.stats(), interval_s=0.2,
+                                                       ref_s=0.5, expect=rb.Expect(2)))
+    h = res["loop_health"]
+    assert res["passed"] and gc.isenabled() and h["gc_auto"] is False and h["gc_young_calls"] == res["samples"], res
+    assert 0 <= h["loop_lag_max_s"] < rb.REFILL_TOL_S

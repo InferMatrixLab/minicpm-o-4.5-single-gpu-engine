@@ -25,7 +25,7 @@ Scenarios (in this order):
   Continuity (from the requests' own times): every client's next request within ``REFILL_TOL_S`` of its previous
   completion, its first within ``REFILL_TOL_S`` of the start, busy to the deadline.  After the drain the counters equal
   the warmed baseline;
-* long-prefill (after the sustain endpoint, so the memory series is untouched): ``LONG_N`` prompts of ~6000 tokens
+* long-prefill (after the sustain endpoint, so the memory series is untouched): ``LONG_N`` prompts of about 5400 tokens
   arrive at once beside ``LONG_STREAMS`` clients that keep speaking: every request valid, every stall <= 2 s, the
   engine's largest per-tick prefill work within its declared token budget (the long prompts chunked), and the drain
   back to the baseline.
@@ -62,6 +62,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
+import gc
 import gzip
 import hashlib
 import io
@@ -109,7 +111,7 @@ STALL_MAX_S = 2.0  # AC-6: continuation stalls under sustained arrivals
 REFILL_TOL_S = 0.05  # continuity: a sustain client's next request starts within this of its previous completion
 BUSY_TOL_S = 0.5  # a client's last request ends at most this long before the deadline
 ACCEPT_MINUTES, ACCEPT_C = 30.0, 32  # acceptance geometry
-LONG_N, LONG_STREAMS, LONG_PROMPT_WORDS = 8, 24, 4500  # long-prefill scenario: 8 prompts of ~6000 tokens beside 24 speaking clients
+LONG_N, LONG_STREAMS, LONG_PROMPT_WORDS = 8, 24, 4500  # long-prefill scenario: 8 prompts of about 5400 tokens beside 24 speaking clients
 SCENARIOS = ("mixed", "cancel", "eos_boundary", "fallback", "overload", "sustain", "long_prefill")
 CHECKER_FILES = ("tools/robustness.py", "tools/robustness_replay.py", "bench/client.py", "bench/metrics.py", "bench/audio.py", "bench/sse.py")
 
@@ -164,7 +166,55 @@ def gpu_memory_used_mib(uuid: str | None) -> float | None:
 
 async def sample(url: str, gpu_uuid: str | None) -> dict:
     """One reading: wall time (``t``, for producer freshness), monotonic time (``tm``), counters, GPU memory used."""
-    return {"t": time.time(), "tm": time.perf_counter(), **await metrics(url), "gpu_memory_used_mib": gpu_memory_used_mib(gpu_uuid)}
+    t, tm, m = time.time(), time.perf_counter(), await metrics(url)
+    # nvidia-smi in a thread: run on the event loop it would hold every client for its duration (~10-100 ms)
+    return {"t": t, "tm": tm, **m, "gpu_memory_used_mib": await asyncio.to_thread(gpu_memory_used_mib, gpu_uuid)}
+
+
+class LoopHealth:
+    """The load generator's own health while clients run: the event loop's largest lag (a 5 ms tick that overslept) and
+    the young-generation collections run in place of the automatic collector (``quiet_gc``)."""
+
+    TICK_S = 0.005
+
+    def __init__(self):
+        self.lag_max_s, self.lag_max_tm, self.lags_over_10ms, self.gc_max_s, self.gc_calls = 0.0, None, 0, 0.0, 0
+
+    async def watch(self, stop_at: float) -> None:
+        while time.perf_counter() < stop_at:
+            t = time.perf_counter()
+            await asyncio.sleep(self.TICK_S)
+            lag = time.perf_counter() - t - self.TICK_S
+            self.lags_over_10ms += lag > 0.010
+            if lag > self.lag_max_s:
+                self.lag_max_s, self.lag_max_tm = lag, t
+
+    def collect_young(self) -> None:
+        t = time.perf_counter()
+        gc.collect(1)
+        self.gc_max_s = max(self.gc_max_s, time.perf_counter() - t)
+        self.gc_calls += 1
+
+    def snapshot(self) -> dict:
+        return {"loop_lag_max_s": self.lag_max_s, "loop_lag_max_tm": self.lag_max_tm, "loop_lags_over_10ms": self.lags_over_10ms,
+                "gc_young_max_s": self.gc_max_s, "gc_young_calls": self.gc_calls, "gc_auto": gc.isenabled()}
+
+
+@contextlib.contextmanager
+def quiet_gc():
+    """No automatic full collections while clients run: the checker holds every request record (tens of thousands), and
+    one full collection over them takes ~80-110 ms (measured over the 3f467e3 acceptance records), during which no
+    client can start its next request (the 3f467e3 run's single 67 ms refill gap).  The records are frozen out of the
+    collector and young generations are collected explicitly (``LoopHealth.collect_young``); the collector is restored
+    afterwards."""
+    gc.collect()
+    gc.freeze()
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+        gc.unfreeze()
 
 
 def _num(v) -> bool:
@@ -359,8 +409,8 @@ def long_reference_wav(seconds: float = 48.0) -> str:
 
 
 def long_prompt_payloads(rows, n: int, words: int = LONG_PROMPT_WORDS) -> list[dict]:
-    """``n`` requests whose prompt is a passage of about ``words`` words (Seed-TTS texts in a fixed order; ~6000
-    prompt tokens at the default), a short spoken reply in the default voice."""
+    """``n`` requests whose prompt is a passage of about ``words`` words (Seed-TTS texts in a fixed order; at the
+    default the shortest is 5422 prompt tokens as served), a short spoken reply in the default voice."""
     texts = [r.target_text for r in sorted(rows, key=lambda r: r.row_id)]
     out = []
     for i in range(n):
@@ -615,7 +665,8 @@ def verdict_sustain(recs: list[dict], samples: list[dict], endpoint: dict, geo: 
            "reference_sample_tm": ref["tm"] if ref else None, "reference_elapsed_s": ref["tm"] - t_start if ref else None,
            "sample_schema_problems": schema, "idle_problems": idle_problems(endpoint, now=endpoint.get("t"), expect=expect),
            "baseline_problems": baseline_problems(baseline, endpoint) if baseline is not None else [],
-           "memory_envelope": env, "missing_memory": sorted(k for k, v in env.items() if v["max_dev"] is None) if ref else ["no reference sample"]}
+           "memory_envelope": env, "missing_memory": sorted(k for k, v in env.items() if v["max_dev"] is None) if ref else ["no reference sample"],
+           "loop_health": geo.get("loop_health")}  # reported, not part of the rule
     out["continuity_problems"] = [p for p, bad in (
         (f"a client waited {gaps['max_refill_gap_s']} s between requests (> {REFILL_TOL_S})", (gaps["max_refill_gap_s"] or 0) > REFILL_TOL_S),
         (f"a client's first request started {gaps.get('max_first_dispatch_s')} s after the start (> {REFILL_TOL_S})",
@@ -763,24 +814,29 @@ async def scenario_sustain(url, adapter, reqs, concurrency: int, minutes: float,
     rec = rec or _NoRecorder()
     samples, state = [], {}
     payloads = [adapter.build_payload(r) for r in reqs]  # before the start: the clients' first requests leave at once
-    t_start = time.perf_counter()
-    stop = t_start + 60 * minutes
+    health = LoopHealth()
 
     async def sampler():
         while time.perf_counter() < stop:
             m = await sample(url, gpu_uuid)
             m["in_flight"] = state.get("in_flight")
             samples.append(rec.snapshot("sustain", "sample", m)["m"])
+            health.collect_young()
             await asyncio.sleep(interval_s)
 
-    smp = asyncio.create_task(sampler())
-    recs = await continuous_load(url, adapter, reqs, concurrency, stop, state, rec=rec, payloads=payloads)
-    await smp
+    with quiet_gc():  # entered (its full collection done) before the start
+        t_start = time.perf_counter()
+        stop = t_start + 60 * minutes
+        smp, watch = asyncio.create_task(sampler()), asyncio.create_task(health.watch(stop))
+        recs = await continuous_load(url, adapter, reqs, concurrency, stop, state, rec=rec, payloads=payloads)
+        await smp
+        await watch
+        loop_health = health.snapshot()
     t_load_end = time.perf_counter()
     endpoint = rec.snapshot("sustain", "endpoint", await wait_idle(url, expect=expect, gpu_uuid=gpu_uuid))["m"]
     geo = rec.snapshot("sustain", "geometry", {"t_start": t_start, "deadline": stop, "t_load_end": t_load_end, "concurrency": concurrency,
                                                "minutes": minutes, "row_ids": [r.request_id for r in reqs], "ref_s": ref_s,
-                                               "requests_started": state.get("started", 0)})["m"]
+                                               "requests_started": state.get("started", 0), "loop_health": loop_health})["m"]
     return verdict_sustain(recs, samples, endpoint, geo, baseline, expect), samples, endpoint
 
 
@@ -807,13 +863,15 @@ async def scenario_long_prefill(url, adapter, rows, stream_reqs, n_long: int = 8
             await asyncio.gather(*(client(c) for c in range(streams)))
         return out
 
-    load = asyncio.create_task(streams_load())
-    await asyncio.sleep(lead_s)
-    async with make_session(connections=4 * n_long) as s:
-        res = await asyncio.gather(*[harness_stream(s, url, adapter, p, f"long-prefill-{i}", rec=rec, scenario="long_prefill")
-                                     for i, p in enumerate(long_prompt_payloads(rows, n_long))])
-    stop_box["t"] = time.perf_counter()  # the continuing clients finish the request they are on and stop
-    srecs = await load
+    longs = long_prompt_payloads(rows, n_long)
+    with quiet_gc():
+        load = asyncio.create_task(streams_load())
+        await asyncio.sleep(lead_s)
+        async with make_session(connections=4 * n_long) as s:
+            res = await asyncio.gather(*[harness_stream(s, url, adapter, p, f"long-prefill-{i}", rec=rec, scenario="long_prefill")
+                                         for i, p in enumerate(longs)])
+        stop_box["t"] = time.perf_counter()  # the continuing clients finish the request they are on and stop
+        srecs = await load
     after = rec.snapshot("long_prefill", "after", await wait_idle(url, expect=expect, gpu_uuid=gpu_uuid))["m"]
     return verdict_long_prefill([r for _, _, r in res], srecs, before, after, baseline, expect)
 
