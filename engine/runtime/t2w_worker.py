@@ -73,11 +73,23 @@ def _feat_init(model_dir: str, spk_threads: int, gpu_tokens: bool = True) -> Non
 _RESAMPLE: dict = {}
 
 
+def _load_wav(path: str):
+    """``torchaudio.load(path)``: float32 (channels, frames) and the sample rate, decoded by libsndfile."""
+    import soundfile as sf
+    import torch
+
+    a, sr = sf.read(path, dtype="float32", always_2d=True)
+    return torch.from_numpy(a.T.copy()), sr
+
+
 def prompt_front_end(h, prompt_wav: str) -> tuple:
     """The CPU part of ``stepaudio2.Token2wav._prepare_prompt``, step for step (same inputs, same ops): the S3 log-mel
     (with its length), the CAMPPlus embedding (a future of the numpy array ONNX returns) and the 24 kHz prompt mel before the
     final replicate padding.  ``finish_prompt`` completes it on the GPU.  The 16 -> 24 kHz ``Resample`` transform is
-    built once per rate (the reference rebuilds the same kernel every call)."""
+    built once per rate (the reference rebuilds the same kernel every call).  The WAV is decoded with soundfile
+    (``_load_wav``) where the reference calls ``torchaudio.load``: torchaudio 2.11 decodes through TorchCodec whatever the
+    ``backend`` argument, and that grows the process by ~0.6 KB per call (+7.6 MB over 12,000 loads; soundfile flat:
+    results/engine_dev/r8_memory); the decoded tensors are identical."""
     import s3tokenizer
     import torchaudio
     import torchaudio.compliance.kaldi as kaldi
@@ -88,14 +100,17 @@ def prompt_front_end(h, prompt_wav: str) -> tuple:
     global _SPK_POOL
     if "_SPK_POOL" not in globals():
         _SPK_POOL = ThreadPoolExecutor(1, thread_name_prefix="campplus")
-    audio = s3tokenizer.load_audio(prompt_wav, sr=16000)
+    audio, sample_rate = _load_wav(prompt_wav)  # s3tokenizer.load_audio(prompt_wav, sr=16000)
+    if sample_rate != 16000:
+        audio = torchaudio.transforms.Resample(sample_rate, 16000)(audio)
+    audio = audio[0]
     spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
     spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
     # CAMPPlus (ONNX Runtime releases the GIL) overlaps the S3 mel and tokens and the 24 kHz mel; resolved last
     spk = _SPK_POOL.submit(lambda: h.spk_model.run(None, {h.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()})[0])
     mels = s3tokenizer.log_mel_spectrogram(audio)
     mels, mels_lens = s3tokenizer.padding([mels])
-    audio, sample_rate = torchaudio.load(prompt_wav, backend="soundfile")
+    audio, sample_rate = _load_wav(prompt_wav)  # torchaudio.load(prompt_wav, backend="soundfile")
     audio = audio.mean(dim=0, keepdim=True)
     if sample_rate != 24000:
         if sample_rate not in _RESAMPLE:

@@ -138,3 +138,23 @@ def test_edf_prefers_the_stream_about_to_underrun_over_a_refilled_stalled_one():
     tight.sent(int(1.2 * SR), 4.0)  # runs out at t=5.2
     p = Policy(max_decode_rows=1)
     assert choose_windows([(stalled.deadline(0, p), "stalled"), (tight.deadline(0, p), "tight")], p) == ["tight"]
+
+
+def test_load_wav_equals_torchaudio_load(tmp_path):
+    """The feature front end's WAV decoder (soundfile; torchaudio 2.11's TorchCodec path grows the process per call)
+    returns exactly ``torchaudio.load``'s tensor and rate for the PCM16 files the jobs write and other rates/layouts."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    import torchaudio
+
+    from engine.runtime.t2w_worker import _load_wav
+
+    rng = np.random.default_rng(0)
+    for sr, ch, sub in ((16000, 1, "PCM_16"), (24000, 1, "PCM_16"), (44100, 2, "PCM_16"), (22050, 1, "FLOAT")):
+        p = tmp_path / f"a{sr}_{ch}_{sub}.wav"
+        x = np.clip(rng.standard_normal((sr // 3, ch)) * 0.3, -1, 1).astype(np.float32)
+        sf.write(p, x, sr, subtype=sub)
+        a, ra = torchaudio.load(str(p))
+        b, rb = _load_wav(str(p))
+        assert ra == rb and a.dtype == b.dtype == torch.float32 and torch.equal(a, b)
