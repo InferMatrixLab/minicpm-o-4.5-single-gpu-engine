@@ -15,8 +15,10 @@ order):
   the same verdict functions the live run used (``robustness.verdict_*``): every scenario's result, identity/GPU
   equality, the reference and memory envelope, allocation/capacity restoration, cancellation/fallback deltas, the
   continuity rule over the requests' own times and the in-flight timeline, phase order, the acceptance geometry and
-  the overall Boolean must equal the report's;
-* an acceptance report must hold every scenario.
+  the overall Boolean must equal the report's, and the report's phases must be the persisted ones;
+* an acceptance report must hold every scenario and its audit against the acceptance policy
+  (``robustness.policy_problems``: settings, workloads, counts, phase containment, sampling coverage, the reference,
+  closed-loop clients, the long-prefill geometry) is rebuilt from the same records.
 
 A run written before these observations were persisted (round 7 and earlier) is reported with the observations it lacks;
 nothing is inferred for them.
@@ -72,11 +74,6 @@ def _lines(p: Path, gz: bool = False):
         for line in f:
             if line.strip():
                 yield json.loads(line)
-
-
-def _slim(r: dict) -> dict:
-    """What the verdicts read of a request record (its trace's usage only): keeps 30,000 sustain records small."""
-    return {**{k: v for k, v in r.items() if k != "trace"}, "trace": {"usage": (r.get("trace") or {}).get("usage") or {}}}
 
 
 def _check_request(adapter, r: dict, w: dict, problems: list) -> None:
@@ -163,7 +160,7 @@ def verify(out_dir: str | Path) -> dict:
                     return {"ok": False, "problems": problems}
             else:
                 _check_request(adapter, r, w, problems)
-            by.setdefault(r["scenario"], []).append(_slim(r))
+            by.setdefault(r["scenario"], []).append(rb.slim_record(r))  # keeps 30,000 sustain records small
         extra = sum(1 for _ in wires)
         if extra:
             problems.append(f"{extra} wire records without a request record")
@@ -209,6 +206,8 @@ def verify(out_dir: str | Path) -> dict:
     times = [(p["start"], p["end"]) for p in snaps.get(("run", "phase"), [])]
     if any(a[1] > b[0] or a[0] > a[1] for a, b in zip(times, times[1:])):
         problems.append("phases overlap or run backwards")
+    if {p["name"]: {"start": p["start"], "end": p["end"]} for p in snaps.get(("run", "phase"), [])} != (rep.get("phases") or {}):
+        problems.append("the report's phases differ from the persisted phase observations")
 
     if "mixed" in phases:
         rebuilt["mixed"] = rb.verdict_mixed(by.get("mixed", []))
@@ -236,6 +235,9 @@ def verify(out_dir: str | Path) -> dict:
                                                           one("long_prefill", "before") or {}, one("long_prefill", "after") or {}, baseline, expect)
     for k in set(rb.SCENARIOS) & set(rep) - set(phases):
         problems.append(f"{k} in the report without its phase observations")
+    if rep.get("mode") == "acceptance":
+        rebuilt["policy"] = {"version": rb.ACCEPTANCE_POLICY["version"], "problems": rb.policy_problems(by, snaps)}
+        problems += _diff(rebuilt["policy"], rep.get("policy"), "policy")
     ov = rb.verdict_overall(rebuilt)
     rebuilt.update(ov)
     for k in [s for s in rb.SCENARIOS if s in rebuilt]:
@@ -248,7 +250,8 @@ def verify(out_dir: str | Path) -> dict:
     problems += _diff(ov["problems"], rep.get("problems", []), "problems")
     if ov["overall"] != rep.get("overall"):
         problems.append(f"overall: rebuilt {ov['overall']} != report {rep.get('overall')}")
-    return {"ok": not problems, "problems": problems, "rebuilt": {k: rebuilt[k] for k in rebuilt if k in rb.SCENARIOS or k in ("passed", "overall", "problems")}}
+    return {"ok": not problems, "problems": problems,
+            "rebuilt": {k: rebuilt[k] for k in rebuilt if k in rb.SCENARIOS or k in ("passed", "overall", "problems", "policy")}}
 
 
 def main(argv=None) -> int:

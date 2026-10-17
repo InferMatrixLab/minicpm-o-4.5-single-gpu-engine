@@ -113,6 +113,17 @@ BUSY_TOL_S = 0.5  # a client's last request ends at most this long before the de
 ACCEPT_MINUTES, ACCEPT_C = 30.0, 32  # acceptance geometry
 LONG_N, LONG_STREAMS, LONG_PROMPT_WORDS = 8, 24, 4500  # long-prefill scenario: 8 prompts of about 5400 tokens beside 24 speaking clients
 SCENARIOS = ("mixed", "cancel", "eos_boundary", "fallback", "overload", "sustain", "long_prefill")
+# The acceptance policy (B17e), persisted by an acceptance run and audited from the raw records by the live run and the
+# replay alike (``policy_problems``).  A change of any value is a new version.
+ACCEPTANCE_POLICY = {
+    "version": 1, "concurrency": ACCEPT_C, "minutes": ACCEPT_MINUTES, "ref_s": REF_S, "envelope": ENVELOPE, "alloc_tol_bytes": ALLOC_TOL,
+    "stall_max_s": STALL_MAX_S, "refill_tol_s": REFILL_TOL_S,
+    "sample_s": SAMPLE_S, "first_sample_max_s": 5.0, "sample_gap_max_s": 15.0,  # sampling cadence and its scheduling tolerance
+    "workload": {"mixed": 16, "cancel_rows": 16, "sustain_rows": 640, "eos_n": 192, "overload": 128, "long_n": LONG_N, "long_words": LONG_PROMPT_WORDS,
+                 "long_streams": LONG_STREAMS},
+    "long_arrival_window_s": 1.0,  # the long prompts arrive together
+}
+SCENARIO_PHASE = {"long_prefill_streams": "long_prefill"}  # records of a scenario lie within the phase of the same name otherwise
 CHECKER_FILES = ("tools/robustness.py", "tools/robustness_replay.py", "bench/client.py", "bench/metrics.py", "bench/audio.py", "bench/sse.py")
 
 
@@ -331,6 +342,8 @@ class Recorder:
         self._wire = gzip.open(self.out / "wire.jsonl.gz", "wt", compresslevel=1)
         self._t = threading.Thread(target=self._write, daemon=True, name="robustness-recorder")
         self._t.start()
+        self.by: dict[str, list] = {}  # what the policy audit reads of every record (``slim_record``), as the replay reads it back
+        self.snaps: dict[tuple, list] = {}
 
     def _write(self) -> None:
         while True:
@@ -354,14 +367,18 @@ class Recorder:
         chunks = getattr(tr, "raw_chunks", None)
         wire = None if chunks is None else {"request_id": tr.request_id, "scenario": scenario, "t_dispatch": tr.t_dispatch, "t_complete": tr.t_complete,
                                             "chunks": [[t - tr.t_dispatch, base64.b64encode(b).decode()] for t, b in chunks]}
+        rec = json.loads(json.dumps(rec))  # the record as the replay reads it back
+        with self._n_lock:
+            self.by.setdefault(scenario, []).append(slim_record(rec))
         self.q.put((rec, wire))
         return rec
 
     def snapshot(self, scenario: str, label: str, m: dict) -> dict:
         """A raw observation (a counter reading, the identity, the geometry, ...) the verdict is derived from."""
+        rec = json.loads(json.dumps({"record": "snapshot", "scenario": scenario, "label": label, "m": m}))
         with self._n_lock:
             self.n += 1
-        rec = {"record": "snapshot", "scenario": scenario, "label": label, "m": m}
+            self.snaps.setdefault((scenario, label), []).append(rec["m"])
         self.q.put((rec, None))
         return rec
 
@@ -503,6 +520,135 @@ async def cancel_stream(url: str, adapter, payload: dict, rid: str = "", rec=Non
 
 
 # --- verdicts: deterministic functions of the persisted records (the live run and the replay call the same ones) ------
+def slim_record(r: dict) -> dict:
+    """What the verdicts and the policy audit read of a request record (its trace's usage only)."""
+    return {**{k: v for k, v in r.items() if k != "trace"}, "trace": {"usage": (r.get("trace") or {}).get("usage") or {}}}
+
+
+def _client_problems(recs: list[dict], what: str) -> list[str]:
+    """A closed-loop client runs one request at a time: its intervals, in dispatch order, never overlap."""
+    by: dict = {}
+    for r in recs:
+        by.setdefault(r.get("client"), []).append((r["t_dispatch"], r["t_complete"]))
+    bad = [c for c, xs in by.items() if c is None or any(a[1] is None or b[0] < a[1] for a, b in zip(sorted(xs), sorted(xs)[1:]))]
+    return [f"{what}: {len(bad)} clients with overlapping or open requests (e.g. {bad[:3]})"] if bad else []
+
+
+def policy_problems(by: dict, snaps: dict, policy: dict | None = None) -> list[str]:
+    """An acceptance run against the acceptance policy, from its raw records alone (``by``: slim request records per
+    scenario; ``snaps``: raw observations per (scenario, label)): the persisted policy, the declared settings and
+    workloads, every scenario's request count, every record and timed observation inside its scenario's phase, the
+    sustain geometry, sampling cadence, reference and drained endpoint, closed-loop clients, and the long-prefill
+    geometry (all long prompts arriving together beside every companion client, each one served throughout)."""
+    policy = policy or ACCEPTANCE_POLICY
+    P, W = [], policy["workload"]
+
+    def one(scen, label):
+        xs = snaps.get((scen, label)) or []
+        return xs[0] if len(xs) == 1 else None
+
+    if one("run", "policy") != policy:
+        P.append(f"the run did not persist acceptance policy version {policy['version']}")
+    wl = one("run", "workload") or {}
+    st, w = wl.get("settings") or {}, wl.get("workload") or {}
+    for k, want in (("concurrency", policy["concurrency"]), ("sustain_min", policy["minutes"]), ("overload", W["overload"]), ("eos_n", W["eos_n"])):
+        if st.get(k) != want:
+            P.append(f"setting {k}={st.get(k)!r}, policy {want!r}")
+    declared = {"mixed": (w.get("mixed") or {}).get("n"), "cancel_rows": len((w.get("cancel") or {}).get("row_ids") or []),
+                "eos_n": len((w.get("eos_boundary") or {}).get("row_ids") or []), "overload": len((w.get("overload") or {}).get("row_ids") or []),
+                "sustain_rows": len((w.get("sustain") or {}).get("row_ids") or []), "long_streams_rows": len((w.get("long_prefill_streams") or {}).get("row_ids") or [])}
+    for k, want in (("mixed", W["mixed"]), ("cancel_rows", W["cancel_rows"]), ("eos_n", W["eos_n"]), ("overload", W["overload"]),
+                    ("sustain_rows", W["sustain_rows"]), ("long_streams_rows", W["long_streams"])):
+        if declared[k] != want:
+            P.append(f"declared workload {k}={declared[k]}, policy {want}")
+    if w.get("long_prefill") != {"n": W["long_n"], "words": W["long_words"], "streams": W["long_streams"]}:
+        P.append(f"declared long-prefill workload {w.get('long_prefill')}")
+
+    phases = {p["name"]: p for p in snaps.get(("run", "phase"), [])}
+    if sorted(phases) != sorted(SCENARIOS) or len(snaps.get(("run", "phase"), [])) != len(SCENARIOS):
+        P.append(f"phases {sorted(phases)}, policy {sorted(SCENARIOS)}")
+    for scen, recs in by.items():
+        ph = phases.get(SCENARIO_PHASE.get(scen, scen))
+        if ph is None:
+            P.append(f"{len(recs)} {scen} records outside every phase")
+            continue
+        out = [r["request_id"] for r in recs if not (_num(r.get("t_dispatch")) and ph["start"] <= r["t_dispatch"]
+                                                     and (r.get("t_complete") if r["record"] == "request" else r.get("t_disconnect")) is not None
+                                                     and (r["t_complete"] if r["record"] == "request" else r["t_disconnect"]) <= ph["end"])]
+        if out:
+            P.append(f"{len(out)} {scen} records outside the {SCENARIO_PHASE.get(scen, scen)} phase (e.g. {out[:3]})")
+    for (scen, label), xs in snaps.items():
+        ph = phases.get(scen)
+        timed = [m.get("tm") for m in xs if isinstance(m, dict) and "tm" in m]
+        if ph is not None and any(not (_num(t) and ph["start"] <= t <= ph["end"]) for t in timed):
+            P.append(f"observation {scen}/{label} outside its phase")
+    req = lambda scen: [r for r in by.get(scen, []) if r["record"] == "request"]  # noqa: E731
+    counts = {"mixed": (len(req("mixed")), W["mixed"]), "cancel companions": (len(req("cancel")), W["cancel_rows"] - W["cancel_rows"] // 2),
+              "cancellations": (sum(r["record"] == "cancel" for r in by.get("cancel", [])), W["cancel_rows"] // 2),
+              "eos_boundary": (len(req("eos_boundary")), W["eos_n"]), "fallback": (len(req("fallback")), 1),
+              "overload": (len(req("overload")), W["overload"]), "long_prefill": (len(req("long_prefill")), W["long_n"])}
+    P += [f"{k}: {n} records, policy {want}" for k, (n, want) in counts.items() if n != want]
+
+    geo, end, samples = one("sustain", "geometry") or {}, one("sustain", "endpoint") or {}, snaps.get(("sustain", "sample")) or []
+    t0, dl = geo.get("t_start"), geo.get("deadline")
+    if not (geo.get("concurrency") == policy["concurrency"] and geo.get("minutes") == policy["minutes"] and geo.get("ref_s") == policy["ref_s"]
+            and _num(t0) and _num(dl) and abs(dl - t0 - 60 * policy["minutes"]) < 1e-6):
+        P.append(f"sustain geometry C={geo.get('concurrency')} {geo.get('minutes')} min ref {geo.get('ref_s')} s, policy C={policy['concurrency']} "
+                 f"{policy['minutes']} min ref {policy['ref_s']} s")
+    tms = [s.get("tm") for s in samples]
+    gap = policy["sample_gap_max_s"]
+    if not samples or not all(_num(t) for t in tms) or any(b <= a for a, b in zip(tms, tms[1:])):
+        P.append("sustain samples missing, unreadable or not strictly increasing in time")
+    elif _num(t0) and _num(dl):
+        if tms[0] - t0 > policy["first_sample_max_s"]:
+            P.append(f"first sustain sample {tms[0] - t0:.3f} s after the start (> {policy['first_sample_max_s']})")
+        worst = max([b - a for a, b in zip(tms, tms[1:])], default=0.0)
+        if worst > gap:
+            P.append(f"a {worst:.3f} s gap between sustain samples (> {gap})")
+        if dl - tms[-1] > gap:
+            P.append(f"the last sustain sample is {dl - tms[-1]:.3f} s before the deadline (> {gap})")
+        ref = next((t for t in tms if t - t0 >= policy["ref_s"]), None)
+        if ref is None or ref - t0 > policy["ref_s"] + gap:
+            P.append(f"no sustain sample within {gap} s after the {policy['ref_s']} s reference")
+    srecs = by.get("sustain", [])
+    last = max((r["t_complete"] for r in srecs if _num(r.get("t_complete"))), default=None)
+    if not (_num(end.get("tm")) and _num(dl) and end["tm"] >= dl and last is not None and end["tm"] >= last):
+        P.append("the drained sustain endpoint is not after the deadline and every sustain request")
+    if len(srecs) != geo.get("requests_started"):
+        P.append(f"{len(srecs)} sustain records, {geo.get('requests_started')} started")
+    if len({r.get("client") for r in srecs}) != policy["concurrency"]:
+        P.append(f"{len({r.get('client') for r in srecs})} sustain clients, policy {policy['concurrency']}")
+    P += _client_problems(srecs, "sustain")
+
+    longs, comp = req("long_prefill"), by.get("long_prefill_streams", [])
+    after = one("long_prefill", "after") or {}
+    budget = after.get("prefill_token_budget")
+    small = [r["request_id"] for r in longs if not (_count(budget) and _count((r["trace"].get("usage") or {}).get("prompt_tokens"))
+                                                     and r["trace"]["usage"]["prompt_tokens"] > budget)]
+    if small:
+        P.append(f"{len(small)} long requests without a served prompt above the prefill budget {budget}")
+    clients = {r.get("client") for r in comp}
+    if len(clients) != W["long_streams"]:
+        P.append(f"{len(clients)} long-prefill companion clients, policy {W['long_streams']}")
+    P += _client_problems(comp, "long-prefill companions")
+    if longs and all(_num(r.get("t_dispatch")) and _num(r.get("t_complete")) for r in longs):
+        a0, a1 = min(r["t_dispatch"] for r in longs), max(r["t_complete"] for r in longs)
+        if max(r["t_dispatch"] for r in longs) - a0 > policy["long_arrival_window_s"]:
+            P.append(f"the long prompts arrived over {max(r['t_dispatch'] for r in longs) - a0:.3f} s (> {policy['long_arrival_window_s']})")
+        idle = []
+        for c in clients:
+            xs = sorted((r["t_dispatch"], r["t_complete"]) for r in comp if r.get("client") == c and r["t_complete"] is not None)
+            inside = [x for x in xs if x[1] >= a0 and x[0] <= a1]
+            gaps = [b[0] - a[1] for a, b in zip(inside, inside[1:])]
+            if not inside or inside[0][0] > a0 or inside[-1][1] < a1 or any(g > policy["refill_tol_s"] for g in gaps):
+                idle.append(c)
+        if idle:
+            P.append(f"{len(idle)} companion clients not served throughout the long requests [{a0:.3f}, {a1:.3f}] (e.g. {sorted(idle, key=str)[:3]})")
+    elif longs:
+        P.append("long requests without dispatch/completion times")
+    return P
+
+
 def _metrics_of(recs: list[dict]) -> list:
     return [RequestMetrics(**r["metrics"]) for r in recs]
 
@@ -732,8 +878,9 @@ def gpu_problems(served_uuid: str | None, smi: dict | None, declared_uuid: str |
 
 
 def verdict_overall(rep: dict) -> dict:
-    """Every scenario's verdict, identity, GPU and baseline; an acceptance run must hold every scenario and the fixed
-    geometry (``ACCEPT_MINUTES`` at C >= ``ACCEPT_C``, deadline exactly that long after the start)."""
+    """Every scenario's verdict, identity, GPU and baseline; an acceptance run must hold every scenario, the fixed
+    geometry (``ACCEPT_MINUTES`` at C = ``ACCEPT_C``, deadline exactly that long after the start) and pass the policy
+    audit of its raw records (``rep["policy"]``, ``policy_problems``)."""
     passed = {k: bool((rep.get(k) or {}).get("passed")) for k in SCENARIOS if k in rep}
     passed.update(identity=bool((rep.get("identity") or {}).get("matches")), gpu=bool((rep.get("gpu") or {}).get("matches")),
                   baseline=not rep.get("baseline_problems", ["no baseline"]))
@@ -741,9 +888,14 @@ def verdict_overall(rep: dict) -> dict:
     if rep.get("mode") == "acceptance":
         problems += [f"acceptance run without {k}" for k in SCENARIOS if k not in rep]
         sus = rep.get("sustain") or {}
-        if not (sus.get("minutes") == ACCEPT_MINUTES and (sus.get("concurrency") or 0) >= ACCEPT_C
+        if not (sus.get("minutes") == ACCEPT_MINUTES and sus.get("concurrency") == ACCEPT_C
                 and _num(sus.get("deadline")) and _num(sus.get("t_start")) and abs(sus["deadline"] - sus["t_start"] - 60 * ACCEPT_MINUTES) < 1e-6):
             problems.append(f"acceptance geometry: {sus.get('minutes')} min at C={sus.get('concurrency')}")
+        pol = rep.get("policy")
+        if not isinstance(pol, dict) or pol.get("version") != ACCEPTANCE_POLICY["version"]:
+            problems.append(f"no audit against acceptance policy version {ACCEPTANCE_POLICY['version']}")
+        else:
+            problems += [f"policy: {p}" for p in pol.get("problems", ["no problems list"])]
     return {"passed": passed, "problems": problems, "overall": all(passed.values()) and bool(passed) and not problems}
 
 
@@ -919,13 +1071,15 @@ def workload_declaration(sets, rows, concurrency: int, eos_n: int, overload: int
 
 
 async def run(a) -> dict:
+    W = ACCEPTANCE_POLICY["workload"]
+    if a.acceptance and (a.sustain_min != ACCEPT_MINUTES or a.concurrency != ACCEPT_C or a.overload != W["overload"] or a.eos_n != W["eos_n"]):
+        raise SystemExit(f"acceptance mode requires --sustain-min {ACCEPT_MINUTES} at --concurrency {ACCEPT_C}, --overload {W['overload']}, "
+                         f"--eos-n {W['eos_n']}")
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     rows = load_seed_tts_rows()
     sets = make_id_sets(rows)
     adapter = get_adapter("engine")
-    if a.acceptance and (a.sustain_min != ACCEPT_MINUTES or a.concurrency < ACCEPT_C):
-        raise SystemExit(f"acceptance mode requires --sustain-min {ACCEPT_MINUTES} at --concurrency >= {ACCEPT_C}")
     expect = expect_from_config(a.config)
     first = await metrics(a.url)
     served = await info(a.url)
@@ -943,6 +1097,8 @@ async def run(a) -> dict:
     rec.snapshot("run", "gpu", {k: report["gpu"][k] for k in ("served_uuid", "declared_uuid", "nvidia_smi")})
     rec.snapshot("run", "workload", {"mode": report["mode"], "workload": report["workload"], "config": a.config,
                                      "settings": {k: getattr(a, k) for k in ("concurrency", "sustain_min", "overload", "eos_n")}})
+    if a.acceptance:
+        rec.snapshot("run", "policy", ACCEPTANCE_POLICY)
 
     async def phase(name, coro):
         t0 = time.perf_counter()
@@ -974,6 +1130,8 @@ async def run(a) -> dict:
         report["long_prefill"] = await phase("long_prefill", scenario_long_prefill(a.url, adapter, rows, canonical_requests(rows, sets.tuning(32)[:LONG_STREAMS]),
                                                                                    LONG_N, LONG_STREAMS, rec=rec, baseline=baseline, expect=expect, gpu_uuid=uuid))
     report["artifacts"] = rec.close()
+    if a.acceptance:
+        report["policy"] = {"version": ACCEPTANCE_POLICY["version"], "problems": policy_problems(rec.by, rec.snaps)}
     report.update(verdict_overall(report))
     (out / "robustness.json").write_text(json.dumps({**report, "samples": samples, "idle_after": idle}, indent=1))
     print(json.dumps({k: v for k, v in report.items() if k not in ("samples", "idle_before", "workload", "baseline")}, indent=1))

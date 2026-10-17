@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 from aiohttp.test_utils import TestServer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -358,8 +359,8 @@ def _full_run(monkeypatch, out, **kw):
         srv = TestServer(es.app)
         await srv.start_server()
         try:
-            return await rb.run(SimpleNamespace(url=f"http://127.0.0.1:{srv.port}", out=str(out), config=cfg, gpu_uuid="GPU-a", acceptance=False,
-                                                sustain_min=0.05, concurrency=2, overload=100, eos_n=6, no_long_prefill=False, **kw))
+            return await rb.run(SimpleNamespace(**{**dict(url=f"http://127.0.0.1:{srv.port}", out=str(out), config=cfg, gpu_uuid="GPU-a", acceptance=False,
+                                                          sustain_min=0.05, concurrency=2, overload=100, eos_n=6, no_long_prefill=False), **kw}))
         finally:
             await srv.close()
     return asyncio.run(go())
@@ -556,3 +557,85 @@ def test_quiet_gc_restores_the_collector_and_sustain_reports_loop_health(monkeyp
     h = res["loop_health"]
     assert res["passed"] and gc.isenabled() and h["gc_auto"] is False and h["gc_young_calls"] == res["samples"], res
     assert 0 <= h["loop_lag_max_s"] < rb.REFILL_TOL_S
+
+
+# --- B17e: the acceptance policy is audited from the raw records, live and in the replay ------------------------------
+def _scaled_policy(monkeypatch):
+    """The acceptance policy at the CPU fixture's scale (2 clients, 3 s); every rule is the production one."""
+    pol = {**rb.ACCEPTANCE_POLICY, "concurrency": 2, "minutes": 0.05, "ref_s": 0.5, "sample_s": 0.3, "first_sample_max_s": 0.2,
+           "sample_gap_max_s": 0.6, "workload": {**rb.ACCEPTANCE_POLICY["workload"], "sustain_rows": 320, "eos_n": 6, "overload": 100, "long_n": 2, "long_words": 2500,
+                                                  "long_streams": 2}}
+    import tools.robustness_replay  # noqa: F401  (puts tools/ on the path: the replay imports the checker as ``robustness``)
+    import robustness as replay_rb
+
+    for mod in (rb, replay_rb):
+        monkeypatch.setattr(mod, "ACCEPTANCE_POLICY", pol)
+        monkeypatch.setattr(mod, "ACCEPT_C", 2)
+        monkeypatch.setattr(mod, "ACCEPT_MINUTES", 0.05)
+    return pol
+
+
+def test_acceptance_policy_rejects_the_review_reproductions(monkeypatch, tmp_path):
+    import tools.robustness_replay as rr
+
+    _scaled_policy(monkeypatch)
+    src = tmp_path / "run"
+    rep = _full_run(monkeypatch, src, acceptance=True)
+    assert rep["policy"] == {"version": 1, "problems": []} and rep["overall"], (rep["policy"], rep["problems"])
+    ok = rr.verify(src)
+    assert ok["ok"] and ok["rebuilt"]["policy"]["problems"] == [], ok["problems"][:5]
+
+    def shift_long(recs, ws, dt=1000.0):  # the review's probe: every long request (record and wire) 1000 s later
+        for x in [r for r in recs if r.get("scenario") == "long_prefill" and r["record"] == "request"] + [w for w in ws if w["scenario"] == "long_prefill"]:
+            x["t_dispatch"] += dt
+            x["t_complete"] += dt
+            if "trace" in x:
+                x["trace"]["t_dispatch"] += dt
+        return recs, ws
+
+    def edit(scen, label, fn):
+        def f(recs):
+            for r in recs:
+                if r.get("record") == "snapshot" and r["scenario"] == scen and r["label"] == label:
+                    fn(r["m"])
+            return recs
+        return f
+
+    def drop_samples(which):
+        def f(recs):
+            idx = [i for i, r in enumerate(recs) if r.get("record") == "snapshot" and r["scenario"] == "sustain" and r["label"] == "sample"]
+            drop = {idx[i] for i in which(len(idx))}
+            return [r for i, r in enumerate(recs) if i not in drop]
+        return f
+
+    box = {}
+    cases = {
+        "long_shifted": (dict(records=lambda recs: box.setdefault("r", recs), wires=lambda ws: shift_long(box["r"], ws)[1]), "outside the long_prefill phase"),
+        "one_long": (dict(records=lambda recs: [r for r in recs if not (r.get("scenario") == "long_prefill" and r["record"] == "request"
+                                                                         and r["request_id"] != "long-prefill-0")],
+                          wires=lambda ws: [w for w in ws if not (w["scenario"] == "long_prefill" and w["request_id"] != "long-prefill-0")]), "long_prefill: 1 records"),
+        "early_samples": (dict(records=drop_samples(lambda n: range(0, 3))), "first sustain sample"),
+        "middle_samples": (dict(records=drop_samples(lambda n: range(2, n - 1))), "gap between sustain samples"),
+        "ref_moved": (dict(records=edit("sustain", "geometry", lambda m: m.update(ref_s=300.0))), "sustain geometry"),
+        "c64": (dict(records=edit("sustain", "geometry", lambda m: m.update(concurrency=64))), "sustain geometry"),
+        "policy_edited": (dict(records=edit("run", "policy", lambda m: m.update(stall_max_s=20.0))), "acceptance policy version"),
+    }
+    for name, (kw, want) in cases.items():
+        res = rr.verify(_mutate(src, tmp_path / name, **kw))
+        assert not res["ok"], name
+        assert res["rebuilt"]["overall"] is False, name  # the shared verdict itself fails, not only the comparison with the report
+        assert any(want in p for p in res["rebuilt"]["policy"]["problems"]), (name, res["rebuilt"]["policy"]["problems"][:5])
+
+
+def test_acceptance_requires_the_exact_policy_settings(monkeypatch):
+    from types import SimpleNamespace
+
+    for kw in (dict(concurrency=64), dict(overload=64), dict(eos_n=10), dict(sustain_min=10.0)):
+        a = SimpleNamespace(url="http://x", out="/nonexistent", config=None, gpu_uuid=None, acceptance=True, sustain_min=30.0, concurrency=32,
+                            overload=128, eos_n=192, no_long_prefill=False)
+        a.__dict__.update(kw)
+        with pytest.raises(SystemExit, match="acceptance mode requires"):
+            asyncio.run(rb.run(a))
+    ov = rb.verdict_overall({"mode": "acceptance", **{k: {"passed": True} for k in rb.SCENARIOS}, "identity": {"matches": True}, "gpu": {"matches": True},
+                             "baseline_problems": [], "sustain": {"passed": True, "minutes": 30.0, "concurrency": 32, "t_start": 0.0, "deadline": 1800.0}})
+    assert not ov["overall"] and any("acceptance policy" in p for p in ov["problems"])  # no policy audit: not accepted
