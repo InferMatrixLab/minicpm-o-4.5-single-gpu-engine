@@ -59,7 +59,30 @@ audio.
   - B (round 6 control): minimum 0.846, at C=32 TTFA p95 (+18.2%); stall 0.134 s.
   - Attribution: the first-chunk lane recovers the C=32 TTFA (D to F: p95 ratio 0.880 to 1.005). The slack floor costs TTFA at C=16 (D to C: p95 1.007 to 0.857) and adds stall with the lane on (F to E: 0.100 to 0.147 s). Throughput and RTF are within ±2.5% for every variant.
   - K=3 is below the development minimum for reported comparisons; the frozen policy is measured against the round 6 control at K=5 on the evaluation IDs (`sweeps/engine/r8_sched_cmp_gpu{2,3}.json`).
+- **Round 8 frozen policy against the round 6 control (evaluation IDs, K=5, 5db059a; `tools/sched_compare.py r8-frozen r6-control` over `results/engine_sweeps/r8_sched_cmp_gpu{2,3}`, all 12 cells verify)**:
+  - C=32: TTFA p95 -11.4% (LCB 1.089), p50 -5.1% (LCB 1.045), throughput +1.4%, RTF -1.9%; mean run-max stall 0.109 s against 0.142 s.
+  - C=16: TTFA p95 -6.2% (LCB 1.035).
+  - C=1/2/4/8: TTFA changes from -4.0% (C=2 p50) to +1.6% (C=8 p50); throughput from -1.7% (C=4, LCB 0.971) to +0.9%.
+- **Round 8 headline measurement (evaluation IDs, K=5, 028998b = 9ed19a1 plus the sweep specs; `sweeps/engine/r8_head_gpu{2,3}.json`, `tools/engine_vs_envelope.py`, `results/engine_sweeps/r8_head_gpu{2,3}/vs_envelope.json`)**: point ratio / one-sided 95% LCB against the best baseline cell at each C (>1 better).
+
+  | C | Throughput | TTFA p50 | TTFA p95 | RTF mean |
+  |---|---|---|---|---|
+  | 1 | 1.342 / 1.335 | **2.224 / 2.212** | **2.480 / 2.429** | 1.380 / 1.373 |
+  | 2 | 1.083 / 1.073 | 1.905 / 1.861 | 1.946 / 1.899 | 1.106 / 1.095 |
+  | 4 | 0.984 / 0.976 | **2.134 / 2.115** | **2.529 / 2.484** | 1.003 / 0.996 |
+  | 8 | 1.020 / 1.010 | **2.213 / 2.186** | **2.595 / 2.522** | 1.041 / 1.030 |
+  | 16 | 1.015 / 0.996 | 2.010 / 1.958 | **2.754 / 2.655** | 1.033 / 1.014 |
+  | 32 | 1.034 / 1.026 | 1.349 / 1.313 | **2.616 / 2.546** | 1.050 / 1.042 |
+
+  - 8 of the 24 ratios have LCB >= 2.0, all of them TTFA; C=16 p50 is inconclusive (point above 2, LCB below). No throughput or RTF ratio comes near 2. This is development evidence on L20X, not the AC-5 result (H200, K=10).
+  - Against the 5db059a frozen cells (`tools/sched_compare.py r8-head r8-frozen`), the memory repairs leave performance unchanged: every point ratio is within 1% except C=32 TTFA p95 (-4.5% latency, LCB 1.009). The C=32 mean run-max stall is 0.140 s against 0.109 s.
 - **Robustness** (`tools/robustness.py`, replay with `tools/robustness_replay.py`): the module docstring lists the scenarios, the predeclared memory rule (±1% of the first sample at or after 60 s, over every later sample and the drained endpoint; CUDA allocated bytes back within 16 MiB of the warmed baseline) and the artifacts (`requests.jsonl` with every request, cancellation and raw observation; `wire.jsonl.gz`). The replay rebuilds every scenario's verdict and the overall verdict from them with the same functions the live run uses.
+  - Round 8 acceptance attempts on GPU3, C=32, 30-minute sustain, the predeclared rules unchanged; each replays to its own verdict under its recorded revision (`results/l20x/robustness/r8_acceptance_<rev>`):
+    - 5db059a FAIL: one feature process +1.034%. Cause: torchaudio 2.11 decodes every `torchaudio.load` through TorchCodec, +0.6 KB per call; 3f467e3 decodes with soundfile (identical tensors).
+    - 3f467e3 FAIL: one client refill gap of 67 ms > 50 ms. Cause: the checker's own full GC over the held records (80-110 ms); d67f834 suspends automatic full collections during the load.
+    - d67f834 PASS, at a 0.14 ms margin (refill max 49.86 ms; the load generator's event loop lagged up to 58 ms). 53d1135 completes a stream's metrics and record in a worker thread after the client has started its next request.
+    - 53d1135 FAIL: one feature process +1.077%, a rise in the first ~3 minutes of load after the 60 s reference, flat afterwards. 9ed19a1: jemalloc returns freed pages at once and each feature process runs 2000 synthetic jobs before load (startup about 4 minutes longer).
+    - 9ed19a1 PASS: 32,736 requests, 0 invalid, max stall 0.181 s, refill max 11.7 ms, first dispatch 30 ms; memory max deviation engine 0.122%, worker 0.276%, feature total 0.076% (each process 0.059-0.108%), GPU 0; long prefill 8 prompts of >= 5422 tokens beside 24 continuing stream clients, all 8 and all 121 stream requests valid, per-tick prefill max 2048 = budget, stall max 0.301 s.
 
 ## Environments
 
