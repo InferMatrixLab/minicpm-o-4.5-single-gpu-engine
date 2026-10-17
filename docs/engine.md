@@ -110,6 +110,11 @@ audio.
 - **Rescoring.** The evaluator digest changes, so every dependent is rescored under it, with the unchanged inputs and settings.
   - Qualification v3: 9 candidates × 960 rows. SIM and UTMOS are identical on every row. The bf16 ASR differs run to run on a few rows: one Qwen3-ASR transcript of an unintelligible output, and Whisper WER on 4 rows. Every decisive qualification field and status is unchanged (7 of 9 qualify).
   - Then `winners_v3.json` and `sim_v2/dref_v3`, both identical to their predecessors except for the binding.
+  - Full-set references (8 × 3264 rows, `sim_v2/fullq_scored_v3`). Compared row by row with the seven earlier scorings (`sim_v2/compare_fullq_v2_v3.json`), SIM and UTMOS are identical on every row. The ASR differs on 1–3 rows per report. The h200 MPS-on C=32 reference, previously unscorable, now scores all 3264 rows; its 82 s row has SIM 30.5.
+- **Final speech Q_ref** (`results/l20x/campaign/qref/speech_qref_final.json`).
+  - Frozen from the 8 references, each paired with its `qualification_v3` record, the v3 campaign qualification and `winners_v3.json`.
+  - Values: WER 0.01557, catastrophic count 4, SIM 49.56, UTMOS 4.298, and silence, repetition and truncation rates of 0.
+  - `qref verify` rebuilt it from its sources and reports it unchanged (`speech_qref_verify.log`).
 - **Multimodal evaluator v2** (`evals/multimodal/suite.py`).
   - Its identity covers only what multimodal scoring executes:
     - the scorer checkout and its environment;
