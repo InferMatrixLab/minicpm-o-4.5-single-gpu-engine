@@ -75,6 +75,8 @@ MAX_TOKENS = {"mmmu": 2048, "mmsu": 32}
 #: Scoring code: the workers load data, send requests and grade answers; floors and request settings are recorded separately.
 WORKERS = ("evals/multimodal/sglang_mm_worker.py", "evals/multimodal/daily_omni_worker.py")
 SHUFFLE_LADDER = (0.05, 0.10, 0.20, 0.40, 0.60, 0.80)
+MM_EVALUATOR_VERSION = 2  # v2 (round 9): the identity no longer embeds the speech evaluator's digest (``mm_evaluator_digest``)
+MM_COMPONENTS = ("sglang", "eval_env", "vllm_omni", "expected", "workers", "floors", "max_tokens")
 
 
 class EvidenceError(RuntimeError):
@@ -98,7 +100,7 @@ def verify_mm_evaluator() -> dict:
     frozen = subprocess.run(["uv", "pip", "freeze", "--python", VLLM_PYTHON], capture_output=True, text=True).stdout
     if frozen != VLLM_LOCK.read_text():
         raise EvaluatorMismatch("vllm-omni evaluator environment differs from evals/vllm-omni-env.lock")
-    rec = {"speech_evaluator_digest": base["digest"], "sglang": base["scorer_checkout"], "eval_env": base["envs"]["eval-env"],
+    rec = {"version": MM_EVALUATOR_VERSION, "sglang": base["scorer_checkout"], "eval_env": base["envs"]["eval-env"],
            "vllm_omni": {"commit": commit, "env_freeze_sha256": hashlib.sha256(frozen.encode()).hexdigest()},
            "expected": {p.name: _sha(p) for p in sorted(EXPECTED_DIR.glob("*.json"))},
            "workers": {w: _sha(ROOT / w) for w in WORKERS}, "floors": FLOORS, "max_tokens": MAX_TOKENS}
@@ -111,6 +113,20 @@ def evaluator_consistent(ev: dict) -> bool:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest() == ev.get("digest")
 
 
+def mm_evaluator_digest(ev: dict) -> str | None:
+    """The version-2 identity of a recorded multimodal evaluator: the components multimodal scoring executes (scorer
+    checkout and environment, vLLM-Omni checkout and environment, frozen manifests, workers, floors, token limits).
+    A version-1 record (before round 9) holds the same components plus the digest of the whole speech evaluator, whose
+    speech-only sources and settings multimodal scoring never runs; it maps to the digest of its components.  None for
+    a record that is inconsistent or lacks a component."""
+    if not evaluator_consistent(ev):
+        return None
+    body = {"version": MM_EVALUATOR_VERSION, **{k: ev.get(k) for k in MM_COMPONENTS}}
+    if any(body[k] is None for k in MM_COMPONENTS) or ev.get("version", 1) not in (1, MM_EVALUATOR_VERSION):
+        return None
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
 def request_policy(adapter: str, bench: str, concurrency: int) -> dict:
     """Everything a multimodal request depends on besides the sample: model name, request form, sampling, extra body."""
     extra = {} if adapter == "sglang-omni" else {"chat_template_kwargs": {"enable_thinking": False, **({"use_tts_template": True} if bench == "mmsu" else {})}}
@@ -120,12 +136,14 @@ def request_policy(adapter: str, bench: str, concurrency: int) -> dict:
 
 def generation_identity(cand, gpu: dict, benches: list[str], concurrency: int, port: int, evaluator_digest: str, frozen_refs: dict | None = None) -> dict:
     """The frozen multimodal generation declaration: candidate, model, code/environment fingerprints, request policy, hardware."""
-    from bench.cli import ADAPTER_PYTHON, DEFAULT_REPOS, execution_fingerprints
+    from bench.cli import DEFAULT_REPOS, adapter_python, execution_fingerprints, served_identity_expected
     from bench.workload import MODEL_REPO, MODEL_REVISION
 
+    env = cand.env_dict()  # the candidate's own overlay (e.g. ENGINE_PYTHON): the interpreter the launch really runs
     doc = {"candidate": {**cand.identity(), "candidate_id": cand.candidate_id, "digest": cand.digest, "label": cand.label},
-           "model": {"repo": MODEL_REPO, "revision": MODEL_REVISION}, "fingerprints": execution_fingerprints(cand.adapter),
-           "adapter_python": ADAPTER_PYTHON[cand.adapter], "repos_checked": sorted(DEFAULT_REPOS), "port": port,
+           "model": {"repo": MODEL_REPO, "revision": MODEL_REVISION}, "fingerprints": execution_fingerprints(cand.adapter, env),
+           "adapter_python": adapter_python(cand.adapter, env), "repos_checked": sorted(DEFAULT_REPOS), "port": port,
+           **({"served_identity": served_identity_expected(cand.config, env)} if cand.adapter == "engine" else {}),
            "hardware": {k: gpu.get(k) for k in ("gpu_sku", "gpu_uuid", "driver", "memory_mib", "gpu_index")},
            "requests": {b: request_policy(cand.adapter, b, concurrency) for b in benches}, "evaluator_digest": evaluator_digest,
            "frozen_refs": frozen_refs or {}}
@@ -135,7 +153,7 @@ def generation_identity(cand, gpu: dict, benches: list[str], concurrency: int, p
 
 def generation_problems(rep: dict, report_dir: Path | None = None) -> list[str]:
     """Recompute the generation identity's digests and reconcile it with its frozen file, the report and the observed server."""
-    from bench.cli import ADAPTER_PYTHON, DEFAULT_REPOS, server_spec
+    from bench.cli import DEFAULT_REPOS, adapter_python, served_identity_expected, server_spec
     from bench.experiment import Candidate
     from evals.speech.verify_report import candidate_problems
 
@@ -150,8 +168,9 @@ def generation_problems(rep: dict, report_dir: Path | None = None) -> list[str]:
     fp = gen.get("fingerprints") or {}
     if any((r or {}).get("dirty") for r in (fp.get("repos") or {}).values()) or not fp.get("repos"):
         out.append("generation ran from a dirty or unrecorded stack checkout")
-    if gen.get("repos_checked") != sorted(DEFAULT_REPOS) or gen.get("adapter_python") != ADAPTER_PYTHON.get(gen["candidate"]["adapter"]):
-        out.append("generation environment record is not the harness's (repositories / adapter interpreter)")
+    c_env = dict((gen.get("candidate") or {}).get("env") or [])
+    if gen.get("repos_checked") != sorted(DEFAULT_REPOS) or gen.get("adapter_python") != adapter_python(gen["candidate"]["adapter"], c_env):
+        out.append("generation environment record is not the harness's (repositories / the candidate's resolved interpreter)")
     body = {k: v for k, v in gen.items() if k != "digest"}
     if hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest() != gen.get("digest"):
         out.append("generation declaration does not match its digest")
@@ -169,6 +188,20 @@ def generation_problems(rep: dict, report_dir: Path | None = None) -> list[str]:
         except SemanticsUnknown as e:
             out.append(str(e))
     ev = rep.get("server_evidence") or {}
+    if c["adapter"] == "engine":  # B15-MM: the declared served identity, as the harness resolves it now and as the server reported it
+        want = gen.get("served_identity")
+        if not want:
+            out.append("engine generation declares no served identity")
+        else:
+            try:
+                now = served_identity_expected(c["config"], c_env)
+            except Exception as e:  # noqa: BLE001  (the config or interpreter is gone: it cannot be the declared one)
+                now = {"unresolvable": str(e)}
+            if now != want:
+                out.append(f"declared served identity differs from the candidate's resolution now: {sorted(k for k in set(now) | set(want) if now.get(k) != want.get(k))}")
+            seen = ev.get("served_identity") or {}
+            if ev.get("served_identity_problems") or any(seen.get(k) != v for k, v in want.items()):
+                out.append(f"the server's identity is not the declared one: {sorted(k for k, v in want.items() if seen.get(k) != v)}")
     if not ev.get("gpu_workers") or not ev.get("process_tree") or not {w.get("pid") for w in ev["gpu_workers"]} <= set(ev["process_tree"]):
         out.append("server evidence has no GPU workers of the launched process tree")
     hw = gen.get("hardware") or {}
@@ -270,6 +303,22 @@ def same_launch(got: list[str] | None, want: list[str]) -> bool:
     return True
 
 
+def binding_problems(rep: dict, report_dir: Path, required: bool) -> list[str]:
+    """B12d: each benchmark's record and every response in its sidecar carry the digest of the generation declaration they
+    were produced under; a declaration edited afterwards (a reference attached to the metadata only) no longer matches
+    them.  ``required``: reports written before the binding existed (round 8 and earlier) have none."""
+    want, out = (rep.get("generation") or {}).get("digest"), []
+    for bench, r in (rep.get("benches") or {}).items():
+        side = Path(report_dir) / f"{bench}.per_sample.jsonl"
+        rows = _jsonl(side) if side.exists() else []
+        bound = "generation_digest" in r or any("generation_digest" in x for x in rows)
+        if not bound and not required:
+            continue
+        if r.get("generation_digest") != want or not rows or any(x.get("generation_digest") != want for x in rows):
+            out.append(f"{bench}: responses were not produced under this generation declaration (generation_digest)")
+    return out
+
+
 def verify_mm_report(report_dir: str | Path, rescore: bool = True) -> tuple[dict, dict, list[str]]:
     """Returns (report, derived per-bench {accuracy, coverage, identity}, problems)."""
     d = Path(report_dir)
@@ -278,9 +327,10 @@ def verify_mm_report(report_dir: str | Path, rescore: bool = True) -> tuple[dict
     if not evaluator_consistent(rep.get("evaluator") or {}):
         problems.append("evaluator record does not match its digest")
     problems += generation_problems(rep, d)
+    problems += binding_problems(rep, d, required=False)
     if rescore:
         try:  # the rescorer must be the pinned evaluator the report recorded (sources, environments, manifests, workers)
-            if verify_mm_evaluator()["digest"] != rep["evaluator"].get("digest"):
+            if verify_mm_evaluator()["digest"] != mm_evaluator_digest(rep["evaluator"]):
                 problems.append("the current pinned evaluator is not the evaluator the report recorded")
         except EvaluatorMismatch as e:
             problems.append(f"evaluator: {e}")
@@ -317,7 +367,8 @@ def verify_mm_report(report_dir: str | Path, rescore: bool = True) -> tuple[dict
                           "identity": {"dataset": SETS[rep["subset"]][bench]["dataset"], "expected_sha256": _sha(expected_path(rep["subset"], bench)),
                                        "ids_sha256": cov["ids_sha256"], "gpu_sku": rep["gpu"].get("gpu_sku"), "gpu_driver": rep["gpu"].get("driver"),
                                        "gpu_memory_mib": rep["gpu"].get("memory_mib"), "subset": rep["subset"],
-                                       "scope": rep["scope"], "evaluator": rep["evaluator"]["digest"], "model": (rep.get("generation") or {}).get("model")}}
+                                       "scope": rep["scope"], "evaluator": mm_evaluator_digest(rep["evaluator"]),
+                                       "model": (rep.get("generation") or {}).get("model")}}
     ev = rep.get("server_evidence") or {}
     observed = (ev.get("mps") or {}).get("observed")
     if observed != rep["candidate"]["mps"]:
@@ -366,12 +417,13 @@ def cmd_run(a) -> int:
         for bench in benches:
             pol = gen["requests"][bench]
             job = _job(bench, a.subset, "run", url=srv.url, model=pol["model"], concurrency=pol["concurrency"], format=pol["format"],
-                       max_tokens=pol["max_tokens"], extra_body=pol["extra_body"])
+                       max_tokens=pol["max_tokens"], extra_body=pol["extra_body"], generation_digest=gen["digest"])
             res = _worker(bench, job)
-            side = out / f"{bench}.per_sample.jsonl"
-            side.write_text("".join(json.dumps(p) + "\n" for p in res["per_sample"]))
+            side = out / f"{bench}.per_sample.jsonl"  # every response carries the generation it was produced under (B12d)
+            side.write_text("".join(json.dumps({**p, "generation_digest": gen["digest"]}) + "\n" for p in res["per_sample"]))
             cov = coverage(res["ids"], res["per_sample"], [i for i, _ in expected[bench]["items"]])
             report["benches"][bench] = {"accuracy": res["accuracy"], "summary": res.get("summary"), "coverage": cov, "per_sample_sha256": _sha(side),
+                                        "generation_digest": gen["digest"],
                                         "expected_sha256": _sha(expected_path(a.subset, bench)), "consumed": res.get("consumed"), "wall_s": res.get("wall_s")}
             print(json.dumps({bench: {"accuracy": res["accuracy"], "coverage": cov["complete"], "failed": cov["failed"]}}), flush=True)
     report["wall_s"] = time.time() - t0
@@ -487,6 +539,7 @@ def certify(report_dir: str, qref_path: str, headline_digest: str | None) -> dic
         problems.append("report is not the declared headline configuration")
     if ((rep.get("generation") or {}).get("frozen_refs") or {}).get("mm_qref") != _sha(qref_path):
         problems.append("the report's generation was not declared against this frozen multimodal Q_ref (frozen_refs.mm_qref)")
+    problems += binding_problems(rep, Path(report_dir), required=True)
     verdicts = {}
     for bench in BENCHES:
         d, ref = derived.get(bench), q["values"].get(bench)
@@ -540,7 +593,7 @@ def cmd_calibrate(a) -> int:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     result = {"source": {"report": str(clean_dir / "report.json"), "report_sha256": _sha(clean_dir / "report.json"),
-                         "evaluator": rep["evaluator"]["digest"]}, "benches": {}}
+                         "evaluator": mm_evaluator_digest(rep["evaluator"])}, "benches": {}}
     for bench, d in derived.items():
         per = _jsonl(clean_dir / f"{bench}.per_sample.jsonl")
         correct = np.array([1.0 if p["is_correct"] else 0.0 for p in per])

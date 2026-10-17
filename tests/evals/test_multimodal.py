@@ -15,8 +15,9 @@ from evals.multimodal import suite as mm  # noqa: E402
 from evals.multimodal.sglang_mm_worker import build_payload  # noqa: E402
 
 BENCH_N = {"mmmu": 40, "mmsu": 40, "daily_omni": 40}
-EVAL = {"x": 1}
-EVAL["digest"] = hashlib.sha256(json.dumps({"x": 1}, sort_keys=True).encode()).hexdigest()
+EVAL = {"version": 2, "sglang": {"commit": "s"}, "eval_env": "e", "vllm_omni": {"commit": "v"}, "expected": {}, "workers": {}, "floors": {"mmmu": 0.64},
+        "max_tokens": {"mmmu": 2048}}
+EVAL["digest"] = hashlib.sha256(json.dumps(EVAL, sort_keys=True).encode()).hexdigest()
 GPU = {"gpu_index": 1, "gpu_sku": "L20X", "gpu_uuid": "GPU-1", "driver": "570", "memory_mib": "143771"}
 CONSUMED: dict = {}
 
@@ -84,10 +85,11 @@ def make_report(d, *, acc=0.9, scope="development", subset="full", benches=mm.BE
     for b in benches:
         k = n if n is not None else BENCH_N[b]
         good = int(round(acc * k))
-        per = [{"id": f"{b}{i}", "is_correct": i < good, "is_success": True, "raw": f"A:{b}{i}" if i < good else "B"} for i in range(k)]
+        per = [{"id": f"{b}{i}", "is_correct": i < good, "is_success": True, "raw": f"A:{b}{i}" if i < good else "B", "generation_digest": gen["digest"]}
+               for i in range(k)]
         side = d / f"{b}.per_sample.jsonl"
         side.write_text("".join(json.dumps(p) + "\n" for p in per))
-        rep["benches"][b] = {"accuracy": good / k, "per_sample_sha256": hashlib.sha256(side.read_bytes()).hexdigest(),
+        rep["benches"][b] = {"accuracy": good / k, "per_sample_sha256": hashlib.sha256(side.read_bytes()).hexdigest(), "generation_digest": gen["digest"],
                              "expected_sha256": hashlib.sha256((mm.EXPECTED_DIR / f"{subset}_{b}.json").read_bytes()).hexdigest()}
     (d / "report.json").write_text(json.dumps(rep))
     (d / "generation.json").write_text(json.dumps(gen))
@@ -382,3 +384,88 @@ def test_launch_from_a_worktree_copy_of_the_serve_script(tmp_path):
     assert not same_launch(["bash", str(wt / "serve_vllm_omni.sh"), "minicpmo_4_5_turn.yaml", "18620"], want)
     (wt / "other.sh").write_bytes(here.read_bytes())
     assert not same_launch(["bash", str(wt / "other.sh"), "minicpmo_4_5_turn.yaml", "18620"], want)
+
+
+# --- B12d / B15-MM / evaluator v2 (round 9) ----------------------------------------------------------------------------
+def test_metadata_only_reference_attachment_is_rejected(env, monkeypatch):
+    """The review's B12d probe: a report generated without the Q_ref declaration, the reference then attached to its
+    generation metadata (digest recomputed in report.json and generation.json, sidecars untouched)."""
+    base = make_report(env / "base", scope="final", acc=0.9, started=1.0)
+    qref = freeze(env, [f"{base}={_qual(env, monkeypatch)}"])
+    late = make_report(env / "late", scope="final", acc=0.9, label="eng")
+    assert not mm.certify(str(late), qref, digest_of("eng"))["certified"]
+
+    def attach(rep):
+        g = rep["generation"]
+        g["frozen_refs"] = {"mm_qref": mm._sha(Path(qref))}
+        g["digest"] = hashlib.sha256(json.dumps({k: v for k, v in g.items() if k != "digest"}, sort_keys=True).encode()).hexdigest()
+        for r in rep["benches"].values():
+            r["generation_digest"] = g["digest"]  # even the records: the responses still name the original declaration
+        (late / "generation.json").write_text(json.dumps(g))
+
+    edit(late, attach)
+    res = mm.certify(str(late), qref, digest_of("eng"))
+    assert not res["certified"] and any("generation_digest" in p for p in res["problems"]), res["problems"]
+    declared = make_report(env / "declared", scope="final", acc=0.9, label="eng", frozen={"mm_qref": mm._sha(Path(qref))})
+    assert mm.certify(str(declared), qref, digest_of("eng"))["certified"]
+
+
+def test_evaluator_v1_records_map_to_their_multimodal_components():
+    comp = {k: EVAL[k] for k in mm.MM_COMPONENTS}
+    v1 = {"speech_evaluator_digest": "old-speech", **comp}
+    v1["digest"] = hashlib.sha256(json.dumps(v1, sort_keys=True).encode()).hexdigest()
+    assert mm.mm_evaluator_digest(v1) == mm.mm_evaluator_digest(EVAL) == EVAL["digest"]
+    changed = {**v1, "workers": {"w": "x"}}
+    changed["digest"] = hashlib.sha256(json.dumps({k: v for k, v in changed.items() if k != "digest"}, sort_keys=True).encode()).hexdigest()
+    assert mm.mm_evaluator_digest(changed) not in (None, EVAL["digest"])  # a multimodal component differs: another evaluator
+    assert mm.mm_evaluator_digest({**v1, "digest": "forged"}) is None
+    assert mm.mm_evaluator_digest({k: v for k, v in v1.items() if k != "expected"}) is None
+
+
+def _engine_generation(monkeypatch):
+    import bench.cli as cli
+
+    py = str(Path(".venv/bin/python").absolute())
+    c = cli.make_candidate({"adapter": "engine", "config": "track_s_fast", "env": {"ENGINE_PYTHON": py}, "mps": "off", "label": "mm-override"})
+    gpu = {"gpu_index": 2, "gpu_sku": "L20X", "gpu_uuid": "GPU-fixture", "driver": "570", "memory_mib": "143771"}
+    g = mm.generation_identity(c, gpu, ["mmmu"], 1, 18990, EVAL["digest"])
+    ss = cli.server_spec(c, 18990, 2)
+    rep = {"generation": g, "candidate": g["candidate"], "gpu": gpu, "concurrency": 1, "evaluator": EVAL, "benches": {"mmmu": {}},
+           "server_evidence": {"gpu": gpu, "gpu_workers": [{"pid": 11}], "process_tree": [10, 11], "launch_argv": ss.cmd, "launch_env": ss.env,
+                               "served_identity": dict(ss.expected_identity), "served_identity_problems": []}}
+    return py, g, rep
+
+
+def _redigest(g):
+    g["digest"] = hashlib.sha256(json.dumps({k: v for k, v in g.items() if k != "digest"}, sort_keys=True).encode()).hexdigest()
+
+
+def _b15(problems):
+    return [p for p in problems if "interpreter" in p or "served identity" in p or "server's identity" in p]
+
+
+def test_engine_generation_binds_the_candidate_interpreter_and_served_identity(monkeypatch):
+    py, g, rep = _engine_generation(monkeypatch)
+    assert g["adapter_python"] == py and g["served_identity"]["python"] == py  # the override, not the default interpreter
+    assert not _b15(mm.generation_problems(rep)), mm.generation_problems(rep)
+    # the round-7 behaviour: the default interpreter recorded despite the override
+    import bench.cli as cli
+
+    old = json.loads(json.dumps(rep))
+    old["generation"]["adapter_python"] = cli.ADAPTER_PYTHON["engine"]
+    _redigest(old["generation"])
+    old["candidate"] = old["generation"]["candidate"]
+    assert cli.ADAPTER_PYTHON["engine"] != py and any("interpreter" in p for p in mm.generation_problems(old))
+    # the server reported other packages
+    wrong = json.loads(json.dumps(rep))
+    wrong["server_evidence"]["served_identity"]["python_dists_sha256"] = "wrong-packages"
+    assert any("server's identity" in p for p in mm.generation_problems(wrong))
+    # the candidate's environment changed packages after the declaration
+    real = cli.served_identity_expected
+    monkeypatch.setattr(cli, "served_identity_expected", lambda config, env=None: {**real(config, env), "python_dists_sha256": "drifted"})
+    assert any("resolution now" in p for p in mm.generation_problems(rep))
+    # an engine declaration without a served identity
+    bare = json.loads(json.dumps(rep))
+    bare["generation"].pop("served_identity")
+    _redigest(bare["generation"])
+    assert any("no served identity" in p for p in mm.generation_problems(bare))
