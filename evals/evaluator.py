@@ -22,15 +22,16 @@ EVAL_PYTHON = "/workspace/cgzheng/cgzheng/omni-baselines/eval-env/bin/python"
 ASR_PYTHON = "/workspace/cgzheng/cgzheng/omni-baselines/asr-env/bin/python"
 LOCKS = {"eval-env": (EVAL_PYTHON, ROOT / "evals" / "eval-env.lock"), "asr-env": (ASR_PYTHON, ROOT / "evals" / "asr-env.lock")}
 ASSETS_LOCK = ROOT / "evals" / "assets.lock.json"
-SOURCES = ("evals/speech/asr_worker.py", "evals/speech/scorer_worker.py", "evals/speech/detectors.py", "evals/speech/gates.py",
-           "evals/speech/suite.py", "evals/evaluator.py")
+SOURCES = ("evals/speech/asr_worker.py", "evals/speech/scorer_worker.py", "evals/speech/wavlm_blocked.py", "evals/speech/detectors.py",
+           "evals/speech/gates.py", "evals/speech/suite.py", "evals/evaluator.py")
 SETTINGS = {
     "asr": {"model": "Qwen/Qwen3-ASR-1.7B", "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5", "batch_size": 16, "dtype": "bfloat16",
             "decoding": "greedy", "language": "English"},
     "whisper": {"model": "openai/whisper-large-v3", "revision": "06f233fe06e710322aca913c1bc4249a0d71fce1", "batch_size": 16,
                 "dtype": "bfloat16", "decoding": "greedy", "language": "en"},
     "wer_normalizer": "sglang-omni benchmarks.tasks.asr.apply_wer (whisper EnglishTextNormalizer + jiwer)",
-    "sim": {"scorer": "WavLMSpeakerSimilarity", "scale": "x100", "batch": 16},
+    # attention v1 (round 9): the same batches and arithmetic, the attention in 256-row query blocks (an 82 s output did not fit)
+    "sim": {"scorer": "WavLMSpeakerSimilarity", "scale": "x100", "batch": 16, "attention": "query_blocked_v1", "query_block": 256},
     "utmos": {"scorer": "UTMOSScorer"},
 }
 

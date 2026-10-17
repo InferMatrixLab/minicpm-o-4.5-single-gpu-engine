@@ -9,7 +9,8 @@ worker loads the scorers from the explicitly verified checkpoint paths.
 
 Job: ``rows`` [{id, target_text, wav, ref_wav, hyp_text?, whisper_text?}],
 ``tasks`` (subset of wer/whisper_wer/sim/utmos), ``device``,
-``wavlm_finetune``, ``wavlm_base``, ``utmos_jit``, ``sim_batch``.
+``wavlm_finetune``, ``wavlm_base``, ``utmos_jit``, ``sim_batch``, ``sim_attention`` (``query_blocked_v1``: the WavLM
+attention is evaluated in query blocks, ``evals.speech.wavlm_blocked``, so a long output fits beside its batch).
 """
 
 from __future__ import annotations
@@ -32,9 +33,15 @@ def run_wer(rows: list[dict], field: str) -> dict:
     return {"rows": out}
 
 
-def run_sim(rows: list[dict], device: str, finetune: str, base: str, batch: int) -> dict:
+def run_sim(rows: list[dict], device: str, finetune: str, base: str, batch: int, attention: str) -> dict:
     from benchmarks.metrics.speaker_similarity import WavLMSpeakerSimilarity
 
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import evals.speech.wavlm_blocked as wb
+
+    if attention != wb.VERSION:
+        raise SystemExit(f"unknown SIM attention {attention!r}")
+    wb.install()
     scorer = WavLMSpeakerSimilarity(finetune_checkpoint=finetune, wavlm_base=base, device=device)
     out = {}
     order = sorted(rows, key=lambda r: r["id"])
@@ -42,7 +49,8 @@ def run_sim(rows: list[dict], device: str, finetune: str, base: str, batch: int)
         part = order[i : i + batch]
         for r, s in zip(part, scorer.score_batch([r["ref_wav"] for r in part], [r["wav"] for r in part])):
             out[r["id"]] = float(s)
-    return {"rows": out, "batch": batch, "scale": "x100", "checkpoints": {"finetune": finetune, "wavlm_base": base}}
+    return {"rows": out, "batch": batch, "scale": "x100", "attention": wb.VERSION, "query_block": wb.QUERY_BLOCK,
+            "checkpoints": {"finetune": finetune, "wavlm_base": base}}
 
 
 def run_utmos(rows: list[dict], device: str, utmos_jit: str) -> dict:
@@ -64,7 +72,7 @@ def main() -> int:
         elif task == "whisper_wer":
             out["whisper"] = run_wer(rows, "whisper_text")
         elif task == "sim":
-            out["sim"] = run_sim(rows, job["device"], job["wavlm_finetune"], job["wavlm_base"], int(job["sim_batch"]))
+            out["sim"] = run_sim(rows, job["device"], job["wavlm_finetune"], job["wavlm_base"], int(job["sim_batch"]), job["sim_attention"])
         elif task == "utmos":
             out["utmos"] = run_utmos(rows, job["device"], job["utmos_jit"])
         else:

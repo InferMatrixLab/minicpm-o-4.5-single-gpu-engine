@@ -183,7 +183,11 @@ def score(rows: list[GenRow], gpu: int, whisper: bool = True) -> dict:
                  "whisper_text": (wsp["texts"][r.key] if wsp else "")} for r in rows]
     tasks = ["wer", "sim", "utmos"] + (["whisper_wer"] if whisper else [])
     scored = _run_worker(EVAL_PYTHON, "scorer_worker.py", {"rows": job_rows, "tasks": tasks, "device": "cuda:0", "wavlm_finetune": finetune,
-                                                          "wavlm_base": base, "utmos_jit": utmos, "sim_batch": SETTINGS["sim"]["batch"]}, gpu, SGLANG_DIR)
+                                                          "wavlm_base": base, "utmos_jit": utmos, "sim_batch": SETTINGS["sim"]["batch"],
+                                                          "sim_attention": SETTINGS["sim"]["attention"]}, gpu, SGLANG_DIR)
+    sim = scored["tasks"]["sim"]
+    if (sim.get("attention"), sim.get("query_block"), sim.get("batch")) != (SETTINGS["sim"]["attention"], SETTINGS["sim"]["query_block"], SETTINGS["sim"]["batch"]):
+        raise RuntimeError(f"SIM execution evidence contradicts the declared evaluator settings: {sim.get('attention')}/{sim.get('query_block')}")
     evidence = {"asr": asr["evidence"], "whisper": wsp["evidence"] if wsp else None}
     for name, ev in evidence.items():
         if ev is None:
