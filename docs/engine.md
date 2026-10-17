@@ -98,6 +98,31 @@ audio.
     - 53d1135 FAIL: one feature process +1.077%, a rise in the first ~3 minutes of load after the 60 s reference, flat afterwards. 9ed19a1: jemalloc returns freed pages at once and each feature process runs 2000 synthetic jobs before load (startup about 4 minutes longer).
     - 9ed19a1 PASS: 32,736 requests, 0 invalid, max stall 0.181 s, refill max 11.7 ms, first dispatch 30 ms; memory max deviation engine 0.122%, worker 0.276%, feature total 0.076% (each process 0.059-0.108%), GPU 0; long prefill 8 prompts of >= 5422 tokens beside 24 continuing stream clients, all 8 and all 121 stream requests valid, per-tick prefill max 2048 = budget, stall max 0.301 s.
 
+## Quality references (AC-2, AC-4)
+
+- **SIM attention v1** (`evals/speech/wavlm_blocked.py`; evaluator setting `sim.attention = "query_blocked_v1"`, `query_block` 256).
+  - The pinned WavLM fast path materialises the relative-position bias, its gated copy and the key-padding sum as `[B*H, T, T]` fp32. One 82 s output padded into its 16 + 16 batch needs 32 GiB for each.
+  - v1 evaluates the same elements per block of 256 query rows over the complete keys, with the same `scaled_dot_product_attention` call.
+  - Projections, batches, padding, weights and precision are unchanged.
+- **Equivalence** (`tools/sim_equivalence.py`, on the batches of the report that could not be scored, `results/l20x/campaign/sim_v2/`):
+  - 203 of 204 batches compare, and all 203 give bitwise identical embeddings (largest score difference 0.0).
+  - The 82 s batch runs out of memory under the pinned attention and scores under v1, with a 52.8 GiB peak.
+- **Rescoring.** The evaluator digest changes, so every dependent is rescored under it, with the unchanged inputs and settings.
+  - Qualification v3: 9 candidates × 960 rows. SIM and UTMOS are identical on every row. The bf16 ASR differs run to run on a few rows: one Qwen3-ASR transcript of an unintelligible output, and Whisper WER on 4 rows. Every decisive qualification field and status is unchanged (7 of 9 qualify).
+  - Then `winners_v3.json` and `sim_v2/dref_v3`, both identical to their predecessors except for the binding.
+- **Multimodal evaluator v2** (`evals/multimodal/suite.py`).
+  - Its identity covers only what multimodal scoring executes:
+    - the scorer checkout and its environment;
+    - the vLLM-Omni checkout and its environment;
+    - the frozen manifests;
+    - the workers;
+    - the floors and token limits.
+  - A version-1 record maps to the digest of these components.
+  - All four multimodal Q_ref sources match the current components. The Q_ref was refrozen from them unchanged as `results/l20x/campaign/qref/multimodal_qref_final_v2.json` (MMMU 0.6556, MMSU 0.5192, Daily-Omni 0.7803) and verified.
+- **Engine multimodal generations.**
+  - The candidate's own interpreter and served identity are bound (B15-MM).
+  - Every response sidecar row carries the generation digest, so a Q_ref attached afterwards fails certification (B12d).
+
 ## Environments
 
 See `engine/env/README.md`. The engine runs in `.venv-engine` (torch 2.13, transformers 5.14, flashinfer 0.7). The HF
