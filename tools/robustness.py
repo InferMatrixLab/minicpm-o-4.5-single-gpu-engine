@@ -179,13 +179,17 @@ class LoopHealth:
 
     def __init__(self):
         self.lag_max_s, self.lag_max_tm, self.lags_over_10ms, self.gc_max_s, self.gc_calls = 0.0, None, 0, 0.0, 0
+        self.events: list = []  # (tm, lag) of every lag above 10 ms (bounded)
 
     async def watch(self, stop_at: float) -> None:
         while time.perf_counter() < stop_at:
             t = time.perf_counter()
             await asyncio.sleep(self.TICK_S)
             lag = time.perf_counter() - t - self.TICK_S
-            self.lags_over_10ms += lag > 0.010
+            if lag > 0.010:
+                self.lags_over_10ms += 1
+                if len(self.events) < 20000:
+                    self.events.append((t, lag))
             if lag > self.lag_max_s:
                 self.lag_max_s, self.lag_max_tm = lag, t
 
@@ -197,7 +201,7 @@ class LoopHealth:
 
     def snapshot(self) -> dict:
         return {"loop_lag_max_s": self.lag_max_s, "loop_lag_max_tm": self.lag_max_tm, "loop_lags_over_10ms": self.lags_over_10ms,
-                "gc_young_max_s": self.gc_max_s, "gc_young_calls": self.gc_calls, "gc_auto": gc.isenabled()}
+                "gc_young_max_s": self.gc_max_s, "gc_young_calls": self.gc_calls, "gc_auto": gc.isenabled(), "lag_events": self.events}
 
 
 @contextlib.contextmanager
@@ -322,6 +326,7 @@ class Recorder:
         self.out.mkdir(parents=True, exist_ok=True)
         self.q: queue.Queue = queue.Queue()
         self.n = 0
+        self._n_lock = threading.Lock()  # records are built in worker threads (finish_stream)
         self._req = (self.out / "requests.jsonl").open("w")
         self._wire = gzip.open(self.out / "wire.jsonl.gz", "wt", compresslevel=1)
         self._t = threading.Thread(target=self._write, daemon=True, name="robustness-recorder")
@@ -341,7 +346,8 @@ class Recorder:
                 seq: int | None = None, kind: str = "request", extra: dict | None = None) -> dict:
         """Persist one finished (or, ``kind="cancel"``, deliberately abandoned) request; its PCM is not kept: the wire
         record holds the bytes it arrived as."""
-        self.n += 1
+        with self._n_lock:
+            self.n += 1
         rec = {"record": kind, "scenario": scenario, "request_id": tr.request_id, "client": client, "row": row, "cycle": cycle, "seq": seq,
                "t_dispatch": tr.t_dispatch, "t_complete": tr.t_complete, "http_status": tr.http_status, "trace": tr.to_json(),
                "metrics": asdict(m), **(extra or {})}
@@ -353,7 +359,8 @@ class Recorder:
 
     def snapshot(self, scenario: str, label: str, m: dict) -> dict:
         """A raw observation (a counter reading, the identity, the geometry, ...) the verdict is derived from."""
-        self.n += 1
+        with self._n_lock:
+            self.n += 1
         rec = {"record": "snapshot", "scenario": scenario, "label": label, "m": m}
         self.q.put((rec, None))
         return rec
@@ -429,9 +436,17 @@ async def harness_stream(session, url: str, adapter, payload: dict, rid: str, ti
     is persisted when ``rec`` is a ``Recorder``."""
     tr = await send_request(session, url, adapter, SimpleNamespace(request_id=rid), timeout_s=timeout_s, payload=payload,
                             record_raw=isinstance(rec, Recorder))
-    m = request_metrics(tr)
-    r = (rec or _NoRecorder()).request(scenario, tr, m, **ids)
-    return m, tr, r
+    return await finish_stream(tr, rec, scenario, **ids)
+
+
+async def finish_stream(tr, rec, scenario: str, **ids):
+    """The validity metrics of a finished stream and its persisted record, off the event loop: computed on the loop they
+    hold every client (the audio assembly and checks of one response take milliseconds, and completions coincide)."""
+    def run():
+        m = request_metrics(tr)
+        return m, tr, (rec or _NoRecorder()).request(scenario, tr, m, **ids)
+
+    return await asyncio.to_thread(run)
 
 
 CANCEL_BAD_FLAGS = ("gap", "overlap", "num_samples_mismatch", "sample_rate", "multiple_terminal_waveforms", "malformed_wav", "missing_offsets")
@@ -787,9 +802,10 @@ async def continuous_load(url, adapter, reqs, concurrency: int, stop_at: float, 
                           rec=None, scenario: str = "sustain", prefix: str = "", payloads: list | None = None) -> list:
     """``concurrency`` persistent clients; each starts the next request of the cycling row sequence as soon as its previous
     one ends, until ``stop_at`` (``time.perf_counter``).  ``state`` carries the in-flight count (read by the sampler) and
-    the requests started.  Returns the persisted request records (traces are not kept)."""
+    the requests started.  A finished stream's metrics and record are completed in the background (``finish_stream``)
+    after the client has started its next request.  Returns the persisted request records (traces are not kept)."""
     payloads = payloads or [adapter.build_payload(r) for r in reqs]
-    done: list = []
+    finishing: list = []
     state.update(in_flight=0, started=0)
     async with make_session(connections=4 * concurrency) as s:
         async def client(c: int):
@@ -799,14 +815,13 @@ async def continuous_load(url, adapter, reqs, concurrency: int, stop_at: float, 
                 state["in_flight"] += 1
                 try:
                     r = reqs[i % len(reqs)]
-                    _, _, record = await harness_stream(s, url, adapter, payloads[i % len(reqs)], f"{prefix}{r.request_id}#{i // len(reqs)}",
-                                                        timeout_s=timeout_s, rec=rec, scenario=scenario, client=c, row=r.request_id,
-                                                        cycle=i // len(reqs), seq=i)
-                    done.append(record)
+                    tr = await send_request(s, url, adapter, SimpleNamespace(request_id=f"{prefix}{r.request_id}#{i // len(reqs)}"), timeout_s=timeout_s,
+                                            payload=payloads[i % len(reqs)], record_raw=isinstance(rec, Recorder))
+                    finishing.append(asyncio.ensure_future(finish_stream(tr, rec, scenario, client=c, row=r.request_id, cycle=i // len(reqs), seq=i)))
                 finally:
                     state["in_flight"] -= 1
         await asyncio.gather(*(client(c) for c in range(concurrency)))
-    return done
+    return [record for _, _, record in await asyncio.gather(*finishing)]
 
 
 async def scenario_sustain(url, adapter, reqs, concurrency: int, minutes: float, gpu_uuid: str | None, baseline: dict | None = None,
@@ -857,11 +872,11 @@ async def scenario_long_prefill(url, adapter, rows, stream_reqs, n_long: int = 8
                     k = i[0]
                     i[0] += 1
                     r = stream_reqs[k % len(stream_reqs)]
-                    _, _, record = await harness_stream(s, url, adapter, payloads[k % len(stream_reqs)], f"lp-{r.request_id}#{k}", rec=rec,
-                                                        scenario="long_prefill_streams", client=c, row=r.request_id, seq=k)
-                    out.append(record)
+                    tr = await send_request(s, url, adapter, SimpleNamespace(request_id=f"lp-{r.request_id}#{k}"), payload=payloads[k % len(stream_reqs)],
+                                            record_raw=isinstance(rec, Recorder))
+                    out.append(asyncio.ensure_future(finish_stream(tr, rec, "long_prefill_streams", client=c, row=r.request_id, seq=k)))
             await asyncio.gather(*(client(c) for c in range(streams)))
-        return out
+        return [record for _, _, record in await asyncio.gather(*out)]
 
     longs = long_prompt_payloads(rows, n_long)
     with quiet_gc():
