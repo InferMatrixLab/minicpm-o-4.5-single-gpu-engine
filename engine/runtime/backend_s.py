@@ -37,6 +37,21 @@ from engine.server import AudioChunk, Done, EngineRequest, Overloaded, TextDelta
 
 THINKER_CHUNK = 10
 TALKER_MAX_PER_CHUNK = 500
+TALKER_FRAMES_DEFAULT = 2048  # a request without talker max_new_tokens: the canonical value (bench.workload)
+
+
+def thinker_bound(max_tokens: int) -> int:
+    """Reply tokens the Thinker may generate: Track S closes at the first chunk boundary (11 + 10k tokens) at or after
+    ``max_tokens``, so up to 10 * ceil(max_tokens / 10) + 1."""
+    return THINKER_CHUNK * -(-max_tokens // THINKER_CHUNK) + 1
+
+
+def talker_lifetime(max_tokens: int, frames: int, k_max: int) -> int:
+    """Upper bound on one utterance's Talker KV tokens: every text chunk's condition (its reply tokens, audio_bos,
+    text_eos on the final chunk, the carried last frame of a chunk cut at the per-chunk limit), every fed frame (at
+    most ``frames``, the request's cap) and the K-frame block a decode reserves before an EOS rolls it back."""
+    chunks = -(-max_tokens // THINKER_CHUNK)
+    return thinker_bound(max_tokens) + 2 * chunks + 1 + frames + k_max
 
 
 @dataclass
@@ -71,8 +86,10 @@ class LiveS:
     feed_last: bool = False  # the chunk ended at the per-chunk limit: the last frame still has to be fed
     ts: dict | None = None  # codes, seeds, steps, history, live (device tensors, one row)
     frames: int = 0
+    frame_cap: int = TALKER_FRAMES_DEFAULT  # the request's talker max_new_tokens: the utterance ends at this many frames
     codes: list[int] = field(default_factory=list)  # every non-EOS codec frame of the utterance
     utterance_done: bool = False
+    finish_reason: str = "stop"  # "length" once the frame cap ended the utterance
     # token2wav
     prompt_future: Future | None = None
     stream: object = None
@@ -146,7 +163,7 @@ class TrackSBackend:
                                             slack_floor_s=None if prefill_slack_floor_ms is None else prefill_slack_floor_ms / 1000,
                                             talker_start_budget=talker_start_budget)
         self.sched = {"prefill_token_budget": prefill_token_budget, "prefill_tokens_tick_max": 0, "prefill_chunked_ticks": 0,
-                      "prefill_kv_wait_ticks": 0, "talker_starts_deferred_ticks": 0}  # scheduler counters for /metrics
+                      "prefill_kv_wait_ticks": 0, "talker_starts_deferred_ticks": 0, "talker_kv_wait_ticks": 0}  # counters for /metrics
 
         # two launch-bound host threads (Thinker/Talker and Token2Wav) share the GIL; hand it over often
         sys.setswitchinterval(switch_interval_s)
@@ -207,6 +224,10 @@ class TrackSBackend:
                 self.t2w_batch.capture_graphs(self.t2w_batch.setup(self.t2w.features(model_dir / "assets" / "HT_ref_audio.wav")))
         self.frontend = MultimodalFrontend(model_dir, device=device)
         self.device, self.max_live, self.talker_k, self.talker_k_max = device, max_live, talker_k, talker_k_max
+        # Talker KV is committed for an utterance's whole lifetime before its first chunk starts (``_grant_talker``):
+        # seq -> committed pages.  The decoder's bucket padding rows take one K-frame block each beside them.
+        self.talker_commit: dict[int, int] = {}
+        self.talker_pad_pages = (max(self.adec.buckets) - 1) * -(-max(talker_k, talker_k_max) // self.akv.page_size)
         self.admitted = 0
         self.thinker_lazy = thinker_lazy
         self.profile = profile
@@ -262,6 +283,26 @@ class TrackSBackend:
         if "repetition_window" in ts and int(ts["repetition_window"]) != self.cfg.window:
             raise BadRequest(f"talker repetition_window={ts['repetition_window']} differs from the engine's ({self.cfg.window})")
 
+    @staticmethod
+    def _frame_cap(req: EngineRequest) -> int:
+        return int(dict(req.talker_sampling).get("max_new_tokens") or TALKER_FRAMES_DEFAULT)
+
+    def _talker_need(self, req: EngineRequest) -> int:
+        """Talker KV pages one audio request may use over its whole utterance (``talker_lifetime``)."""
+        return -(-talker_lifetime(req.max_tokens, self._frame_cap(req), max(self.talker_k, self.talker_k_max)) // self.akv.page_size)
+
+    def _check_capacity(self, req: EngineRequest) -> None:
+        """An audio request whose lifetime bound exceeds the Talker context or the whole pool can never be granted."""
+        from engine.server import BadRequest
+
+        if req.ref_audio is None or "audio" not in req.modalities:
+            return
+        tokens = talker_lifetime(req.max_tokens, self._frame_cap(req), max(self.talker_k, self.talker_k_max))
+        if tokens > self.adec.max_len or self._talker_need(req) > self.akv.num_pages - self.talker_pad_pages:
+            raise BadRequest(f"max_tokens={req.max_tokens} with {self._frame_cap(req)} speech frames may need {tokens} Talker KV tokens, "
+                             f"beyond this engine's Talker capacity ({self.adec.max_len} positions, "
+                             f"{(self.akv.num_pages - self.talker_pad_pages) * self.akv.page_size} pooled tokens)")
+
     def _prepare(self, ref: bytes):
         """Worker thread: the reference voice's features (no flow work; the Token2Wav thread runs the flow setup)."""
         feats = self.t2w.features(ref)
@@ -271,6 +312,7 @@ class TrackSBackend:
 
     async def generate(self, req: EngineRequest):
         self._check_sampling(req)
+        self._check_capacity(req)
         with self._lock:  # an admission slot is taken here, before any await, and given back when the request ends
             if self.admitted >= self.max_live:
                 raise Overloaded(f"{self.max_live} live requests")
@@ -290,7 +332,7 @@ class TrackSBackend:
             seq = self._next
             self._next += 1
         lv = LiveS(req=req, out=asyncio.Queue(), loop=asyncio.get_running_loop(), prompt_ids=prompt, seq=seq, prompt_embeds=embeds,
-                   prompt_future=fut)
+                   prompt_future=fut, frame_cap=self._frame_cap(req))
         if self.profile:
             lv.timeline = self.timelines.setdefault(req.request_id, [])
             lv.mark("queued")
@@ -313,6 +355,7 @@ class TrackSBackend:
 
         return {"live": len(self.live), "queued": self.inbox.qsize(), "admitted": self.admitted, "max_live": self.max_live, "first_chunk": self.first_chunk, "thinker_kv_pages_used": self.tkv.used_pages,
                 "talker_kv_pages_used": self.akv.used_pages, "thinker_kv_pages": self.tkv.num_pages, "talker_kv_pages": self.akv.num_pages,
+                "talker_kv_committed_pages": sum(self.talker_commit.values()), "talker_kv_pad_pages": self.talker_pad_pages,
                 "gpu_memory_allocated_bytes": int(torch.cuda.memory_allocated()), "gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved()),
                 "rss_max_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "rss_kib": _rss_kib(), "audio_live": len(self.audio_live),
                 **self.sched, **getattr(self, "t2w_stats", {})}
@@ -391,7 +434,7 @@ class TrackSBackend:
                     for lv in list(self.live.values()):
                         if lv.cancelled and not lv.utterance_done and lv.wants_audio:
                             lv.utterance_done = True
-                            self.akv.release(lv.seq)
+                            self._akv_release(lv.seq)
                             if self.t2wp is not None and self.audio_live.pop(lv.seq, None) is not None:
                                 self.t2wp.send("close", lv.seq)
                             if lv.thinker_done:
@@ -402,7 +445,7 @@ class TrackSBackend:
                     if work:
                         self._timed("talker", self._talker_step, rows)
                     for lv in [x for x in list(self.live.values()) if x.utterance_done and x.thinker_done and not x.cancelled]:
-                        self.akv.release(lv.seq)
+                        self._akv_release(lv.seq)
                         self.live.pop(lv.seq, None)
                 if not work:
                     self.talker_wake.wait(0.002)
@@ -432,9 +475,13 @@ class TrackSBackend:
                 self.t2w_wake.set()
         self.live[lv.seq] = lv
 
+    def _akv_release(self, seq: int) -> None:
+        self.akv.release(seq)
+        self.talker_commit.pop(seq, None)
+
     def _release(self, lv: LiveS) -> None:
         self.tkv.release(lv.seq)
-        self.akv.release(lv.seq)
+        self._akv_release(lv.seq)
         self.live.pop(lv.seq, None)
         lv.finished = True
         if self.t2wp is not None and self.audio_live.pop(lv.seq, None) is not None:
@@ -466,7 +513,7 @@ class TrackSBackend:
             lv.sample_offset = m[2] + len(m[3])
         elif kind == "done":
             self.audio_live.pop(seq, None)
-            lv.emit(Done("stop", {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": lv.frames}))
+            lv.emit(Done(lv.finish_reason, {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": lv.frames}))
             lv.finished = True
         elif kind == "error":
             self.audio_live.pop(seq, None)
@@ -517,7 +564,7 @@ class TrackSBackend:
         for lv in [x for x in list(self.live.values()) if x.utterance_done]:
             # the Thinker and Talker are done: free their KV; the Token2Wav thread emits the rest and Done
             self.tkv.release(lv.seq)
-            self.akv.release(lv.seq)
+            self._akv_release(lv.seq)
             self.live.pop(lv.seq, None)
             if self.t2wp is None:
                 self.t2w_wake.set()
@@ -529,8 +576,8 @@ class TrackSBackend:
 
     @staticmethod
     def _growth(lv: LiveS) -> int:
-        """Thinker KV tokens a request may still add: the rest of its prompt and of its reply."""
-        return len(lv.prompt_ids) - lv.prefilled + max(0, lv.req.max_tokens - len(lv.generated)) + 1
+        """Thinker KV tokens a request may still add: the rest of its prompt and of its chunk-rounded reply."""
+        return len(lv.prompt_ids) - lv.prefilled + max(0, thinker_bound(lv.req.max_tokens) - len(lv.generated)) + 1
 
     def _prefill_lane(self, rows: list) -> tuple[list, bool]:
         """The Thinker rows of this tick and whether a continuing stream is short of playback (``t2w_sched``): every
@@ -663,10 +710,36 @@ class TrackSBackend:
                 self.talker_wake.set()
 
     # talker ------------------------------------------------------------------------------------
+    def _grant_talker(self, starts: list[LiveS]) -> list[LiveS]:
+        """The starts whose utterance holds a Talker KV commitment.  A first start is granted its whole lifetime bound
+        (``_talker_need``) in admission order while it fits beside every commitment and the decoder's padding; the
+        first that does not fit holds the later ones (no starvation).  Every committed utterance can run to its end, so
+        continuation chunks never wait for KV and a pool full of unfinished utterances cannot deadlock."""
+        first = sorted((lv for lv in starts if lv.seq not in self.talker_commit), key=lambda lv: (lv.t_admit, lv.seq))
+        room = self.akv.num_pages - self.talker_pad_pages - sum(self.talker_commit.values())
+        for lv in first:
+            need = self._talker_need(lv.req)
+            if need > room:
+                self.sched["talker_kv_wait_ticks"] += 1
+                break
+            self.talker_commit[lv.seq] = need
+            room -= need
+        return [lv for lv in starts if lv.seq in self.talker_commit]
+
+    def _beyond_commit(self, lv: LiveS, extra: int) -> bool:
+        """Would ``extra`` more Talker KV tokens take ``lv`` past its committed pages?  (A broken lifetime bound.)"""
+        held = len(self.akv.pages.get(lv.seq, [])) + self.akv.pages_needed(lv.seq, extra)
+        if held <= self.talker_commit.get(lv.seq, 0):
+            return False
+        lv.emit(RuntimeError(f"engine error: Talker KV beyond the request's committed {self.talker_commit.get(lv.seq, 0)} pages"))
+        lv.cancelled = True  # fails alone; released next tick
+        return True
+
     def _talker_starts(self, starts: list[LiveS]) -> list[LiveS]:
-        """The chunk starts (Talker prefills) of this tick: earliest playback deadline first (a request without audio
-        yet: admission + ``max_age_s``, so first chunks lead unless a continuing stream is behind), within the per-tick
-        token budget (``t2w_sched.choose_starts``; at least one)."""
+        """The chunk starts (Talker prefills) of this tick: those holding a KV commitment (``_grant_talker``), earliest
+        playback deadline first (a request without audio yet: admission + ``max_age_s``, so first chunks lead unless a
+        continuing stream is behind), within the per-tick token budget (``t2w_sched.choose_starts``; at least one)."""
+        starts = self._grant_talker(starts)
         if not starts:
             return starts
         from engine.runtime.t2w_sched import choose_starts
@@ -696,6 +769,9 @@ class TrackSBackend:
                     cond = torch.cat([self.talker.code_embed(lv.ts["codes"]), cond], dim=0)
                     lv.feed_last = False
                 feeds.append(cond)
+            ok = [i for i, (lv, f) in enumerate(zip(starts, feeds)) if not self._beyond_commit(lv, f.shape[0])]
+            starts, feeds = [starts[i] for i in ok], [feeds[i] for i in ok]
+        if starts:
             lay = self.akv.layout([lv.seq for lv in starts], [f.shape[0] for f in feeds])
             hidden = self.arun.forward(torch.cat(feeds), lay)
             logits = torch.nn.functional.linear(hidden[lay.last_token_index], self.talker.head).float()
@@ -712,11 +788,9 @@ class TrackSBackend:
                 lv.ts.update(steps=st.steps, history=st.history)
                 lv.chunk_frames = 0
                 self._take_frame(lv, tok, fed_upto=None)
-        active = [lv for lv in rows if lv.talking]
+        active = [lv for lv in rows if lv.talking and not lv.cancelled]
         if not active:
             return
-        starts_len = [self.akv.lengths[lv.seq] for lv in active]
-        state = {name: torch.cat([lv.ts[name] for lv in active]) for name in ("codes", "seeds", "steps", "history", "live")}
         # adaptive K: short blocks while work is waiting to join (a chunk start, a Thinker prefill) or any Thinker is
         # still generating (one text token per tick must stay ahead of ~4 codec frames per token); long blocks once all
         # text is done (fewer ticks per frame).  A row that hits EOS inside a block is rolled back exactly either way.
@@ -724,6 +798,11 @@ class TrackSBackend:
         waiting = any((not lv.talking and lv.chunks) or (not lv.thinker_done and not self.split_threads)
                       for lv in list(self.live.values())) or not self.inbox.empty()
         k = self.talker_k if waiting else max(self.talker_k, self.talker_k_max)
+        active = [lv for lv in active if not self._beyond_commit(lv, k)]
+        if not active:
+            return
+        starts_len = [self.akv.lengths[lv.seq] for lv in active]
+        state = {name: torch.cat([lv.ts[name] for lv in active]) for name in ("codes", "seeds", "steps", "history", "live")}
         codes = self.adec.decode_k([lv.seq for lv in active], state, k)  # [K, n] on the host
         for i, lv in enumerate(active):
             for name in ("codes", "seeds", "steps", "history", "live"):
@@ -739,7 +818,6 @@ class TrackSBackend:
     def _take_frame(self, lv: LiveS, tok: int, fed_upto: int | None) -> None:
         """One sampled frame.  ``fed_upto`` is the Talker KV length once the frames before ``tok`` are fed (decode path)."""
         eos = self.talker.cfg.eos
-        ch = lv.chunks[0]
         if tok == eos:
             if fed_upto is not None:
                 self.akv.truncate(lv.seq, fed_upto)  # later K-block replays fed EOS/PAD; the reference never feeds them
@@ -755,6 +833,14 @@ class TrackSBackend:
         for w in lv.chunker.push([tok]):
             self._queue_window(lv, w)
         lv.ts["codes"] = torch.tensor([tok], dtype=torch.int64, device=self.device)
+        if lv.frames >= lv.frame_cap:
+            # the request's frame cap (talker max_new_tokens): the utterance ends with this frame, unfed; text the
+            # Thinker has not yet passed gets no speech
+            if fed_upto is not None:
+                self.akv.truncate(lv.seq, fed_upto)
+            lv.finish_reason = "length"
+            self._end_chunk(lv, last=True)
+            return
         if lv.chunk_frames >= TALKER_MAX_PER_CHUNK:
             # the reference feeds this frame and moves on to the next chunk without an EOS
             if fed_upto is not None:
@@ -765,10 +851,12 @@ class TrackSBackend:
         lv.talking = True
         lv.ts["live"] = torch.ones(1, dtype=torch.bool, device=self.device)
 
-    def _end_chunk(self, lv: LiveS) -> None:
+    def _end_chunk(self, lv: LiveS, last: bool = False) -> None:
+        """The current chunk ends; the utterance too at its final chunk, or (``last``) at the frame cap."""
         ch = lv.chunks.pop(0)
         lv.talking = False
-        if ch.final:
+        if ch.final or last:
+            lv.chunks.clear()
             w = lv.chunker.finish()
             if w is not None:
                 self._queue_window(lv, w)
@@ -821,7 +909,7 @@ class TrackSBackend:
                 worked = True
         for lv in list(self.t2w_live.values()):
             if lv.utterance_done and not lv.windows and lv.seq not in self.live:
-                lv.emit(Done("stop", {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": lv.frames}))
+                lv.emit(Done(lv.finish_reason, {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": lv.frames}))
                 lv.finished = True
                 self.t2w_live.pop(lv.seq, None)
         return worked

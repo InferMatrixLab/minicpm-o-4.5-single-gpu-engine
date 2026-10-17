@@ -85,11 +85,12 @@ def make(policy: PrefillPolicy, pages=1024, page_size=64):
     be = object.__new__(B.TrackSBackend)
     spec = DecoderSpec(1, 8, 1, 1, 8, 1e4, 1e-6, True)
     be.tkv = PagedKV(spec, pages, page_size, dtype=torch.float32, device="cpu")
-    be.akv = PagedKV(spec, 64, 128, dtype=torch.float32, device="cpu")
+    be.akv = PagedKV(spec, 64 * 19, 128, dtype=torch.float32, device="cpu")  # every utterance's lifetime commitment fits
+    be.talker_commit, be.talker_pad_pages, be.talker_k, be.talker_k_max = {}, 0, K, K
     be.tdec = FakeTDec(be, clock)
     be.prefill_policy = policy
     be.sched = {"prefill_token_budget": policy.token_budget, "prefill_tokens_tick_max": 0, "prefill_chunked_ticks": 0,
-                "prefill_kv_wait_ticks": 0, "talker_starts_deferred_ticks": 0}
+                "prefill_kv_wait_ticks": 0, "talker_starts_deferred_ticks": 0, "talker_kv_wait_ticks": 0}
     be.live, be.audio_live = {}, {}
     be.thinker_lazy, be.profile, be.split_threads = False, False, False
     be.t2wp = SimpleNamespace(send=lambda *a: None)
@@ -134,7 +135,7 @@ def make(policy: PrefillPolicy, pages=1024, page_size=64):
 
 
 def admit(be, clock, seq, prompt, reply, t=None, buffered_s=0.0):
-    req = SimpleNamespace(max_tokens=max(reply + 1, 16), ref_audio=b"voice", modalities=["text", "audio"], seed=seq)
+    req = SimpleNamespace(max_tokens=max(reply + 1, 16), ref_audio=b"voice", modalities=["text", "audio"], seed=seq, talker_sampling={})
     lv = B.LiveS(req=req, out=Out(), loop=Loop(), prompt_ids=[1] * prompt, seq=seq)
     lv.t_admit, lv.audio, lv.reply = clock.t if t is None else t, AudioState(), reply
     lv.stall = Stall(lv.audio)
