@@ -109,10 +109,11 @@ def _block_chunk(block, x, c, cnn_cache, att_cache, mask, tr):
 
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
-                 fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96):
+                 fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False):
         """``fast_dit``: the estimator solve of ``engine.runtime.dit_fast`` (slot-pool caches, packed ragged rows, CUDA
         graphs with ``use_graphs``) in place of the reference-module solve; FP16 flow only.  Streams must then be made with
-        ``new_stream`` and released with ``release_stream``."""
+        ``new_stream`` and released with ``release_stream``.  ``hift_decode_tf32``: HiFT's upsampling stages
+        in TF32 (``token2wav.decoder_tf32``; the f0 predictor, the source and the input/output convolutions stay strict FP32)."""
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         self.fast = None
         if fast_dit:
@@ -125,11 +126,12 @@ class BatchedToken2Wav:
         self.max_flow_streams = 32  # the staged per-step solve keeps a 32-stream call's transient memory small
         self.profile: dict | None = None  # stage -> [calls, seconds, items] when set
         self.hift_graphs = self.enc_graphs = None
+        self.hift_decode_tf32 = hift_decode_tf32
         if use_graphs:
             from engine.runtime.dit_graph import EncoderGraphs
             from engine.runtime.hift_graph import HiFTGraphs
 
-            self.hift_graphs = HiFTGraphs(self.hift)
+            self.hift_graphs = HiFTGraphs(self.hift, decode_tf32=hift_decode_tf32)
             self.enc_graphs = EncoderGraphs(self.flow.encoder, _encoder_core, self.dtype)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.graphs = self.euler = None
@@ -444,7 +446,6 @@ class BatchedToken2Wav:
         """The per-step graph solve with each step's caches written straight into the graph inputs and its new caches
         straight out into each request's cache (no all-steps staging tensors: at 32 streams those are ~18 GB)."""
         cfm = self.flow.decoder
-        est = cfm.estimator
         n, dev = len(sts), mu.device
         steps = self.t2w.n_timesteps
         g_att, g_cnn = self.graphs.stage(2 * n, T, L)
@@ -534,7 +535,7 @@ class BatchedToken2Wav:
         """
         from einops import pack, repeat
 
-        rows, T = x.shape[0], x.shape[2]
+        T = x.shape[2]
         if out is None:
             out = (torch.empty_like(x), torch.empty_like(cnn_cache),
                    att_cache.new_empty(att_cache.shape[:3] + (T + att_cache.shape[3], att_cache.shape[4])))
@@ -560,7 +561,7 @@ class BatchedToken2Wav:
             full.append(m)
             groups[(m.shape[2], st.hift_cache["source"].shape[2])].append(i)
         pieces: list[tuple[int, torch.Tensor]] = []
-        voc = self.hift_graphs if self.hift_graphs is not None else (lambda *a: hift_forward(self.hift, *a))
+        voc = self.hift_graphs if self.hift_graphs is not None else (lambda *a: hift_forward(self.hift, *a, decode_tf32=self.hift_decode_tf32))
         for (_, src_len), idx in groups.items():
             M = torch.cat([full[i] for i in idx])
             speech, source = voc(M, torch.cat([items[i][0].hift_cache["source"] for i in idx]),

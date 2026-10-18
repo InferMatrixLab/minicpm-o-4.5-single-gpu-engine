@@ -20,8 +20,9 @@ FINAL_ROWS = 4
 
 
 class HiFTGraphs:
-    def __init__(self, hift, rows=ROWS, frames=FRAMES, final_frames=FINAL_FRAMES):
+    def __init__(self, hift, rows=ROWS, frames=FRAMES, final_frames=FINAL_FRAMES, decode_tf32: bool = False):
         self.hift, self.rows, self.frames = hift, tuple(rows), {**dict(final_frames), **dict(frames)}
+        self.decode_tf32 = decode_tf32  # HiFT's upsampling stages in TF32 (``token2wav.decoder_tf32``), captured into the graphs
         self.final = set(final_frames) - set(frames)
         self.graphs: dict[tuple[int, int], tuple] = {}
         self.pool = torch.cuda.graph_pool_handle()
@@ -36,11 +37,11 @@ class HiFTGraphs:
         z = lambda *s: torch.zeros(*s, device=self.device)  # noqa: E731
         st = {"mel": z(rows, self.mels, F), "src": z(rows, 1, self.frames[F]), "rand": z(rows, self.dim), "noise": z(rows, n, self.dim)}
         with strict_fp32():
-            hift_forward_noise(self.hift, st["mel"], st["src"], st["rand"], st["noise"])  # warm-up
+            hift_forward_noise(self.hift, st["mel"], st["src"], st["rand"], st["noise"], self.decode_tf32)  # warm-up
             torch.cuda.synchronize()
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g, pool=self.pool, capture_error_mode="thread_local"):
-                out = hift_forward_noise(self.hift, st["mel"], st["src"], st["rand"], st["noise"])
+                out = hift_forward_noise(self.hift, st["mel"], st["src"], st["rand"], st["noise"], self.decode_tf32)
         torch.cuda.synchronize()
         self.graphs[(rows, F)] = (g, st, out)
 
@@ -65,7 +66,7 @@ class HiFTGraphs:
         if not self.supports(F, cache_source.shape[2]):
             self.counts["eager"] += 1
             with strict_fp32():
-                return hift_forward_noise(self.hift, mel, cache_source, rand_ini, noise)
+                return hift_forward_noise(self.hift, mel, cache_source, rand_ini, noise, self.decode_tf32)
         speech, source = [], []
         rows = self._rows(F)
         for a in range(0, n, rows[-1]):

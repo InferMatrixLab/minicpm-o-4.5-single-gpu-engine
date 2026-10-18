@@ -138,24 +138,27 @@ def istft_overlap_add(spec: torch.Tensor, n_fft: int, hop: int, window: torch.Te
     return (y / env)[:, half:total - half]
 
 
-def _hift_decode(hift, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-    """``HiFTGenerator.decode`` with ``istft_overlap_add`` in place of ``torch.istft``."""
+def _hift_decode(hift, x: torch.Tensor, s: torch.Tensor, tf32: bool = False) -> torch.Tensor:
+    """``HiFTGenerator.decode`` with ``istft_overlap_add`` in place of ``torch.istft``.  ``tf32``: the upsampling stages
+    (``ups``, the source ``source_downs`` / ``source_resblocks`` and ``resblocks``) in TF32 (``decoder_tf32``); the input
+    and output convolutions stay in the caller's precision."""
     import torch.nn.functional as Fn
 
     s_stft_real, s_stft_imag = hift._stft(s.squeeze(1))
     s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
     x = hift.conv_pre(x)
-    for i in range(hift.num_upsamples):
-        x = Fn.leaky_relu(x, hift.lrelu_slope)
-        x = hift.ups[i](x)
-        if i == hift.num_upsamples - 1:
-            x = hift.reflection_pad(x)
-        si = hift.source_resblocks[i](hift.source_downs[i](s_stft))
-        x = x + si
-        xs = None
-        for j in range(hift.num_kernels):
-            xs = hift.resblocks[i * hift.num_kernels + j](x) if xs is None else xs + hift.resblocks[i * hift.num_kernels + j](x)
-        x = xs / hift.num_kernels
+    with decoder_tf32() if tf32 else contextlib.nullcontext():
+        for i in range(hift.num_upsamples):
+            x = Fn.leaky_relu(x, hift.lrelu_slope)
+            x = hift.ups[i](x)
+            if i == hift.num_upsamples - 1:
+                x = hift.reflection_pad(x)
+            si = hift.source_resblocks[i](hift.source_downs[i](s_stft))
+            x = x + si
+            xs = None
+            for j in range(hift.num_kernels):
+                xs = hift.resblocks[i * hift.num_kernels + j](x) if xs is None else xs + hift.resblocks[i * hift.num_kernels + j](x)
+            x = xs / hift.num_kernels
     x = Fn.leaky_relu(x)
     x = hift.conv_post(x)
     nf = hift.istft_params["n_fft"]
@@ -166,8 +169,27 @@ def _hift_decode(hift, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
     return torch.clamp(y, -hift.audio_limit, hift.audio_limit)
 
 
-def hift_forward_noise(hift, mel: torch.Tensor, cache_source: torch.Tensor, rand_ini: torch.Tensor, noise: torch.Tensor):
-    """``HiFTGenerator.forward`` with the source noise given (graph-capturable: no host work)."""
+@contextlib.contextmanager
+def decoder_tf32():
+    """TF32 convolutions and matmuls for the duration (HiFT's upsampling stages only, ``decode_tf32``).
+
+    The f0 predictor and the sine source stay strict FP32: their rounding integrates into the output phase (TF32 there
+    moves the waveform by ~34% relative L2).  So do the decoder's input and output convolutions: with only the
+    upsampling stages in TF32 the waveform moves by at most 2.4e-3 against strict FP32 under the same seeded noise (134
+    speech windows of 32 voices; 6.4e-3 with the whole decoder in TF32; ``tools/spike/hift_precision_probe.py``),
+    within AC-3.4's HiFT bound of 1e-2; the served combination is checked in ``tests/engine/test_hift_tf32.py``."""
+    prev = torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cudnn.allow_tf32 = torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32 = prev
+
+
+def hift_forward_noise(hift, mel: torch.Tensor, cache_source: torch.Tensor, rand_ini: torch.Tensor, noise: torch.Tensor,
+                       decode_tf32: bool = False):
+    """``HiFTGenerator.forward`` with the source noise given (graph-capturable: no host work).  ``decode_tf32``: the
+    decoder after the source in TF32 (``decoder_tf32``; an approved reduced precision, off by default)."""
     f0 = hift.f0_predictor(mel)
     s = hift.f0_upsamp(f0[:, None]).transpose(1, 2)  # [b, n, 1]
     src = hift.m_source
@@ -186,16 +208,16 @@ def hift_forward_noise(hift, mel: torch.Tensor, cache_source: torch.Tensor, rand
     s = src.l_tanh(src.l_linear(sine)).transpose(1, 2)
     if cache_source.shape[2] != 0:
         s[:, :, :cache_source.shape[2]] = cache_source
-    return _hift_decode(hift, mel, s), s
+    return _hift_decode(hift, mel, s, decode_tf32), s
 
 
-def hift_forward(hift, mel: torch.Tensor, cache_source: torch.Tensor, seeds: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+def hift_forward(hift, mel: torch.Tensor, cache_source: torch.Tensor, seeds: list[int], decode_tf32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """``HiFTGenerator.forward`` with the source noise of row ``i`` drawn from its own generator seeded ``seeds[i]``, so a
     batched call equals per-stream calls and either equals the reference under that seeding."""
     src = hift.m_source
     assert type(src).__name__ == "SourceModuleHnNSF2" and not src.l_sin_gen.flag_for_pulse, type(src)
     rand_ini, noise = hift_noise(hift, seeds, hift_samples(hift, mel.shape[2]), mel.device)
-    return hift_forward_noise(hift, mel, cache_source, rand_ini, noise)
+    return hift_forward_noise(hift, mel, cache_source, rand_ini, noise, decode_tf32)
 
 
 class Token2Wav:

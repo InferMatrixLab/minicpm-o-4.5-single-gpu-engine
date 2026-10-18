@@ -311,6 +311,7 @@ class WorkerLoop:
         self.min_batch, self.max_wait, self.clock = min_batch, max_wait, clock
         self.log = log or (lambda kind, n, t0: None)
         self.note = note
+        self.trace = None  # diagnostic stage trace (engine.runtime.stage_trace)
         self.reqs: dict[int, _Req] = {}
 
     # messages from the engine
@@ -376,7 +377,10 @@ class WorkerLoop:
         for b, part in calls:
             try:
                 t0 = time.perf_counter()
+                tok = self.trace.begin("setup") if self.trace is not None else None
                 prompts = self.bt.setup_many([r.feat for r in part])
+                if tok is not None:
+                    self.trace.end(tok, len(part))
                 self.log(f"setup@{b}", len(part), t0)
             except Exception as e:
                 for r in part:
@@ -412,7 +416,10 @@ class WorkerLoop:
             items.append((r.stream, tokens, last))
         try:
             t0 = time.perf_counter()
+            tok = self.trace.begin("decode") if self.trace is not None else None
             wavs = self.bt.decode(items)
+            if tok is not None:
+                self.trace.end(tok, len(items), sum(len(w) for w in wavs) // 960)  # audio frames (24 kHz, 25 frames/s)
             self.log("decode", len(items), t0)
         except Exception as e:
             for r in sel:
@@ -462,7 +469,7 @@ def _worker_main(inq, outq, cfg: dict) -> None:
     t2w = Token2Wav(f"{model_dir}/assets/token2wav", float16=cfg.get("float16_flow", False), spk_threads=cfg.get("spk_threads", 8))
     bt = BatchedToken2Wav(t2w, use_graphs=cfg.get("t2w_graphs", False), compile_estimator=cfg.get("t2w_compile", False),
                           euler_graphs=cfg.get("t2w_euler_graphs", False), fast_dit=cfg.get("t2w_fast_dit", False),
-                          fast_slots=cfg.get("t2w_fast_slots", 49152))
+                          fast_slots=cfg.get("t2w_fast_slots", 49152), hift_decode_tf32=cfg.get("t2w_hift_decode_tf32", False))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             p0 = bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav"))
@@ -603,6 +610,10 @@ def _worker_main(inq, outq, cfg: dict) -> None:
     threading.Thread(target=parent_watch, args=(os.getppid(),), daemon=True).start()
     outq.put(("ready",))
     torch.cuda.set_device(0)
+    if cfg.get("stage_trace_dir"):
+        from engine.runtime.stage_trace import StageTrace
+
+        loop.trace = StageTrace(cfg["stage_trace_dir"], "t2w")
     last_stats = 0.0
 
     def feature_rss() -> dict:
@@ -619,6 +630,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         now_s = time.monotonic()
         if now_s - last_stats >= 1.0:  # counters for the engine's /metrics (leak checks after a drain)
             last_stats = now_s
+            if loop.trace is not None:
+                loop.trace.flush()
             fast = bt.fast
             outq.put(("stats", None, {"t2w_requests": len(reqs), "t2w_streams": sum(r.stream is not None for r in reqs.values()),
                                       "t2w_cache_slots_used": (fast.pool.in_use() - fast.scratch) if fast is not None else None,

@@ -128,7 +128,7 @@ class TrackSBackend:
                  t2w_setup_calls_when_busy: int = 1, t2w_max_decode_rows: int | None = None, t2w_first_slack_ms: float = 250.0,
                  t2w_first_lane_slack_ms: float | None = None, prefill_token_budget: int | None = 2048, prefill_max_age_ms: float = 250.0,
                  prefill_slack_floor_ms: float | None = 300.0, talker_start_budget: int | None = 1024, feature_gpu_tokens: bool = True,
-                 feature_allocator: str = "jemalloc"):
+                 feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -215,11 +215,13 @@ class TrackSBackend:
                                           "t2w_setup_calls_when_busy": t2w_setup_calls_when_busy, "t2w_max_decode_rows": t2w_max_decode_rows,
                                           "t2w_first_slack_ms": t2w_first_slack_ms, "t2w_first_lane_slack_ms": t2w_first_lane_slack_ms,
                                           "feature_gpu_tokens": feature_gpu_tokens,
-                                          "feature_allocator": feature_allocator}, self._on_t2w)
+                                          "feature_allocator": feature_allocator, "stage_trace_dir": stage_trace_dir,
+                                          "t2w_hift_decode_tf32": t2w_hift_decode_tf32}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
-            self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile, euler_graphs=t2w_euler_graphs)
+            self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile, euler_graphs=t2w_euler_graphs,
+                                              hift_decode_tf32=t2w_hift_decode_tf32)
             if t2w_graphs:  # a prepared default voice supplies the cache dtypes
                 self.t2w_batch.capture_graphs(self.t2w_batch.setup(self.t2w.features(model_dir / "assets" / "HT_ref_audio.wav")))
         self.frontend = MultimodalFrontend(model_dir, device=device)
@@ -231,6 +233,7 @@ class TrackSBackend:
         self.admitted = 0
         self.thinker_lazy = thinker_lazy
         self.profile = profile
+        self.stage_trace_dir, self.trace = stage_trace_dir, None  # diagnostic stage trace (engine.runtime.stage_trace), made on the engine thread
         self.timelines: dict[str, list[tuple[str, float]]] = {}  # request id -> (event, perf_counter), when profiling
         self.tick_profile: dict[str, list] = {}  # stage -> [calls, seconds], when profiling
         self.pool = ThreadPoolExecutor(prepare_workers, thread_name_prefix="t2w-prepare")
@@ -363,11 +366,17 @@ class TrackSBackend:
     # --- engine thread ---------------------------------------------------------------------------
     def _run(self) -> None:
         torch.cuda.set_device(torch.device(self.device).index or 0)  # torch >= 2.13 rejects a bare "cuda"
+        if self.stage_trace_dir:
+            from engine.runtime.stage_trace import StageTrace
+
+            self.trace = StageTrace(self.stage_trace_dir, "engine")
         while True:
             try:
                 while True:
                     if not self.live:
                         self.tdec.release_pads()  # idle: the decoders' scratch rows give their pages back
+                        if self.trace is not None:
+                            self.trace.flush(block=True)
                     lv = self.inbox.get(block=not self.live, timeout=None if not self.live else 0)
                     try:
                         self._admit(lv)
@@ -535,6 +544,12 @@ class TrackSBackend:
         self._release(lv)
 
     def _timed(self, name: str, fn, *a) -> None:
+        if self.trace is not None and a[0]:  # stage trace: no synchronization; rows and (Talker) frames produced
+            frames = sum(lv.frames for lv in a[0])
+            tok = self.trace.begin(name)
+            fn(*a)
+            self.trace.end(tok, len(a[0]), sum(lv.frames for lv in a[0]) - frames)
+            return
         if not self.profile:
             fn(*a)
             return

@@ -87,6 +87,7 @@ def make(policy: PrefillPolicy, pages=1024, page_size=64):
     be.tkv = PagedKV(spec, pages, page_size, dtype=torch.float32, device="cpu")
     be.akv = PagedKV(spec, 64 * 19, 128, dtype=torch.float32, device="cpu")  # every utterance's lifetime commitment fits
     be.talker_commit, be.talker_pad_pages, be.talker_k, be.talker_k_max = {}, 0, K, K
+    be.trace = None
     be.tdec = FakeTDec(be, clock)
     be.prefill_policy = policy
     be.sched = {"prefill_token_budget": policy.token_budget, "prefill_tokens_tick_max": 0, "prefill_chunked_ticks": 0,
