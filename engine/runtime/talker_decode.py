@@ -65,7 +65,7 @@ class _Bucket:
         # replay), a fixed [K, b] output, and one graph per K
         self.steps_attn: list[tuple] = []
         self.out_k = None
-        self.kgraphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.kgraphs: dict[tuple[int, tuple], torch.cuda.CUDAGraph] = {}  # (K, frames with a page crossing) -> graph
 
     def step_attn(self, dec: "TalkerDecoder", j: int) -> tuple:
         """(wrapper, indptr, indices, last) of frame ``j`` of a block (made on first use)."""
@@ -101,9 +101,10 @@ class TalkerDecoder:
         self._pad_next = PAD_SEQ_BASE
 
     # one frame for the rows of a bucket, all inputs read from the bucket's static buffers
-    def _frame(self, bk: _Bucket, attn: tuple | None = None, out: torch.Tensor | None = None) -> None:
-        """``attn``: (wrapper, indptr, indices, last) of a whole-K frame (default: the bucket's own, carried forward by
-        the last-page increment); ``out``: where the sampled codes go (default ``bk.out``)."""
+    def _frame(self, bk: _Bucket, attn: tuple | None = None, out: torch.Tensor | None = None, advance_last: bool | None = None) -> None:
+        """``attn``: (wrapper, indptr, indices, last) of a whole-K frame (default: the bucket's own); ``out``: where the
+        sampled codes go (default ``bk.out``); ``advance_last``: carry the layout to the next frame by the last-page
+        increment (default: for the bucket's own buffers)."""
         import flashinfer as fi
 
         wrapper, indptr, indices, last = attn or (bk.wrapper, bk.indptr, bk.indices, bk.last)
@@ -131,8 +132,8 @@ class TalkerDecoder:
         (bk.out if out is None else out).copy_(tok)
         bk.codes.copy_(tok)
         bk.positions.add_(1)
-        if attn is None:
-            bk.last.add_(1)  # the next frame's last-page fill; the host re-plans whenever a row starts a new page
+        if advance_last if advance_last is not None else attn is None:
+            last.add_(1)  # the next frame's last-page fill; the host re-plans whenever a row starts a new page
 
     def _plan(self, bk: _Bucket, seqs: list[int]) -> None:
         lay = self.kv.layout(seqs, [1] * len(seqs), device=self.device)
@@ -183,32 +184,52 @@ class TalkerDecoder:
         for p in pads:
             self.kv.release(p)
 
-    def _capture_k(self, bk: _Bucket, k: int) -> None:
-        """Warm up and capture the bucket's whole-K graph on scratch rows: K frames, frame ``j`` through its own wrapper,
-        codes into ``out_k[j]``."""
+    @staticmethod
+    def _plan_steps(k: int, crossings: tuple) -> list[int]:
+        """Frame j of a block attends through the wrapper of the last planned frame at or before it: frame 0 and every
+        frame where some row starts a new page are planned (as the per-frame path re-plans), the others carry the layout
+        forward by the in-graph last-page increment."""
+        w, out = 0, []
+        for j in range(k):
+            if j in crossings:
+                w = j
+            out.append(w)
+        return out
+
+    def _capture_k(self, bk: _Bucket, k: int, crossings: tuple = ()) -> None:
+        """Warm up and capture the bucket's whole-K graph for one page-crossing pattern on scratch rows: K frames, frame
+        ``j`` through the wrapper of its last planned frame, codes into ``out_k[j]``."""
         pads = [self._pad_next + i for i in range(bk.b)]
         for p in pads:
             self.kv.reserve(p, k)
+        steps = self._plan_steps(k, crossings)
         attn = [bk.step_attn(self, j) for j in range(k)]
         if bk.out_k is None or bk.out_k.shape[0] < k:
             bk.out_k = torch.full((max(k, 4), bk.b), PAD, dtype=torch.int64, device=self.device)
-        for j in range(k):
-            self._plan_lengths(bk, pads, [j + 1] * bk.b, attn[j])
+
+        def plan_all():
+            for j in sorted(set(steps)):
+                self._plan_lengths(bk, pads, [j + 1] * bk.b, attn[j])
+
+        def frames():
+            for j in range(k):
+                self._frame(bk, attn[steps[j]], bk.out_k[j], advance_last=j + 1 < k and steps[j + 1] == steps[j])
+
+        plan_all()
         bk.live.zero_()
         bk.steps.zero_()
         bk.history.fill_(PAD)
         bk.codes.zero_()
         bk.positions.zero_()
-        for j in range(k):  # warm-up
-            self._frame(bk, attn[j], bk.out_k[j])
+        frames()  # warm-up
         torch.cuda.synchronize()
         bk.positions.zero_()
+        plan_all()  # the warm-up advanced the carried last-page fills
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g, capture_error_mode="thread_local"):
-            for j in range(k):
-                self._frame(bk, attn[j], bk.out_k[j])
+            frames()
         torch.cuda.synchronize()
-        bk.kgraphs[k] = g
+        bk.kgraphs[(k, crossings)] = g
         for p in pads:
             self.kv.release(p)
 
@@ -219,10 +240,14 @@ class TalkerDecoder:
             for bk in self.buckets.values():
                 if bk.graph is None:
                     self._capture(bk)
-                if self.whole_k:
+                if self.whole_k:  # every page-crossing pattern of a block (at startup, not while serving)
+                    from itertools import combinations
+
                     for k in ks:
-                        if k not in bk.kgraphs:
-                            self._capture_k(bk, k)
+                        for m in range(k):
+                            for crossings in combinations(range(1, k), m):
+                                if (k, crossings) not in bk.kgraphs:
+                                    self._capture_k(bk, k, crossings)
 
     def bucket_for(self, n: int) -> int:
         return min(b for b in self.buckets if b >= n)
@@ -263,12 +288,13 @@ class TalkerDecoder:
         for r in rows:
             self.kv.reserve(r, k)  # pages for all K frames up front
         ps = self.kv.page_size
-        if self.use_graphs and self.whole_k:  # every frame's layout planned up front, then one replay of the whole block
-            if k not in bk.kgraphs:
-                self._capture_k(bk, k)
-            for j in range(k):
+        if self.use_graphs and self.whole_k:  # the planned frames' layouts up front, then one replay of the whole block
+            crossings = tuple(j for j in range(1, k) if any((L + j) % ps == 0 for L in start))
+            if (k, crossings) not in bk.kgraphs:
+                self._capture_k(bk, k, crossings)
+            for j in sorted(set(self._plan_steps(k, crossings))):
                 self._plan_lengths(bk, rows, [L + j + 1 for L in start], bk.step_attn(self, j))
-            bk.kgraphs[k].replay()
+            bk.kgraphs[(k, crossings)].replay()
             for r, L in zip(rows, start):
                 self.kv.lengths[r] = L + k
             for p in pads:
