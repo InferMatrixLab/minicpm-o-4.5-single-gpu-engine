@@ -109,6 +109,20 @@ def _ppid(pid: int) -> int | None:
         return None
 
 
+def mps_clients(pipe: str, server_pid: int) -> dict:
+    """The clients of an MPS server, asked of its own control daemon (``get_client_list``): {"ok", "clients"} or
+    {"ok": False, "error"}.  NVML may show only the server; this is the list that identifies who shares it."""
+    try:
+        q = subprocess.run(["nvidia-cuda-mps-control"], input=f"get_client_list {server_pid}\n", capture_output=True, text=True, timeout=10,
+                           env={**os.environ, "CUDA_MPS_PIPE_DIRECTORY": pipe})
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    lines = [x.strip() for x in q.stdout.splitlines() if x.strip()]
+    if q.returncode != 0 or not all(x.isdigit() for x in lines):
+        return {"ok": False, "error": f"rc {q.returncode}: {(q.stdout + q.stderr).strip()[:200]}"}
+    return {"ok": True, "clients": [int(x) for x in lines]}
+
+
 def inventory(uuid: str, server_pid: int, mps_pipe: str | None) -> dict:
     """The GPU's compute processes now and whether any is foreign. Owned: the server's process tree, and the MPS server
     whose control daemon serves this run's own pipe directory (``scripts/serve_engine.sh``: /tmp/cgz-engine-mps-<port>);
@@ -128,18 +142,74 @@ def inventory(uuid: str, server_pid: int, mps_pipe: str | None) -> dict:
         else:  # an MPS client or a direct context: must be the engine server's own tree
             owners[a["pid"]] = {"kind": "client", "in_server_tree": a["pid"] in mine, "owned": a["pid"] in mine}
     own_mps = [p for p, o in owners.items() if o["kind"] == "mps_server" and o["owned"]]
+    clients = {str(p): mps_clients(mps_pipe, p) for p in own_mps}  # every process sharing our MPS server
     foreign = [a for a in apps if not owners[a["pid"]]["owned"]]
+    foreign += [{"pid": c, "name": "mps-client"} for q in clients.values() if q["ok"] for c in q["clients"]
+                if c not in mine and c not in {f["pid"] for f in foreign}]
     return {"t": time.perf_counter(), "gpu_apps": apps, "server_tree": tree, "own_mps_servers": own_mps, "ownership": {str(k): v for k, v in owners.items()},
-            "mps_pipe": mps_pipe, "foreign": foreign}
+            "mps_pipe": mps_pipe, "mps_clients": clients, "foreign": foreign}
 
 
 INVENTORY_SAMPLES = 3
 
 
-def validate_inventory(win: dict) -> list[str]:
+def sample_foreign(smp: dict, legacy: bool = False) -> tuple[set, list[str]]:
+    """The foreign GPU processes of one inventory sample, rebuilt from its observations (never from its own verdict),
+    and the reasons the observations do not support a verdict.  Every observed GPU process needs an ownership record
+    consistent with the recorded server tree (clients) or with the run's MPS pipe (servers); every owned MPS server needs
+    a successful client list, each client in the server tree.  ``legacy``: a round-12/13 sample without ownership or
+    client-list records, read from its process list, server tree and owned-server list (no hidden-client check)."""
+    problems = []
+    for key in ("gpu_apps", "server_tree"):
+        if not isinstance(smp.get(key), list):
+            problems.append(f"no {key} observation")
+    if problems:
+        return set(), problems
+    tree = {p["pid"] for p in smp["server_tree"]}
+    if not tree:
+        problems.append("empty server tree")
+    foreign = set()
+    if legacy and "ownership" not in smp:
+        own = set(smp.get("own_mps_servers") or [])
+        for a in smp["gpu_apps"]:
+            if a["pid"] not in tree and a["pid"] not in own:
+                foreign.add(a["pid"])
+        return foreign, problems
+    own_rec, pipe = smp.get("ownership"), smp.get("mps_pipe")
+    if not isinstance(own_rec, dict):
+        return set(), problems + ["no ownership observations"]
+    for a in smp["gpu_apps"]:
+        r = own_rec.get(str(a["pid"]))
+        if r is None:
+            problems.append(f"no ownership record for GPU process {a['pid']}")
+            continue
+        if a["name"].endswith("nvidia-cuda-mps-server"):
+            owned = pipe is not None and r.get("kind") == "mps_server" and r.get("pipe") == pipe and r.get("daemon") is not None
+            if bool(r.get("owned")) != owned:
+                problems.append(f"MPS server {a['pid']}: ownership record inconsistent with its daemon pipe")
+            if not owned:
+                foreign.add(a["pid"])
+                continue
+            q = (smp.get("mps_clients") or {}).get(str(a["pid"]))
+            if legacy and q is None:
+                continue
+            if not q or not q.get("ok"):
+                problems.append(f"MPS server {a['pid']}: client list unavailable ({(q or {}).get('error', 'not queried')})")
+                continue
+            foreign |= {c for c in q["clients"] if c not in tree}
+        else:
+            owned = a["pid"] in tree
+            if r.get("kind") != "client" or bool(r.get("owned")) != owned:
+                problems.append(f"GPU process {a['pid']}: ownership record inconsistent with the server tree")
+            if not owned:
+                foreign.add(a["pid"])
+    return foreign, problems
+
+
+def validate_inventory(win: dict, legacy: bool = False) -> list[str]:
     """Problems with a window's GPU inventory (empty: uncontended and complete).  The raw samples are the evidence: at
-    least three, each a successful query with a finite time inside the window and no foreign process, and the window's
-    summary must agree with them."""
+    least three, each a successful query with a finite time inside the window, whose observations show no foreign
+    process (``sample_foreign``); each sample's recorded verdict and the window's summary must agree with them."""
     import math
 
     problems = []
@@ -151,10 +221,15 @@ def validate_inventory(win: dict) -> list[str]:
         t = smp.get("t")
         if smp.get("error"):
             problems.append(f"sample {i}: query failed: {smp['error']}")
+            continue
         if not isinstance(t, (int, float)) or not math.isfinite(t) or not win["t0"] <= t <= win["t1"]:
             problems.append(f"sample {i}: time {t} outside the window [{win['t0']}, {win['t1']}]")
-        if smp.get("foreign"):
-            problems.append(f"sample {i}: foreign GPU processes {[f.get('pid') for f in smp['foreign']]}")
+        derived, why = sample_foreign(smp, legacy)
+        problems += [f"sample {i}: {w}" for w in why]
+        if derived:
+            problems.append(f"sample {i}: foreign GPU processes {sorted(derived)}")
+        if derived != {f.get("pid") for f in smp.get("foreign", [])}:
+            problems.append(f"sample {i}: recorded foreign list {[f.get('pid') for f in smp.get('foreign', [])]} disagrees with its observations")
     summ = win.get("inventory", {})
     union = sorted({f.get("pid") for smp in raw for f in smp.get("foreign", [])})
     if summ.get("samples") != len(raw) or sorted({f.get("pid") for f in summ.get("foreign", [])}) != union:

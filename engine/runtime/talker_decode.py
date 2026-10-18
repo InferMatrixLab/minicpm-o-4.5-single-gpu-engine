@@ -60,11 +60,34 @@ class _Bucket:
         self.out = torch.full((b,), PAD, dtype=torch.int64, device=dev)
         self.graph = None
         self.spec = s
+        self.max_pages = max_pages
+        # whole-K capture: per frame of a block its own attention wrapper and layout buffers (planned before the
+        # replay), a fixed [K, b] output, and one graph per K
+        self.steps_attn: list[tuple] = []
+        self.out_k = None
+        self.kgraphs: dict[int, torch.cuda.CUDAGraph] = {}
+
+    def step_attn(self, dec: "TalkerDecoder", j: int) -> tuple:
+        """(wrapper, indptr, indices, last) of frame ``j`` of a block (made on first use)."""
+        import flashinfer
+
+        while len(self.steps_attn) <= j:
+            dev = dec.device
+            indptr = torch.zeros(self.b + 1, dtype=torch.int32, device=dev)
+            indices = torch.zeros(self.max_pages, dtype=torch.int32, device=dev)
+            last = torch.zeros(self.b, dtype=torch.int32, device=dev)
+            w = flashinfer.BatchDecodeWithPagedKVCacheWrapper(dec.workspace, "NHD", use_cuda_graph=True, paged_kv_indptr_buffer=indptr,
+                                                              paged_kv_indices_buffer=indices, paged_kv_last_page_len_buffer=last)
+            self.steps_attn.append((w, indptr, indices, last))
+        return self.steps_attn[j]
 
 
 class TalkerDecoder:
     def __init__(self, talker, kv: PagedKV, spec: DecoderSpec, cfg: TalkerSampling = TalkerSampling(), buckets=(1, 2, 4, 8, 16, 32, 64),
-                 max_len: int = 4096, use_graphs: bool = True):
+                 max_len: int = 4096, use_graphs: bool = True, whole_k: bool = False):
+        """``whole_k``: one CUDA graph per (bucket, K) holds all K frames of a block (each frame attends through its own
+        wrapper, planned before the replay) and writes a fixed [K, rows] output; otherwise one frame graph replayed K
+        times."""
         self.talker, self.kv, self.spec, self.cfg = talker, kv, spec, cfg
         self.layers = fuse_weights(talker.w, spec)
         self.final_norm = talker.w[f"{spec.prefix}norm.weight"]
@@ -72,15 +95,18 @@ class TalkerDecoder:
         self.emb = talker.w["emb_code.0.weight"]
         self.eos = talker.cfg.eos
         self.device = kv.k.device
-        self.max_len, self.use_graphs = max_len, use_graphs
+        self.max_len, self.use_graphs, self.whole_k = max_len, use_graphs, whole_k
         self.workspace = torch.empty(128 << 20, dtype=torch.uint8, device=self.device)
         self.buckets = {b: _Bucket(self, b) for b in buckets}
         self._pad_next = PAD_SEQ_BASE
 
     # one frame for the rows of a bucket, all inputs read from the bucket's static buffers
-    def _frame(self, bk: _Bucket) -> None:
+    def _frame(self, bk: _Bucket, attn: tuple | None = None, out: torch.Tensor | None = None) -> None:
+        """``attn``: (wrapper, indptr, indices, last) of a whole-K frame (default: the bucket's own, carried forward by
+        the last-page increment); ``out``: where the sampled codes go (default ``bk.out``)."""
         import flashinfer as fi
 
+        wrapper, indptr, indices, last = attn or (bk.wrapper, bk.indptr, bk.indices, bk.last)
         s = self.spec
         nq, nk = s.num_heads * s.head_dim, s.num_kv_heads * s.head_dim
         x = F.embedding(bk.codes.clamp(min=0), self.emb)
@@ -91,8 +117,8 @@ class TalkerDecoder:
             k = qkv[:, nq:nq + nk].reshape(-1, s.num_kv_heads, s.head_dim).contiguous()
             v = qkv[:, nq + nk:].reshape(-1, s.num_kv_heads, s.head_dim).contiguous()
             fi.apply_rope_pos_ids_inplace(q, k, bk.positions, rope_theta=s.rope_theta)
-            fi.append_paged_kv_cache(k, v, bk.batch_idx, bk.positions, (self.kv.k[i], self.kv.v[i]), bk.indices, bk.indptr, bk.last)
-            a = bk.wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
+            fi.append_paged_kv_cache(k, v, bk.batch_idx, bk.positions, (self.kv.k[i], self.kv.v[i]), indices, indptr, last)
+            a = wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
             x = torch.addmm(x, a.reshape(-1, nq), L["o"].t())  # residual add in the GEMM epilogue
             h = fi.rmsnorm(x, L["ln2"], s.rms_eps)
             x = torch.addmm(x, fi.silu_and_mul(F.linear(h, L["gate_up"])), L["down"].t())
@@ -102,10 +128,11 @@ class TalkerDecoder:
         bk.history.copy_(torch.where(bk.live[:, None], torch.cat([bk.history[:, 1:], tok[:, None]], dim=1), bk.history))
         bk.steps.add_(bk.live.to(torch.int64))
         bk.live.logical_and_(tok != self.eos)
-        bk.out.copy_(tok)
+        (bk.out if out is None else out).copy_(tok)
         bk.codes.copy_(tok)
         bk.positions.add_(1)
-        bk.last.add_(1)  # the next frame's last-page fill; the host re-plans whenever a row starts a new page
+        if attn is None:
+            bk.last.add_(1)  # the next frame's last-page fill; the host re-plans whenever a row starts a new page
 
     def _plan(self, bk: _Bucket, seqs: list[int]) -> None:
         lay = self.kv.layout(seqs, [1] * len(seqs), device=self.device)
@@ -117,20 +144,22 @@ class TalkerDecoder:
         fi_plan(bk.wrapper, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
-    def _plan_lengths(self, bk: _Bucket, rows: list[int], lengths: list[int]) -> None:
-        """Plan for KV lengths ``lengths`` (after this frame's append) over the rows' already reserved pages."""
+    def _plan_lengths(self, bk: _Bucket, rows: list[int], lengths: list[int], attn: tuple | None = None) -> None:
+        """Plan for KV lengths ``lengths`` (after this frame's append) over the rows' already reserved pages
+        (``attn``: a whole-K frame's wrapper and buffers instead of the bucket's)."""
+        wrapper, b_indptr, b_indices, b_last = attn or (bk.wrapper, bk.indptr, bk.indices, bk.last)
         ps = self.kv.page_size
         npages = [-(-L // ps) for L in lengths]
         indices = [p for r, n in zip(rows, npages) for p in self.kv.pages[r][:n]]
         indptr = torch.tensor([0] + list(torch.tensor(npages).cumsum(0).tolist()), dtype=torch.int32)
         last = torch.tensor([L - (n - 1) * ps for L, n in zip(lengths, npages)], dtype=torch.int32)
         idx = torch.tensor(indices, dtype=torch.int32)
-        bk.indptr.copy_(indptr, non_blocking=True)  # queued, no wait for the GPU (engine.runtime.hostcopy)
-        bk.indices[:idx.numel()].copy_(idx, non_blocking=True)
-        bk.last.copy_(last, non_blocking=True)
+        b_indptr.copy_(indptr, non_blocking=True)  # queued, no wait for the GPU (engine.runtime.hostcopy)
+        b_indices[:idx.numel()].copy_(idx, non_blocking=True)
+        b_last.copy_(last, non_blocking=True)
         s = self.spec
         # the plan reads the index pointers and last-page lengths on the host, the indices on the device
-        fi_plan(bk.wrapper, indptr, idx.to(self.device, non_blocking=True), last, s.num_heads, s.num_kv_heads, s.head_dim, ps,
+        fi_plan(wrapper, indptr, idx.to(self.device, non_blocking=True), last, s.num_heads, s.num_kv_heads, s.head_dim, ps,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _capture(self, bk: _Bucket) -> None:
@@ -154,13 +183,46 @@ class TalkerDecoder:
         for p in pads:
             self.kv.release(p)
 
+    def _capture_k(self, bk: _Bucket, k: int) -> None:
+        """Warm up and capture the bucket's whole-K graph on scratch rows: K frames, frame ``j`` through its own wrapper,
+        codes into ``out_k[j]``."""
+        pads = [self._pad_next + i for i in range(bk.b)]
+        for p in pads:
+            self.kv.reserve(p, k)
+        attn = [bk.step_attn(self, j) for j in range(k)]
+        if bk.out_k is None or bk.out_k.shape[0] < k:
+            bk.out_k = torch.full((max(k, 4), bk.b), PAD, dtype=torch.int64, device=self.device)
+        for j in range(k):
+            self._plan_lengths(bk, pads, [j + 1] * bk.b, attn[j])
+        bk.live.zero_()
+        bk.steps.zero_()
+        bk.history.fill_(PAD)
+        bk.codes.zero_()
+        bk.positions.zero_()
+        for j in range(k):  # warm-up
+            self._frame(bk, attn[j], bk.out_k[j])
+        torch.cuda.synchronize()
+        bk.positions.zero_()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, capture_error_mode="thread_local"):
+            for j in range(k):
+                self._frame(bk, attn[j], bk.out_k[j])
+        torch.cuda.synchronize()
+        bk.kgraphs[k] = g
+        for p in pads:
+            self.kv.release(p)
+
     @torch.inference_mode()
-    def capture_all(self) -> None:
+    def capture_all(self, ks=()) -> None:
         """Capture every bucket now (at startup, before other threads use the GPU)."""
         if self.use_graphs:
             for bk in self.buckets.values():
                 if bk.graph is None:
                     self._capture(bk)
+                if self.whole_k:
+                    for k in ks:
+                        if k not in bk.kgraphs:
+                            self._capture_k(bk, k)
 
     def bucket_for(self, n: int) -> int:
         return min(b for b in self.buckets if b >= n)
@@ -201,6 +263,19 @@ class TalkerDecoder:
         for r in rows:
             self.kv.reserve(r, k)  # pages for all K frames up front
         ps = self.kv.page_size
+        if self.use_graphs and self.whole_k:  # every frame's layout planned up front, then one replay of the whole block
+            if k not in bk.kgraphs:
+                self._capture_k(bk, k)
+            for j in range(k):
+                self._plan_lengths(bk, rows, [L + j + 1 for L in start], bk.step_attn(self, j))
+            bk.kgraphs[k].replay()
+            for r, L in zip(rows, start):
+                self.kv.lengths[r] = L + k
+            for p in pads:
+                self.kv.release(p)
+            for name in ("codes", "steps", "history", "live"):
+                state[name].copy_(getattr(bk, name)[:n])
+            return bk.out_k[:k, :n].cpu()
         outs = []
         for j in range(k):
             # re-plan only when the layout's page structure changes (a row starts a new page) or on the first frame;

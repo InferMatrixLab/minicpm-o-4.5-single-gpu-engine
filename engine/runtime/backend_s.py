@@ -133,7 +133,7 @@ class TrackSBackend:
                  prefill_slack_floor_ms: float | None = 300.0, talker_start_budget: int | None = 1024, feature_gpu_tokens: bool = True,
                  feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
                  t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False,
-                 t2w_hift_rows: list | None = None):
+                 t2w_hift_rows: list | None = None, talker_whole_k: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -196,7 +196,7 @@ class TrackSBackend:
         # Track S sampling: the canonical warpers, no minimum length, no global maximum (HF streaming path)
         self.cfg = TalkerSampling(min_new_tokens=0, max_new_tokens=1 << 30)
         self.tdec = ThinkerDecoder(self.thinker, self.tkv, self.tspec, use_graphs=use_graphs, layers=tlayers)
-        self.adec = TalkerDecoder(self.talker, self.akv, self.aspec, self.cfg, use_graphs=use_graphs)
+        self.adec = TalkerDecoder(self.talker, self.akv, self.aspec, self.cfg, use_graphs=use_graphs, whole_k=talker_whole_k)
         self.tprefill = None
         if prefill_graphs and use_graphs:
             from engine.runtime.prefill_graph import PrefillGraphs
@@ -212,7 +212,7 @@ class TrackSBackend:
             self.aprefill = ChunkPrefillGraphs(self.arun)
             self.aprefill.capture_all()
         self.tdec.capture_all()
-        self.adec.capture_all()
+        self.adec.capture_all(ks=sorted({talker_k, max(talker_k, talker_k_max)}))  # whole-K graphs too (talker_whole_k)
         self.t2wp = None
         self.audio_live: dict[int, LiveS] = {}  # process mode: requests whose audio the worker still owes
         if t2w_process:  # Token2Wav (features, setups, windows) in its own process: no GIL shared with the engine loop

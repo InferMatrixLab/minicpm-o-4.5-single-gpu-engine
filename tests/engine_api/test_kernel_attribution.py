@@ -233,13 +233,30 @@ def test_inventory_owns_only_this_runs_mps_server(monkeypatch):
     monkeypatch.setattr(ep, "gpu_apps", lambda uuid: apps)
     monkeypatch.setattr(ep, "_ppid", lambda pid: {11: 10, 21: 20}.get(pid))
     monkeypatch.setattr(ep, "_environ", lambda pid: {"CUDA_MPS_PIPE_DIRECTORY": {10: "/tmp/cgz-engine-mps-18950/pipe", 20: "/tmp/other/pipe"}[pid]})
+    monkeypatch.setattr(ep, "mps_clients", lambda pipe, pid: {"ok": True, "clients": [5, 77]})  # 77 shares our server unseen by NVML
     inv = ep.inventory("uuid", 4, "/tmp/cgz-engine-mps-18950/pipe")
     assert inv["own_mps_servers"] == [11]
-    assert [f["pid"] for f in inv["foreign"]] == [21]  # same UID is not ownership
+    assert sorted(f["pid"] for f in inv["foreign"]) == [21, 77]  # same UID is not ownership; a hidden client is foreign
+    assert not ep.validate_inventory({"t0": 0, "t1": 1e12, "inventory_samples": [inv] * 3, "inventory": {"samples": 3, "foreign": inv["foreign"]}}) == []
 
 
-def _sample(t, foreign=(), error=None):
-    return {"t": t, "foreign": [{"pid": p} for p in foreign], **({"error": error} if error else {})}
+PIPE = "/tmp/cgz-engine-mps-18999/pipe"
+
+
+def _sample(t, foreign=(), error=None, extra_apps=(), clients=(5, 6), client_query_ok=True, record_foreign=None):
+    """A sample as ``inventory`` records it: the GPU's processes (our MPS server 11 and engine clients 5, 6 in the
+    server tree, plus ``extra_apps``), their ownership evidence, the server's client list and the derived verdict."""
+    if error:
+        return {"t": t, "error": error, "foreign": []}
+    apps = [{"pid": 11, "name": "nvidia-cuda-mps-server", "mib": 60, "uid": 1000}, {"pid": 5, "name": "python", "mib": 9000, "uid": 1000},
+            {"pid": 6, "name": "python", "mib": 1300, "uid": 1000}] + [{"pid": p, "name": "python", "mib": 100, "uid": 1000} for p in extra_apps]
+    own = {"11": {"kind": "mps_server", "daemon": 10, "pipe": PIPE, "owned": True}, "5": {"kind": "client", "in_server_tree": True, "owned": True},
+           "6": {"kind": "client", "in_server_tree": True, "owned": True}}
+    own.update({str(p): {"kind": "client", "in_server_tree": False, "owned": False} for p in extra_apps})
+    q = {"ok": True, "clients": list(clients)} if client_query_ok else {"ok": False, "error": "rc 1: no such server"}
+    rec = record_foreign if record_foreign is not None else list(foreign) + list(extra_apps)
+    return {"t": t, "gpu_apps": apps, "server_tree": [{"pid": 4, "cmd": "launcher"}, {"pid": 5, "cmd": "engine"}, {"pid": 6, "cmd": "worker"}],
+            "own_mps_servers": [11], "ownership": own, "mps_pipe": PIPE, "mps_clients": {"11": q}, "foreign": [{"pid": p} for p in rec]}
 
 
 def _run_json(tmp_path, samples, summary=None):
@@ -248,7 +265,8 @@ def _run_json(tmp_path, samples, summary=None):
     (tmp_path / "run.json").write_text(json.dumps({"identity": {}, "config": {}, "expected_processes": {"engine": 1}, "windows": {"w": win}}))
 
 
-@pytest.mark.parametrize("case", ["no_raw_samples", "outside_window", "foreign_raw", "summary_disagrees", "query_failed"])
+@pytest.mark.parametrize("case", ["no_raw_samples", "outside_window", "foreign_raw", "summary_disagrees", "query_failed", "placeholder",
+                                  "contradictory_ownership", "hidden_mps_client", "client_list_failed"])
 def test_analysis_rejects_an_unproven_inventory(tmp_path, case):
     import tools.engine_profile as ep
 
@@ -262,6 +280,14 @@ def test_analysis_rejects_an_unproven_inventory(tmp_path, case):
         _run_json(tmp_path, ok[:2] + [_sample(10.9, foreign=(21,))], {"samples": 3, "foreign": []})
     elif case == "summary_disagrees":
         _run_json(tmp_path, ok, {"samples": 2, "foreign": []})
+    elif case == "placeholder":  # timestamps without observations
+        _run_json(tmp_path, [{"t": 10.2, "foreign": []}, {"t": 10.5, "foreign": []}, {"t": 10.9, "foreign": []}])
+    elif case == "contradictory_ownership":  # process 999 observed outside the tree, recorded verdict "no foreign"
+        _run_json(tmp_path, [_sample(10.2, extra_apps=(999,), record_foreign=[]), _sample(10.5), _sample(10.9)])
+    elif case == "hidden_mps_client":  # NVML shows only our server and clients; the server's client list adds 999
+        _run_json(tmp_path, [_sample(10.2, clients=(5, 6, 999), record_foreign=[]), _sample(10.5), _sample(10.9)])
+    elif case == "client_list_failed":
+        _run_json(tmp_path, [_sample(10.2, client_query_ok=False), _sample(10.5), _sample(10.9)])
     else:
         _run_json(tmp_path, ok[:2] + [_sample(10.9, error="RuntimeError: nvidia-smi failed (9)")])
     with pytest.raises(ka.TraceError, match="GPU inventory invalid"):
@@ -303,7 +329,8 @@ def test_untraced_control_with_foreign_work_fails(tmp_path, monkeypatch):
             return 0
 
     async def load(url, c, warm_s, measure_s, on_window, client_rows, sample_inventory=None):
-        return {"t0": 10.0, "t1": 20.0, "client": {"frames_per_s": 100.0}, "inventory_samples": [_sample(11.0), _sample(15.0, foreign=(999,)), _sample(19.0)]}
+        return {"t0": 10.0, "t1": 20.0, "client": {"frames_per_s": 100.0},
+                "inventory_samples": [_sample(11.0), _sample(15.0, extra_apps=(999,), record_foreign=[]), _sample(19.0)]}
 
     monkeypatch.setattr(ep.subprocess, "Popen", Proc)
     monkeypatch.setattr(ep, "identity", lambda out, cfg_text, gpu: {"gpu_uuid": "u", "gpu_apps_before": []})
@@ -418,3 +445,38 @@ def test_failing_stage_still_ends_its_span():
     with pytest.raises(RuntimeError):
         be._timed("talker", boom, [SimpleNamespace(frames=0)])
     assert rec == [("talker", 1, 0)]
+
+
+def test_flush_racing_begin_never_passes_the_new_span(tmp_path, monkeypatch):
+    """A flush from another thread at 12 while a span is beginning at 10.5 (the round-13 review's interleaving): it
+    either sees the registered span or runs before the start was taken, so the watermark never passes 10.5 while
+    that span is unwritten."""
+    import threading
+    import time as real_time
+
+    import engine.runtime.stage_trace as st
+
+    tr, now, ev = _trace(tmp_path, monkeypatch)
+    sleep = real_time.sleep
+    state = {"trigger": False}
+    flusher = threading.Thread(target=tr.flush)
+
+    def clock():
+        if state["trigger"]:  # inside begin: let the other thread try to flush right now
+            state["trigger"] = False
+            flusher.start()
+            sleep(0.05)
+            return 10.5
+        return now[0]
+
+    monkeypatch.setattr(st.time, "perf_counter", clock)
+    now[0] = 12.0
+    state["trigger"] = True
+    tok = tr.begin("talker")
+    flusher.join()
+    tr.flush()
+    hb, rows = _hb(tmp_path)
+    assert not rows and hb <= tok[1] == 10.5
+    files = ka.load_stage_files(tmp_path)
+    with pytest.raises(ka.TraceError):
+        ka.check_stage_coverage(files, ka.registered(tmp_path, {"engine": 1}, files), 10.0, 11.0)

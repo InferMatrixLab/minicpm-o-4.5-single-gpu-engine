@@ -71,10 +71,10 @@ class StageTrace:
             KernelWindows.ensure(directory, proc or name)
 
     def begin(self, stage: str):
-        e = self._event()
-        e.record()
-        tok = (stage, time.perf_counter(), e)
-        with self.lock:
+        with self.lock:  # one ordering point with flush: a flush either sees this span or precedes its start
+            e = self._event()
+            e.record()
+            tok = (stage, time.perf_counter(), e)
             self.active[id(tok)] = tok[1]
         return tok
 
