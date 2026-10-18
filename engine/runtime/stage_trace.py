@@ -9,8 +9,9 @@ submission gaps, synchronizations and waits behind other work, so it is not the 
 kernel windows below).  Spans nest (``span``): an outer stage and the inner stages it is made of.
 
 Row: {"s": stage, "n": rows, "f": frames (Talker) or audio frames (Token2Wav) or 0, "c0", "c1": host start/end,
-"g0", "g1": stream start/end} (seconds).  A ``{"s": "_hb", "c0": t}`` row ends every flush: every stage that ended on
-the host before ``t`` is in the file (``analyze`` requires one after each window).  One trace per thread.
+"g0", "g1": stream start/end} (seconds).  A ``{"s": "_hb", "c0": t}`` row ends every flush: ``t`` is a completeness
+watermark, every stage that began before ``t`` is in the file (it never passes a stage still running or waiting for its
+end event; ``analyze`` requires one at or after each window's end).  One trace per thread.
 
 **Kernel windows.** Each process that makes a trace runs one ``KernelWindows`` thread.  It polls
 ``<dir>/kernel_windows.json`` (a list of ``{"tag", "t0", "t1"}`` on the host clock, written by
@@ -42,18 +43,23 @@ _TRACES: list = []  # this process's traces (the flusher thread writes them ever
 
 
 class StageTrace:
-    def __init__(self, directory: str | Path, name: str, proc: str | None = None, kernel_windows: bool = True):
+    def __init__(self, directory: str | Path, name: str, proc: str | None = None, kernel_windows: bool = True, event=None):
+        """``event``: a factory of CUDA-event-like objects (record, query, synchronize, elapsed_time); tests only."""
         directory = Path(directory)
         self.path = directory / f"{name}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.fh = open(self.path, "a")
         self.lock = threading.Lock()
-        torch.cuda.synchronize()
-        self.base = torch.cuda.Event(enable_timing=True)
+        self._event = event or (lambda: torch.cuda.Event(enable_timing=True))
+        if event is None:
+            torch.cuda.synchronize()
+        self.base = self._event()
         self.base.record()
         self.base.synchronize()
         self.t_base = time.perf_counter()
         self.pending: deque = deque()
+        self.active: dict[int, float] = {}  # begun spans (id of their token) -> host start
+        self.watermark = self.t_base
         self.last_flush = self.t_base
         # ident: the profiler's runtime records name a thread by abs(int32(pthread_self)) (tools/kernel_attribution.py)
         self.fh.write(json.dumps({"s": "_start", "c0": round(self.t_base, 6), "pid": os.getpid(), "thread": threading.current_thread().name,
@@ -65,16 +71,21 @@ class StageTrace:
             KernelWindows.ensure(directory, proc or name)
 
     def begin(self, stage: str):
-        e = torch.cuda.Event(enable_timing=True)
+        e = self._event()
         e.record()
-        return stage, time.perf_counter(), e
+        tok = (stage, time.perf_counter(), e)
+        with self.lock:
+            self.active[id(tok)] = tok[1]
+        return tok
 
     def end(self, tok, n: int = 0, frames: int = 0) -> None:
         stage, c0, e0 = tok
-        e1 = torch.cuda.Event(enable_timing=True)
+        e1 = self._event()
         e1.record()
         now = time.perf_counter()
-        self.pending.append((stage, n, frames, c0, now, e0, e1))
+        with self.lock:
+            self.active.pop(id(tok), None)
+            self.pending.append((stage, n, frames, c0, now, e0, e1))
         if now - self.last_flush >= 1.0:
             self.flush(block=False)
 
@@ -87,19 +98,29 @@ class StageTrace:
             self.end(tok, n)
 
     def flush(self, block: bool = False) -> None:
+        """Write every finished stage whose end event completed (``block``: all of them) and then a heartbeat whose
+        time is a completeness watermark: every stage that began before it is in the file.  It never passes the
+        earliest start of a stage still running or still waiting for its end event, and never moves back."""
         with self.lock:
-            out = []
-            while self.pending and (block or self.pending[0][6].query()):
-                stage, n, frames, c0, c1, e0, e1 = self.pending.popleft()
+            out, keep = [], deque()
+            now = time.perf_counter()
+            for row in self.pending:
+                stage, n, frames, c0, c1, e0, e1 = row
+                if not block and not e1.query():
+                    keep.append(row)
+                    continue
                 if block:
                     e1.synchronize()
                 g0 = self.t_base + self.base.elapsed_time(e0) / 1000
                 g1 = self.t_base + self.base.elapsed_time(e1) / 1000
                 out.append(json.dumps({"s": stage, "n": n, "f": frames, "c0": round(c0, 6), "c1": round(c1, 6), "g0": round(g0, 6), "g1": round(g1, 6)}))
-            # every stage whose host end precedes the first one still pending is now written
-            hb = self.pending[0][4] if self.pending else time.perf_counter()
-            out.append(json.dumps({"s": "_hb", "c0": round(hb, 6)}))
-            self.fh.write("\n".join(out) + "\n")
+            self.pending = keep
+            if out:
+                self.fh.write("\n".join(out) + "\n")
+                self.fh.flush()  # rows are persisted before the watermark that covers them
+            outstanding = [r[3] for r in keep] + list(self.active.values())
+            self.watermark = max(self.watermark, min(outstanding + [now]))
+            self.fh.write(json.dumps({"s": "_hb", "c0": round(self.watermark, 6)}) + "\n")
             self.fh.flush()
             self.last_flush = time.perf_counter()
 
@@ -123,8 +144,10 @@ def register(directory: Path, proc: str, trace_name: str) -> None:
     with _REGISTRY_LOCK:
         (directory / "procs").mkdir(parents=True, exist_ok=True)
         p = directory / "procs" / f"{proc}-{os.getpid()}.json"
+        cuda = torch.cuda.is_available()
         rec = json.loads(p.read_text()) if p.exists() else {
-            "proc": proc, "pid": os.getpid(), "device": torch.cuda.current_device(), "device_name": torch.cuda.get_device_name(torch.cuda.current_device()),
+            "proc": proc, "pid": os.getpid(), "device": torch.cuda.current_device() if cuda else None,
+            "device_name": torch.cuda.get_device_name(torch.cuda.current_device()) if cuda else None,
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "t": time.perf_counter(), "traces": []}
         if trace_name not in rec["traces"]:
             rec["traces"].append(trace_name)

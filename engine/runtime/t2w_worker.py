@@ -412,6 +412,8 @@ class WorkerLoop:
                         self._mark(r.seq, "w_setup_done", t1)
                 self.log(f"setup@{b}", len(part), t0)
             except Exception as e:
+                if tok is not None:
+                    self.trace.end(tok, len(part))
                 for r in part:
                     self.emit(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
                     self.close(r.seq)
@@ -455,6 +457,8 @@ class WorkerLoop:
                 self.trace.end(tok, len(items), 0 if self.async_results else sum(len(w) for w in wavs) // 960)
             self.log("decode", len(items), t0)
         except Exception as e:
+            if tok is not None and self.trace is not None:
+                self.trace.end(tok, len(items))
             self._fail(sel, e)
             return True
         if self.async_results:
@@ -533,7 +537,7 @@ def _worker_main(inq, outq, cfg: dict) -> None:
     bt = BatchedToken2Wav(t2w, use_graphs=cfg.get("t2w_graphs", False), compile_estimator=cfg.get("t2w_compile", False),
                           euler_graphs=cfg.get("t2w_euler_graphs", False), fast_dit=cfg.get("t2w_fast_dit", False),
                           fast_slots=cfg.get("t2w_fast_slots", 49152), hift_decode_tf32=cfg.get("t2w_hift_decode_tf32", False),
-                          batch_setup_encoder=cfg.get("t2w_batch_setup_encoder", False))
+                          batch_setup_encoder=cfg.get("t2w_batch_setup_encoder", False), hift_rows=cfg.get("t2w_hift_rows"))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             p0 = bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav"))

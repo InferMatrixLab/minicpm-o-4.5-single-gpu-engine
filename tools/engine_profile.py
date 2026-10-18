@@ -58,9 +58,14 @@ def _sh(cmd: list[str]) -> str:
 
 
 def gpu_apps(uuid: str) -> list[dict]:
-    """Compute processes NVML reports on the GPU (under MPS: the MPS server stands for its clients)."""
+    """Compute processes NVML reports on the GPU (under MPS its clients appear beside the MPS server).  A failed query
+    raises: an empty answer must mean an empty GPU."""
+    q = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"],
+                       capture_output=True, text=True)
+    if q.returncode != 0:
+        raise RuntimeError(f"nvidia-smi failed ({q.returncode}): {q.stderr.strip()[:200]}")
     out = []
-    for line in _sh(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader,nounits"]).splitlines():
+    for line in q.stdout.strip().splitlines():
         parts = [x.strip() for x in line.split(",")]
         if len(parts) == 4 and parts[0] == uuid:
             uid = None
@@ -108,13 +113,53 @@ def inventory(uuid: str, server_pid: int, mps_pipe: str | None) -> dict:
     """The GPU's compute processes now and whether any is foreign. Owned: the server's process tree, and the MPS server
     whose control daemon serves this run's own pipe directory (``scripts/serve_engine.sh``: /tmp/cgz-engine-mps-<port>);
     an MPS server of another daemon is foreign even under the same user."""
-    tree = process_tree(server_pid)
-    mine = {p["pid"] for p in tree}
-    apps = gpu_apps(uuid)
-    own_mps = [a["pid"] for a in apps if a["name"].endswith("nvidia-cuda-mps-server") and mps_pipe is not None
-               and _environ(_ppid(a["pid"]) or -1).get("CUDA_MPS_PIPE_DIRECTORY") == mps_pipe]
-    foreign = [a for a in apps if a["pid"] not in mine and a["pid"] not in own_mps]
-    return {"t": time.perf_counter(), "gpu_apps": apps, "server_tree": tree, "own_mps_servers": own_mps, "foreign": foreign}
+    try:
+        tree = process_tree(server_pid)
+        mine = {p["pid"] for p in tree}
+        apps = gpu_apps(uuid)
+    except Exception as e:  # a failed query is a failed sample, never an empty GPU
+        return {"t": time.perf_counter(), "error": f"{type(e).__name__}: {e}", "foreign": []}
+    owners = {}  # per GPU process: the evidence that makes it ours (or not)
+    for a in apps:
+        if a["name"].endswith("nvidia-cuda-mps-server"):
+            daemon = _ppid(a["pid"])
+            pipe = _environ(daemon or -1).get("CUDA_MPS_PIPE_DIRECTORY")
+            owners[a["pid"]] = {"kind": "mps_server", "daemon": daemon, "pipe": pipe, "owned": mps_pipe is not None and pipe == mps_pipe}
+        else:  # an MPS client or a direct context: must be the engine server's own tree
+            owners[a["pid"]] = {"kind": "client", "in_server_tree": a["pid"] in mine, "owned": a["pid"] in mine}
+    own_mps = [p for p, o in owners.items() if o["kind"] == "mps_server" and o["owned"]]
+    foreign = [a for a in apps if not owners[a["pid"]]["owned"]]
+    return {"t": time.perf_counter(), "gpu_apps": apps, "server_tree": tree, "own_mps_servers": own_mps, "ownership": {str(k): v for k, v in owners.items()},
+            "mps_pipe": mps_pipe, "foreign": foreign}
+
+
+INVENTORY_SAMPLES = 3
+
+
+def validate_inventory(win: dict) -> list[str]:
+    """Problems with a window's GPU inventory (empty: uncontended and complete).  The raw samples are the evidence: at
+    least three, each a successful query with a finite time inside the window and no foreign process, and the window's
+    summary must agree with them."""
+    import math
+
+    problems = []
+    raw = win.get("inventory_samples")
+    if not raw or len(raw) < INVENTORY_SAMPLES:
+        problems.append(f"{len(raw or [])} raw inventory samples, {INVENTORY_SAMPLES} required")
+        raw = raw or []
+    for i, smp in enumerate(raw):
+        t = smp.get("t")
+        if smp.get("error"):
+            problems.append(f"sample {i}: query failed: {smp['error']}")
+        if not isinstance(t, (int, float)) or not math.isfinite(t) or not win["t0"] <= t <= win["t1"]:
+            problems.append(f"sample {i}: time {t} outside the window [{win['t0']}, {win['t1']}]")
+        if smp.get("foreign"):
+            problems.append(f"sample {i}: foreign GPU processes {[f.get('pid') for f in smp['foreign']]}")
+    summ = win.get("inventory", {})
+    union = sorted({f.get("pid") for smp in raw for f in smp.get("foreign", [])})
+    if summ.get("samples") != len(raw) or sorted({f.get("pid") for f in summ.get("foreign", [])}) != union:
+        problems.append(f"inventory summary {summ.get('samples')} samples / foreign {summ.get('foreign')} disagrees with the raw samples")
+    return problems
 
 
 SOURCE_DIRS = ("engine", "tools", "scripts", "configs", "bench")
@@ -166,11 +211,9 @@ def analyze(d: Path) -> dict:
     procs = registered(tr, run["expected_processes"], files)
     gpm = load_gpm(tr)
     for c, win in run["windows"].items():  # an uncontended comparison needs the owned inventory sampled inside every window
-        inv = win.get("inventory", {})
-        if not inv.get("samples"):
-            raise TraceError(f"window {c}: no GPU inventory sampled inside the measured window")
-        if inv.get("foreign"):
-            raise TraceError(f"window {c}: foreign GPU processes {inv['foreign']}")
+        problems = validate_inventory(win)
+        if problems:
+            raise TraceError(f"window {c}: GPU inventory invalid: {problems}")
     tags = {w["kernel"]["tag"]: (w["kernel"]["t0"], w["kernel"]["t1"]) for w in run["windows"].values() if "kernel" in w}
     kern = analyze_kernels(tr, tags, run["expected_processes"]) if tags else {}  # a spans-only run: no kernel windows
     reqs = _rows(tr / "requests.jsonl")
@@ -387,13 +430,17 @@ def cmd_run(a) -> int:
         from tools.kernel_attribution import GPM_REQUIRED, gpm_mean, load_gpm
 
         gpm = load_gpm(tr)
-        ctl = {c: {"client": w["client"], "inventory": w["inventory"], "gpm_window": gpm_mean(gpm, w["t0"], w["t1"], GPM_REQUIRED)}
-               for c, w in run["windows"].items()}
-        (out / "control.json").write_text(json.dumps(ctl, indent=1))
+        ctl = {c: {"client": w["client"], "inventory": w["inventory"], "inventory_problems": validate_inventory(w),
+                   "gpm_window": gpm_mean(gpm, w["t0"], w["t1"], GPM_REQUIRED)} for c, w in run["windows"].items()}
+        valid = not any(v["inventory_problems"] for v in ctl.values())
+        (out / "control.json").write_text(json.dumps({"valid": valid, "windows": ctl}, indent=1))
         for c, v in ctl.items():
             g = v["gpm_window"]
             print(f"C={c} fps {v['client']['frames_per_s']:.0f} GPM sm {g['sm_util']:.1f}% occ {g['sm_occupancy']:.1f}% dram {g['dram_bw_util']:.1f}% "
-                  f"tensor {g['tensor_util']:.1f}%  inventory samples {v['inventory']['samples']} foreign {len(v['inventory']['foreign'])}")
+                  f"tensor {g['tensor_util']:.1f}%  inventory problems {v['inventory_problems'] or 'none'}")
+        if not valid:
+            print("INVALID control: the GPU inventory does not establish an uncontended run", flush=True)
+            return 1
         return 0
     for f in sorted((tr / "kernels").glob("*.json")):  # the captures, compressed once the server is gone
         if not f.name.endswith(".markers.json"):

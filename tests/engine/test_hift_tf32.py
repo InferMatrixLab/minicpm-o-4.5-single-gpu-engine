@@ -22,10 +22,13 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or os.environ.get(
 N_UTT, FIRST_CHUNK, BOUND = 32, 8, 1e-2
 
 
-def _serve(served, feats, plans, tf32: bool):
+EXTENDED_ROWS = (1, 2, 4, 8, 12, 16, 20, 24, 32)  # t2w_hift_rows of track_s_fast_r13
+
+
+def _serve(served, feats, plans, tf32: bool, hift_rows=None):
     from engine.runtime.token2wav_batch import BatchedToken2Wav
 
-    bt = BatchedToken2Wav(served, use_graphs=True, fast_dit=True, fast_slots=65536, hift_decode_tf32=tf32)
+    bt = BatchedToken2Wav(served, use_graphs=True, fast_dit=True, fast_slots=65536, hift_decode_tf32=tf32, hift_rows=hift_rows)
     p0 = bt.setup(feats[0])
     bt.capture_graphs(p0)
     bt.release_prompt(p0)
@@ -39,6 +42,8 @@ def _serve(served, feats, plans, tf32: bool):
         for j, w in zip(live, wavs):
             got[j].append(np.asarray(w, dtype=np.float64))
     assert bt.hift_graphs.counts["graph"] > 0
+    if hift_rows:  # the workload reaches the buckets above 16 rows
+        assert any(k > 16 for k, _ in bt.hift_graphs.replays), bt.hift_graphs.replays
     for st in sts:
         bt.release_stream(st)
     del bt
@@ -46,8 +51,9 @@ def _serve(served, feats, plans, tf32: bool):
     return got
 
 
+@pytest.mark.parametrize("hift_rows", [None, EXTENDED_ROWS], ids=["rows_to_16", "rows_to_32"])
 @torch.inference_mode()
-def test_tf32_hift_decoder_within_the_hift_bound():
+def test_tf32_hift_decoder_within_the_hift_bound(hift_rows):
     from bench.workload import canonical_requests, load_seed_tts_rows, make_id_sets
     from engine.models.token2wav import Token2Wav
     from engine.token2wav_chunker import StreamChunker
@@ -65,7 +71,7 @@ def test_tf32_hift_decoder_within_the_hift_bound():
         plans.append(ws + [(lambda w: (w.tokens, w.last))(ch.finish())])
     ref = _serve(served, feats, plans, tf32=False)
     again = _serve(served, feats, plans, tf32=False)
-    new = _serve(served, feats, plans, tf32=True)
+    new = _serve(served, feats, plans, tf32=True, hift_rows=hift_rows)
     chunk_errs, utt_errs, control = [], [], []
     rel = lambda a, b: float(np.linalg.norm(a - b) / np.linalg.norm(b))  # noqa: E731
     for j in range(N_UTT):
@@ -77,7 +83,7 @@ def test_tf32_hift_decoder_within_the_hift_bound():
                 control.append(rel(z, y))
         utt_errs.append((rel(np.concatenate(new[j]), np.concatenate(ref[j])), j))
     worst_c, worst_u = max(chunk_errs), max(utt_errs)
-    print(f"HiFT TF32 decoder vs strict FP32: {len(chunk_errs)} chunks, max rel L2 {worst_c[0]:.2e} (utt {worst_c[1]}, chunk {worst_c[2]}), "
+    print(f"HiFT TF32 decoder (graph rows {hift_rows or 'default'}) vs strict FP32: {len(chunk_errs)} chunks, max rel L2 {worst_c[0]:.2e} (utt {worst_c[1]}, chunk {worst_c[2]}), "
           f"median {float(np.median([e[0] for e in chunk_errs])):.2e}; utterances max {worst_u[0]:.2e} (utt {worst_u[1]}); "
           f"strict-FP32 run to run max {max(control):.2e}")
     assert max(control) <= 1e-4  # two strict-FP32 runs agree far inside the bound: the difference measured is the precision

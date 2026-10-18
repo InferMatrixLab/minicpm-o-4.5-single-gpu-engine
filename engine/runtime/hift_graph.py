@@ -12,7 +12,7 @@ import torch
 
 from engine.models.token2wav import SOURCE_CACHE, hift_forward_noise, hift_noise, hift_samples, strict_fp32
 
-ROWS = (1, 2, 4, 8, 16)
+ROWS = (1, 2, 4, 8, 16)  # default; ``hift_rows`` / ``t2w_hift_rows`` may extend it (larger calls run in slices of the largest)
 FRAMES = {16: 0, 50: 0, 58: SOURCE_CACHE}  # mel frames -> cached source samples (16: a ramped first window)
 # final windows: 8 cached mel frames + 2 x (3 .. 25) tokens, a few per call
 FINAL_FRAMES = {8 + 2 * n: SOURCE_CACHE for n in range(3, 25)}
@@ -30,6 +30,7 @@ class HiFTGraphs:
         self.mels = hift.conv_pre.in_channels
         self.device = next(hift.parameters()).device
         self.counts = {"graph": 0, "eager": 0}
+        self.replays: dict[tuple[int, int], int] = {}  # (rows bucket, mel frames) -> replays
 
     @torch.inference_mode()
     def _capture(self, rows: int, F: int):
@@ -81,6 +82,7 @@ class HiFTGraphs:
             st["noise"][:b - a].copy_(noise[a:b])
             g.replay()
             self.counts["graph"] += 1
+            self.replays[(k, F)] = self.replays.get((k, F), 0) + 1
             speech.append(out[0][:b - a].clone())
             source.append(out[1][:b - a].clone())
         return torch.cat(speech), torch.cat(source)

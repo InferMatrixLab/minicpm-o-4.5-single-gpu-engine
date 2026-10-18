@@ -138,14 +138,16 @@ class PendingAudio:
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
                  fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False,
-                 batch_setup_encoder: bool = False):
+                 batch_setup_encoder: bool = False, hift_rows: tuple | None = None):
         """``fast_dit``: the estimator solve of ``engine.runtime.dit_fast`` (slot-pool caches, packed ragged rows, CUDA
         graphs with ``use_graphs``) in place of the reference-module solve; FP16 flow only.  Streams must then be made with
         ``new_stream`` and released with ``release_stream``.  ``hift_decode_tf32``: HiFT's upsampling stages
         in TF32 (``token2wav.decoder_tf32``; the f0 predictor, the source and the input/output convolutions stay strict FP32).
-        ``batch_setup_encoder``: the prompt setups of one ``setup_many`` call share one padded flow-encoder batch."""
+        ``batch_setup_encoder``: the prompt setups of one ``setup_many`` call share one padded flow-encoder batch.
+        ``hift_rows``: the HiFT graph row buckets (default ``hift_graph.ROWS``; larger calls run in slices of the largest)."""
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         self.batch_setup_encoder = batch_setup_encoder
+        self.hift_rows = tuple(hift_rows) if hift_rows else None
         self.fast = None
         if fast_dit:
             from engine.runtime.dit_fast import FastDiT
@@ -163,7 +165,7 @@ class BatchedToken2Wav:
             from engine.runtime.dit_graph import EncoderGraphs
             from engine.runtime.hift_graph import HiFTGraphs
 
-            self.hift_graphs = HiFTGraphs(self.hift, decode_tf32=hift_decode_tf32)
+            self.hift_graphs = HiFTGraphs(self.hift, decode_tf32=hift_decode_tf32, **({"rows": self.hift_rows} if self.hift_rows else {}))
             self.enc_graphs = EncoderGraphs(self.flow.encoder, _encoder_core, self.dtype)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.graphs = self.euler = None

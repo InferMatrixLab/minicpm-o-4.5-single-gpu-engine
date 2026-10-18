@@ -238,17 +238,183 @@ def test_inventory_owns_only_this_runs_mps_server(monkeypatch):
     assert [f["pid"] for f in inv["foreign"]] == [21]  # same UID is not ownership
 
 
-def test_analysis_requires_an_in_window_uncontended_inventory(tmp_path):
+def _sample(t, foreign=(), error=None):
+    return {"t": t, "foreign": [{"pid": p} for p in foreign], **({"error": error} if error else {})}
+
+
+def _run_json(tmp_path, samples, summary=None):
+    win = {"t0": 10.0, "t1": 11.0, "client": {}, "kernel": {"tag": "w", "t0": 10.0, "t1": 11.0}, "inventory_samples": samples,
+           "inventory": summary if summary is not None else {"samples": len(samples), "foreign": [f for s in samples for f in s["foreign"]]}}
+    (tmp_path / "run.json").write_text(json.dumps({"identity": {}, "config": {}, "expected_processes": {"engine": 1}, "windows": {"w": win}}))
+
+
+@pytest.mark.parametrize("case", ["no_raw_samples", "outside_window", "foreign_raw", "summary_disagrees", "query_failed"])
+def test_analysis_rejects_an_unproven_inventory(tmp_path, case):
     import tools.engine_profile as ep
 
     _write_dir(tmp_path / "trace", KERNELS, SPANS)
-    win = {"t0": 10.0, "t1": 11.0, "client": {}, "kernel": {"tag": "w", "t0": 10.0, "t1": 11.0}}
-    for inv, msg in (({"samples": 0, "foreign": []}, "no GPU inventory"), ({"samples": 3, "foreign": [{"pid": 21}]}, "foreign GPU processes")):
-        (tmp_path / "run.json").write_text(json.dumps({"identity": {}, "config": {}, "expected_processes": {"engine": 1},
-                                                       "windows": {"w": {**win, "inventory": inv}}}))
-        with pytest.raises(ka.TraceError, match=msg):
-            ep.analyze(tmp_path)
-    (tmp_path / "run.json").write_text(json.dumps({"identity": {}, "config": {}, "expected_processes": {"engine": 1},
-                                                   "windows": {"w": {**win, "inventory": {"samples": 3, "foreign": []}}}}))
+    ok = [_sample(10.2), _sample(10.5), _sample(10.9)]
+    if case == "no_raw_samples":
+        _run_json(tmp_path, [], {"samples": 3, "foreign": []})  # a summary without its evidence
+    elif case == "outside_window":
+        _run_json(tmp_path, [_sample(30.0)] * 3)
+    elif case == "foreign_raw":
+        _run_json(tmp_path, ok[:2] + [_sample(10.9, foreign=(21,))], {"samples": 3, "foreign": []})
+    elif case == "summary_disagrees":
+        _run_json(tmp_path, ok, {"samples": 2, "foreign": []})
+    else:
+        _run_json(tmp_path, ok[:2] + [_sample(10.9, error="RuntimeError: nvidia-smi failed (9)")])
+    with pytest.raises(ka.TraceError, match="GPU inventory invalid"):
+        ep.analyze(tmp_path)
+
+
+def test_analysis_accepts_a_proven_inventory(tmp_path):
+    import tools.engine_profile as ep
+
+    _write_dir(tmp_path / "trace", KERNELS, SPANS)
+    _run_json(tmp_path, [_sample(10.2), _sample(10.5), _sample(10.9)])
     out = ep.analyze(tmp_path)["windows"]["w"]
     assert out["kernels"]["device"]["active_frac"] == pytest.approx(0.01, abs=1e-4) and out["gpm_window"]["coverage"]["sm_util"] == 1.0
+
+
+def test_untraced_control_with_foreign_work_fails(tmp_path, monkeypatch):
+    """The real ``cmd_run --no-trace`` completion path (server, sampler and load stubbed): a foreign process in the
+    window makes the control invalid and the command return 1."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import tools.engine_profile as ep
+
+    class Proc:
+        def __init__(self, cmd, **kw):
+            if any("gpm_sampler.py" in str(x) for x in cmd):  # the sampler writes full counter coverage
+                out = Path(cmd[cmd.index("--out") + 1])
+                out.write_text("".join(json.dumps({"t0": t, "t1": t + 1, "sm_util": 50.0, "sm_occupancy": 10.0, "dram_bw_util": 10.0,
+                                                   "tensor_util": 1.0}) + "\n" for t in range(0, 40)))
+            self.pid = 4242
+
+        def poll(self):
+            return 0
+
+        def send_signal(self, sig):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    async def load(url, c, warm_s, measure_s, on_window, client_rows, sample_inventory=None):
+        return {"t0": 10.0, "t1": 20.0, "client": {"frames_per_s": 100.0}, "inventory_samples": [_sample(11.0), _sample(15.0, foreign=(999,)), _sample(19.0)]}
+
+    monkeypatch.setattr(ep.subprocess, "Popen", Proc)
+    monkeypatch.setattr(ep, "identity", lambda out, cfg_text, gpu: {"gpu_uuid": "u", "gpu_apps_before": []})
+    monkeypatch.setattr(ep, "_wait_health", lambda url, proc: None)
+    monkeypatch.setattr(ep, "_load", load)
+    monkeypatch.setattr(ep.time, "sleep", lambda s: None)
+    monkeypatch.setattr(asyncio, "run", lambda coro: asyncio.new_event_loop().run_until_complete(coro))
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps({"backend": "x"}))
+    a = SimpleNamespace(out=str(tmp_path / "ctl"), config=str(cfg), set=None, no_trace=True, spans_only=False, window_thread=False, gpu=2, port=18999,
+                        c=[8], warm_s=1, measure_s=1, kernel_s=1.5)
+    assert ep.cmd_run(a) == 1
+    ctl = json.loads((tmp_path / "ctl" / "control.json").read_text())
+    assert ctl["valid"] is False and any("foreign" in p for p in ctl["windows"]["8"]["inventory_problems"])
+
+
+class FakeEvent:
+    """A CUDA-event stand-in: completes when the test says so; elapsed time from the host clock at record."""
+
+    def __init__(self, clock):
+        self.clock, self.t, self.done = clock, None, False
+
+    def record(self):
+        self.t = self.clock()
+
+    def query(self):
+        return self.done
+
+    def synchronize(self):
+        self.done = True
+
+    def elapsed_time(self, other):
+        return 1000 * (other.t - self.t)
+
+
+def _trace(tmp_path, monkeypatch):
+    import engine.runtime.stage_trace as st
+
+    now = [10.0]
+    clock = lambda: now[0]  # noqa: E731
+    monkeypatch.setattr(st.time, "perf_counter", clock)
+    monkeypatch.setattr(st, "_FLUSHER", {st.os.getpid(): None})  # no background flusher in the test
+    events = []
+
+    def event():
+        e = FakeEvent(clock)
+        events.append(e)
+        return e
+
+    tr = st.StageTrace(tmp_path, "engine", proc="engine", kernel_windows=False, event=event)
+    events[0].done = True  # the base event
+    return tr, now, events
+
+
+def _hb(tmp_path):
+    rows = [json.loads(x) for x in (tmp_path / "engine.jsonl").read_text().splitlines()]
+    return max(r["c0"] for r in rows if r["s"] == "_hb"), [r for r in rows if not r["s"].startswith("_")]
+
+
+def test_watermark_never_passes_an_active_span(tmp_path, monkeypatch):
+    tr, now, ev = _trace(tmp_path, monkeypatch)
+    now[0] = 10.5
+    tok = tr.begin("talker")  # a long stage: still running at 12
+    now[0] = 12.0
+    tr.flush()
+    hb, rows = _hb(tmp_path)
+    assert hb == 10.5 and not rows  # [10, 11] is not certified while the stage runs
+    files = ka.load_stage_files(tmp_path)
+    procs = ka.registered(tmp_path, {"engine": 1}, files)
+    with pytest.raises(ka.TraceError, match="heartbeat"):
+        ka.check_stage_coverage(files, procs, 10.0, 11.0)
+    now[0] = 12.5
+    tr.end(tok, 1)
+    ev[-1].done = True
+    tr.flush()
+    hb, rows = _hb(tmp_path)
+    assert hb == 12.5 and [r["s"] for r in rows] == ["talker"]
+    files = ka.load_stage_files(tmp_path)
+    ka.check_stage_coverage(files, ka.registered(tmp_path, {"engine": 1}, files), 10.0, 11.0)
+
+
+def test_watermark_waits_for_a_pending_end_event_and_nested_spans(tmp_path, monkeypatch):
+    tr, now, ev = _trace(tmp_path, monkeypatch)
+    now[0] = 10.0
+    outer = tr.begin("talker")
+    now[0] = 10.2
+    inner = tr.begin("talker.decode")
+    now[0] = 10.4
+    tr.end(inner, 1)
+    ev[-1].done = True  # the inner span retires first
+    now[0] = 11.5
+    tr.end(outer, 1)  # ended on the host after the window, its end event still pending (the review's crossing case)
+    now[0] = 12.0
+    tr.flush()
+    hb, rows = _hb(tmp_path)
+    assert hb == 10.0 and [r["s"] for r in rows] == ["talker.decode"]  # not 11.5: the outer row is unwritten
+    ev[-1].done = True
+    tr.flush()
+    hb, rows = _hb(tmp_path)
+    assert hb == 12.0 and sorted(r["s"] for r in rows) == ["talker", "talker.decode"]
+
+
+def test_failing_stage_still_ends_its_span():
+    from types import SimpleNamespace
+
+    rec = []
+    be = _traced_backend(rec)
+
+    def boom(rows):
+        raise RuntimeError("stage failed")
+
+    with pytest.raises(RuntimeError):
+        be._timed("talker", boom, [SimpleNamespace(frames=0)])
+    assert rec == [("talker", 1, 0)]
