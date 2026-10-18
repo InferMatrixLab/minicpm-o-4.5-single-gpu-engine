@@ -82,6 +82,10 @@ audio.
 
   - 8 of the 24 ratios have LCB >= 2.0, all of them TTFA; C=16 p50 is inconclusive (point above 2, LCB below). No throughput or RTF ratio comes near 2. This is development evidence on L20X, not the AC-5 result (H200, K=10).
   - Against the 5db059a frozen cells (`tools/sched_compare.py r8-head r8-frozen`), the memory repairs leave performance unchanged: every point ratio is within 1% except C=32 TTFA p95 (-4.5% latency, LCB 1.009). The C=32 mean run-max stall is 0.140 s against 0.109 s.
+- **Round 9 measurement with the B22 Talker capacity commitments** (evaluation IDs, K=5, 8338bda; `sweeps/engine/r9_b22_gpu{2,3}.json`, `results/engine_sweeps/r9_b22_gpu{2,3}`). Same 8 of 24 ratios at LCB >= 2.0 against the envelope as round 8.
+  - Against r8-head (`tools/sched_compare.py r9-b22 r8-head`; separate sessions, diagnostic), every metric is 0.2-2.9% worse: throughput C=2 -2.8%, C=4 -2.4%, C=16 -2.4%, the others -0.3% to -1.0%. TTFA p95 is +0.6% to +2.8%. C=8 and C=32 TTFA p50 are unchanged.
+  - The commitments never held a start: `talker_kv_wait_ticks` stays 0 through the 30-minute C=32 acceptance load, at about 342 committed pages of 1280. The difference is per-tick bookkeeping or session drift, not admission waits.
+  - Envelope ratios, point / LCB: C=1 throughput 1.338/1.330, TTFA p50 2.214/2.201; C=16 TTFA p50 1.999/1.947; C=32 throughput 1.027/1.019, TTFA p50 1.351/1.312, TTFA p95 2.571/2.520.
 - **Robustness** (`tools/robustness.py`, replay with `tools/robustness_replay.py`): the module docstring lists the scenarios, the predeclared memory rule (±1% of the first sample at or after 60 s, over every later sample and the drained endpoint; CUDA allocated bytes back within 16 MiB of the warmed baseline) and the artifacts (`requests.jsonl` with every request, cancellation and raw observation; `wire.jsonl.gz`). The replay rebuilds every scenario's verdict and the overall verdict from them with the same functions the live run uses.
   - Acceptance policy (B17e, `ACCEPTANCE_POLICY` version 1). An acceptance run persists the policy and is audited from its raw records, live and in the replay, by `policy_problems`:
     - the exact settings: C=32, 30 min, 60 s reference, overload 128, EOS 192;
@@ -91,6 +95,11 @@ audio.
     - one request at a time per closed-loop client, and 32 sustain clients;
     - long prefill: 8 long requests, each with a served prompt above the budget, arriving within 1 s beside 24 companion clients, each served throughout the long interval (gaps ≤ 50 ms).
   - Re-audit of the saved 9ed19a1 acceptance under this policy, written to `results/l20x/robustness/r9_reaudit_9ed19a1.json`; the run's own report is unchanged. Its only problem is that the run did not persist policy version 1, which it predates. Counts, phases, sampling coverage, the reference and the long-prefill geometry all hold.
+  - Round 9 acceptance, 8338bda (B22 commitments, policy v1; `results/l20x/robustness/r9_acceptance_8338bda`): PASS, policy problems none; `replay.json` rebuilds the same verdict and policy (ok).
+    - 33,291 requests, 0 invalid, 32 clients in flight throughout.
+    - Max stall 0.179 s, refill max 9.1 ms, first dispatch 34 ms.
+    - Memory max deviation: engine 0.133%, worker 0.265%, feature total 0.064%, GPU 0.
+    - Long prefill: 8 of 8 long requests (≥ 5422 tokens) and 110 of 110 companion streams valid, per-tick prefill max 2048 = budget, stall max 0.396 s.
   - Round 8 acceptance attempts on GPU3, C=32, 30-minute sustain, the predeclared rules unchanged; each replays to its own verdict under its recorded revision (`results/l20x/robustness/r8_acceptance_<rev>`):
     - 5db059a FAIL: one feature process +1.034%. Cause: torchaudio 2.11 decodes every `torchaudio.load` through TorchCodec, +0.6 KB per call; 3f467e3 decodes with soundfile (identical tensors).
     - 3f467e3 FAIL: one client refill gap of 67 ms > 50 ms. Cause: the checker's own full GC over the held records (80-110 ms); d67f834 suspends automatic full collections during the load.
