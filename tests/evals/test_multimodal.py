@@ -15,7 +15,7 @@ from evals.multimodal import suite as mm  # noqa: E402
 from evals.multimodal.sglang_mm_worker import build_payload  # noqa: E402
 
 BENCH_N = {"mmmu": 40, "mmsu": 40, "daily_omni": 40}
-EVAL = {"version": 2, "sglang": {"commit": "s"}, "eval_env": "e", "vllm_omni": {"commit": "v"}, "expected": {}, "workers": {}, "floors": {"mmmu": 0.64},
+EVAL = {"version": 3, "sglang": {"commit": "s"}, "eval_env": "e", "vllm_omni": {"commit": "v"}, "expected": {}, "workers": {}, "floors": {"mmmu": 0.64},
         "max_tokens": {"mmmu": 2048}}
 EVAL["digest"] = hashlib.sha256(json.dumps(EVAL, sort_keys=True).encode()).hexdigest()
 GPU = {"gpu_index": 1, "gpu_sku": "L20X", "gpu_uuid": "GPU-1", "driver": "570", "memory_mib": "143771"}
@@ -469,3 +469,135 @@ def test_engine_generation_binds_the_candidate_interpreter_and_served_identity(m
     bare["generation"].pop("served_identity")
     _redigest(bare["generation"])
     assert any("no served identity" in p for p in mm.generation_problems(bare))
+
+
+def test_evaluator_worker_lineage_maps_only_the_recorded_predecessor():
+    """v3 (round 10): a record made with the predecessor worker revision maps to the identity with its successor; any other
+    worker hash stays another evaluator."""
+    (w, lin), = list(mm.WORKER_LINEAGE.items())[:1]
+    (old, new), = lin.items()
+
+    def rec(version, h):
+        r = {"version": version, **{k: EVAL[k] for k in mm.MM_COMPONENTS}, "workers": {w: h}}
+        r["digest"] = hashlib.sha256(json.dumps(r, sort_keys=True).encode()).hexdigest()
+        return r
+
+    assert mm.mm_evaluator_digest(rec(2, old)) == mm.mm_evaluator_digest(rec(3, new)) == rec(3, new)["digest"]
+    assert mm.mm_evaluator_digest(rec(2, "f" * 64)) not in (None, rec(3, new)["digest"])
+    assert mm.mm_evaluator_digest(rec(4, new)) is None
+
+
+def _rows(bench, digest, acc=0.9):
+    k = BENCH_N[bench]
+    good = int(round(acc * k))
+    return [{"id": f"{bench}{i}", "is_correct": i < good, "is_success": True, "raw": f"A:{bench}{i}" if i < good else "B",
+             **({"generation_digest": digest} if digest is not None else {})} for i in range(k)]
+
+
+def _real_worker_run(bench, job, monkeypatch, tmp):
+    """The actual worker entry point (``main``) in run mode, its dataset, HTTP and scorer replaced by the fixture's rows."""
+    import types
+
+    from evals.multimodal import daily_omni_worker as dw
+    from evals.multimodal import sglang_mm_worker as sw
+
+    rows = _rows(bench, None)
+    if bench == "daily_omni":
+        async def run(j):
+            return {"bench": bench, "ids": [r["id"] for r in rows], "per_sample": [dict(r) for r in rows], "accuracy": 0.9}
+
+        monkeypatch.setattr(dw, "run", run)
+        mod = dw
+    else:
+        data = types.ModuleType("benchmarks.benchmarker.data")
+        data.RequestResult = object
+        for name in ("benchmarks", "benchmarks.benchmarker"):
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "benchmarks.benchmarker.data", data)
+        samples = [SimpleNamespace(sample_id=r["id"]) for r in rows]
+        monkeypatch.setattr(sw, "load", lambda j: (samples, [""] * len(samples)))
+
+        async def send_all(j, s, t):
+            return [None] * len(s)
+
+        monkeypatch.setattr(sw, "send_all", send_all)
+        monkeypatch.setattr(sw, "score", lambda b, s, r: ([dict(x) for x in rows], {}, 0.9))
+        mod = sw
+    jp, op = tmp / f"{bench}_job.json", tmp / f"{bench}_out.json"
+    jp.write_text(json.dumps(job))
+    monkeypatch.setattr(sys, "argv", ["worker", str(jp), str(op)])
+    assert mod.main() == 0
+    return json.loads(op.read_text())
+
+
+def _collect(env, monkeypatch, worker, frozen_qref=None, name="new"):
+    """Production ``cmd_run`` with the server and the generation declaration replaced by fixtures; ``worker(bench, job)``
+    answers the run-mode jobs."""
+    import bench.cli
+    import bench.fingerprint
+    import bench.servers
+
+    c, _ = candidate("eng")
+    base = make_report(env / f"{name}_decl", scope="final", acc=0.9, label="eng", frozen={"mm_qref": mm._sha(Path(frozen_qref))} if frozen_qref else None)
+    rep = json.loads((base / "report.json").read_text())
+    real = mm._worker
+
+    class Server:
+        url = "http://fixture"
+
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def evidence(self):
+            return rep["server_evidence"]
+
+    monkeypatch.setattr(bench.cli, "make_candidate", lambda *a: c)
+    monkeypatch.setattr(bench.fingerprint, "gpu_identity", lambda *a: GPU)
+    monkeypatch.setattr(bench.servers, "Server", Server)
+    monkeypatch.setattr(mm, "generation_identity", lambda *a: rep["generation"])
+    monkeypatch.setattr(mm, "_worker", lambda b, j: real(b, j) if j["mode"] == "rescore" else worker(b, j))
+    out = env / name
+    args = SimpleNamespace(adapter="vllm-omni", config="eng.yaml", extra=[], label="eng", mps="off", env=[], out=str(out), gpu=1, frozen_ref=[],
+                           bench=None, subset="full", scope="final", concurrency=16, port=18101)
+    return mm.cmd_run(args), out, rep["generation"]["digest"]
+
+
+def test_collection_requires_the_workers_own_binding(env, monkeypatch, tmp_path):
+    """B12d worker boundary (round-9 review probe): the collector accepts a worker result only when the worker returned
+    this job's generation digest on the result and on every row, and writes the returned rows unchanged."""
+    base = make_report(env / "base", scope="final", acc=0.9, started=1.0)
+    qref = freeze(env, [f"{base}={_qual(env, monkeypatch)}"])
+    stale = "0" * 64
+
+    cases = {
+        "stale_result_and_rows": lambda b, j: {"per_sample": _rows(b, stale), "generation_digest": stale, "accuracy": 0.9, "ids": []},
+        "stale_rows": lambda b, j: {"per_sample": _rows(b, stale), "generation_digest": j["generation_digest"], "accuracy": 0.9, "ids": []},
+        "stale_result": lambda b, j: {"per_sample": _rows(b, j["generation_digest"]), "generation_digest": stale, "accuracy": 0.9, "ids": []},
+        "missing": lambda b, j: {"per_sample": _rows(b, None), "accuracy": 0.9, "ids": []},
+        "mixed_rows": lambda b, j: {"per_sample": _rows(b, j["generation_digest"])[:-1] + _rows(b, stale)[-1:],
+                                    "generation_digest": j["generation_digest"], "accuracy": 0.9, "ids": []},
+    }
+    for name, worker in cases.items():
+        rc, out, _ = _collect(env, monkeypatch, worker, qref, name=name)
+        assert rc == 1, name
+        assert not (out / "report.json").exists(), name  # nothing certifiable is written
+        assert json.loads((out / "verification.json").read_text())["problems"], name
+
+    rc, out, want = _collect(env, monkeypatch, lambda b, j: _real_worker_run(b, j, monkeypatch, tmp_path), qref, name="actual")
+    assert rc == 0
+    for b in mm.BENCHES:
+        assert {x["generation_digest"] for x in mm._jsonl(out / f"{b}.per_sample.jsonl")} == {want}
+    assert mm.certify(str(out), qref, digest_of("eng"))["certified"]
+
+
+def test_workers_refuse_a_run_job_without_a_generation_digest(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit):
+        _real_worker_run("daily_omni", {"mode": "run"}, monkeypatch, tmp_path)
+    with pytest.raises(SystemExit):
+        _real_worker_run("mmmu", {"mode": "run", "bench": "mmmu"}, monkeypatch, tmp_path)

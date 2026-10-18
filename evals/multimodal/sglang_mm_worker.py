@@ -12,7 +12,9 @@ never be evaluated under the accepted identity.
 Modes (``job["mode"]``):
 * ``manifest`` - load the samples and return (id, content sha256) for each;
   content covers the prompt, choices/answer and media bytes;
-* ``run``      - send each sample to ``url`` and score; full raw responses are kept;
+* ``run``      - send each sample to ``url`` and score; full raw responses are kept.  The job names the generation
+  declaration it runs under (``generation_digest``, required before anything is sent); the result and every
+  response row carry it back;
 * ``rescore``  - re-score saved raw responses (``job["responses"]``: id -> text or null).
 
 Wire format per engine: ``sglang`` native (top-level ``images``/``audios``) or
@@ -147,6 +149,13 @@ def score(bench: str, samples, results) -> tuple[list[dict], dict, float]:
     return rows, summ, summ["overall_accuracy"]
 
 
+def generation_digest(job: dict) -> str:
+    d = job.get("generation_digest")
+    if not isinstance(d, str) or not d:
+        raise SystemExit("run mode needs the job's generation_digest (the declaration the responses are produced under)")
+    return d
+
+
 async def send_all(job: dict, samples, texts) -> list:
     from benchmarks.benchmarker.data import RequestResult
 
@@ -205,11 +214,12 @@ def main() -> int:
         rows, summ, acc = score(job["bench"], samples, results)
         out = {"bench": job["bench"], "ids": [s.sample_id for s in samples], "per_sample": rows, "summary": summ, "accuracy": acc, "consumed": CONSUMED}
     else:
+        digest = generation_digest(job)
         t0 = time.time()
         results = asyncio.run(send_all(job, samples, texts))
         rows, summ, acc = score(job["bench"], samples, results)
-        out = {"bench": job["bench"], "ids": [s.sample_id for s in samples], "per_sample": rows, "summary": summ, "accuracy": acc,
-               "wall_s": time.time() - t0, "consumed": CONSUMED}
+        out = {"bench": job["bench"], "ids": [s.sample_id for s in samples], "per_sample": [{**r, "generation_digest": digest} for r in rows],
+               "summary": summ, "accuracy": acc, "wall_s": time.time() - t0, "consumed": CONSUMED, "generation_digest": digest}
     Path(sys.argv[2]).write_text(json.dumps(out))
     return 0
 

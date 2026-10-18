@@ -13,7 +13,8 @@ pinned snapshot given in the job.
 
 Modes: ``manifest`` (per-item content sha256: QA fields plus the video and audio
 file bytes), ``run`` (``format`` ``sglang`` sends sglang-omni's native ``video_url`` form, see
-``sglang_payload``), ``rescore`` (saved raw responses -> official correctness),
+``sglang_payload``; the job's ``generation_digest`` is required before anything is sent and comes back on the result
+and every response row), ``rescore`` (saved raw responses -> official correctness),
 and ``dump_payloads`` (first N request bodies, for the native-form fixture test).
 """
 
@@ -115,6 +116,13 @@ def sglang_payload(job: dict, req) -> dict:
     return body
 
 
+def generation_digest(job: dict) -> str:
+    d = job.get("generation_digest")
+    if not isinstance(d, str) or not d:
+        raise SystemExit("run mode needs the job's generation_digest (the declaration the responses are produced under)")
+    return d
+
+
 def rescore(job: dict) -> dict:
     from vllm_omni.benchmarks.data_modules.daily_omni_eval import evaluate_answer_official, extract_predicted_choice, normalize_gold_answer
 
@@ -187,8 +195,13 @@ def main() -> int:
         out = manifest(job)
     elif mode == "rescore":
         out = rescore(job)
-    else:
+    elif job.get("dump_payloads"):
         out = asyncio.run(run(job))
+    else:
+        digest = generation_digest(job)  # before anything is sent
+        out = asyncio.run(run(job))
+        out["per_sample"] = [{**p, "generation_digest": digest} for p in out["per_sample"]]
+        out["generation_digest"] = digest
     Path(sys.argv[2]).write_text(json.dumps(out, default=str))
     return 0
 

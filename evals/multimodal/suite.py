@@ -75,8 +75,15 @@ MAX_TOKENS = {"mmmu": 2048, "mmsu": 32}
 #: Scoring code: the workers load data, send requests and grade answers; floors and request settings are recorded separately.
 WORKERS = ("evals/multimodal/sglang_mm_worker.py", "evals/multimodal/daily_omni_worker.py")
 SHUFFLE_LADDER = (0.05, 0.10, 0.20, 0.40, 0.60, 0.80)
-MM_EVALUATOR_VERSION = 2  # v2 (round 9): the identity no longer embeds the speech evaluator's digest (``mm_evaluator_digest``)
+MM_EVALUATOR_VERSION = 3  # v2 (round 9): no speech evaluator digest; v3 (round 10): worker lineage (``mm_evaluator_digest``)
 MM_COMPONENTS = ("sglang", "eval_env", "vllm_omni", "expected", "workers", "floors", "max_tokens")
+# Worker revisions whose scoring is unchanged, recorded worker sha256 -> current sha256.  Round 10 (B12d): the run mode
+# requires the job's generation digest and returns it on the result and every response row; ``manifest``, ``rescore``,
+# the payloads and ``score`` are byte-identical, and the multimodal Q_ref sources re-score unchanged under the new revision.
+WORKER_LINEAGE = {
+    "evals/multimodal/sglang_mm_worker.py": {"84dcec3f3bb22b2f8ac0791d8859b4b13fab928bab7696364c16902c2724eb45": "9ffb797dd57d70abeed8187d6034feb6096be7c588dae6eb3d4a3aa50307e61b"},
+    "evals/multimodal/daily_omni_worker.py": {"23ab478adc2ba761b1da97eb602e66e7d7981d267a67a73459974010dd28fe79": "0701fa78c5dc25ebc941faa84e38bfa8347b8b50d3e87c1c596b8b8636a64c07"},
+}
 
 
 class EvidenceError(RuntimeError):
@@ -114,17 +121,31 @@ def evaluator_consistent(ev: dict) -> bool:
 
 
 def mm_evaluator_digest(ev: dict) -> str | None:
-    """The version-2 identity of a recorded multimodal evaluator: the components multimodal scoring executes (scorer
+    """The current identity of a recorded multimodal evaluator: the components multimodal scoring executes (scorer
     checkout and environment, vLLM-Omni checkout and environment, frozen manifests, workers, floors, token limits).
     A version-1 record (before round 9) holds the same components plus the digest of the whole speech evaluator, whose
-    speech-only sources and settings multimodal scoring never runs; it maps to the digest of its components.  None for
-    a record that is inconsistent or lacks a component."""
-    if not evaluator_consistent(ev):
+    speech-only sources and settings multimodal scoring never runs; it maps to the digest of its components.  A worker
+    hash listed in ``WORKER_LINEAGE`` maps to its successor (the same scoring).  None for a record that is inconsistent
+    or lacks a component."""
+    if not evaluator_consistent(ev) or ev.get("version", 1) not in (1, 2, MM_EVALUATOR_VERSION):
         return None
     body = {"version": MM_EVALUATOR_VERSION, **{k: ev.get(k) for k in MM_COMPONENTS}}
-    if any(body[k] is None for k in MM_COMPONENTS) or ev.get("version", 1) not in (1, MM_EVALUATOR_VERSION):
+    if any(body[k] is None for k in MM_COMPONENTS):
         return None
+    body["workers"] = {w: WORKER_LINEAGE.get(w, {}).get(h, h) for w, h in body["workers"].items()}
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+def result_binding_problems(bench: str, res: dict, want: str) -> list[str]:
+    """B12d: a worker result is accepted only when the worker returned the generation digest of this job on the result and
+    on every response row (a cached, stale or misrouted result names another declaration, or none)."""
+    rows, out = res.get("per_sample") or [], []
+    if res.get("generation_digest") != want:
+        out.append(f"{bench}: the worker result is bound to {res.get('generation_digest')!r}, not this generation's {want}")
+    bad = [r.get("id") for r in rows if r.get("generation_digest") != want]
+    if not rows or bad:
+        out.append(f"{bench}: {len(bad)} of {len(rows)} responses are not bound to this generation (e.g. {bad[:3]})")
+    return out
 
 
 def request_policy(adapter: str, bench: str, concurrency: int) -> dict:
@@ -419,11 +440,16 @@ def cmd_run(a) -> int:
             job = _job(bench, a.subset, "run", url=srv.url, model=pol["model"], concurrency=pol["concurrency"], format=pol["format"],
                        max_tokens=pol["max_tokens"], extra_body=pol["extra_body"], generation_digest=gen["digest"])
             res = _worker(bench, job)
-            side = out / f"{bench}.per_sample.jsonl"  # every response carries the generation it was produced under (B12d)
-            side.write_text("".join(json.dumps({**p, "generation_digest": gen["digest"]}) + "\n" for p in res["per_sample"]))
+            bad = result_binding_problems(bench, res, gen["digest"])
+            if bad:  # nothing certifiable is written
+                (out / "verification.json").write_text(json.dumps({"problems": bad, "rejected_bench": bench}, indent=1))
+                print(json.dumps({"problems": bad}))
+                return 1
+            side = out / f"{bench}.per_sample.jsonl"  # every response carries the generation it was produced under, as returned (B12d)
+            side.write_text("".join(json.dumps(p) + "\n" for p in res["per_sample"]))
             cov = coverage(res["ids"], res["per_sample"], [i for i, _ in expected[bench]["items"]])
             report["benches"][bench] = {"accuracy": res["accuracy"], "summary": res.get("summary"), "coverage": cov, "per_sample_sha256": _sha(side),
-                                        "generation_digest": gen["digest"],
+                                        "generation_digest": res["generation_digest"],
                                         "expected_sha256": _sha(expected_path(a.subset, bench)), "consumed": res.get("consumed"), "wall_s": res.get("wall_s")}
             print(json.dumps({bench: {"accuracy": res["accuracy"], "coverage": cov["complete"], "failed": cov["failed"]}}), flush=True)
     report["wall_s"] = time.time() - t0
