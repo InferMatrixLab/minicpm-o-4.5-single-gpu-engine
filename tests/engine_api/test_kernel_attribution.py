@@ -34,7 +34,8 @@ def _markers(t: float, n: int = 16):
     return ms, ks
 
 
-def _write_dir(d: Path, kernels: list, spans: list, hb: float = 12.0, window=(10.0, 11.0), procs=(("engine", 100),), skip_capture=(), rec_extra=None):
+def _write_dir(d: Path, kernels: list, spans: list, hb: float = 12.0, window=(10.0, 11.0), procs=(("engine", 100),), skip_capture=(), rec_extra=None,
+               waits=()):
     (d / "procs").mkdir(parents=True)
     (d / "kernels").mkdir()
     w = {"tag": "w", "t0": window[0], "t1": window[1]}
@@ -52,6 +53,9 @@ def _write_dir(d: Path, kernels: list, spans: list, hb: float = 12.0, window=(10
             ev.append({"ph": "X", "cat": "kernel", "name": f"k{j}", "ts": _prof_us(s), "dur": (e - s) * 1e6, "args": {"correlation": j + 1}})
             ev.append({"ph": "X", "cat": "cuda_runtime", "name": "cudaLaunchKernel", "ts": _prof_us(launch), "dur": 2.0, "tid": tid,
                        "args": {"correlation": j + 1}})
+        for s, e in waits:  # blocking runtime calls
+            ev.append({"ph": "X", "cat": "cuda_runtime", "name": "cudaStreamSynchronize", "ts": _prof_us(s), "dur": (e - s) * 1e6, "tid": tid,
+                       "args": {"correlation": 10_000 + len(ev)}})
         with gzip.open(d / "kernels" / f"{proc}-{pid}-w.json.gz", "wt") as f:
             json.dump({"traceEvents": ev}, f)
         rec = {"proc": proc, "pid": pid, "window": w, "trace": f"{proc}-{pid}-w.json.gz", "markers_start": ms, "markers_end": me, **(rec_extra or {})}
@@ -74,6 +78,13 @@ def test_host_only_delay_inside_a_span_is_not_kernel_activity(tmp_path):
     assert out["device"]["active_frac"] == pytest.approx(0.01, abs=1e-4)  # the old envelope union said 1.0
     al = out["alignment"]["engine-100"]
     assert al["halfwidth_start_us"] <= 10 and abs(al["drift_us"]) < 0.01
+
+
+def test_blocking_calls_split_a_stages_host_time(tmp_path):
+    _write_dir(tmp_path, KERNELS, SPANS, waits=[(10.2, 10.7)])  # half a second synchronizing inside "work"
+    st = ka.analyze_kernels(tmp_path, {"w": (10.0, 11.0)}, {"engine": 1})["w"]["stages"]
+    assert st["engine.work"]["blocking_ms"] == pytest.approx(500, abs=0.01)
+    assert st["engine.work.inner"]["blocking_ms"] == 0
 
 
 def test_kernels_outside_every_stage_are_reported_as_such(tmp_path):

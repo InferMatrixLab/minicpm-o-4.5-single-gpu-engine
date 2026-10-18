@@ -113,7 +113,7 @@ class TalkerDecoder:
         bk.indices[:n].copy_(lay.kv_indices)
         bk.last.copy_(lay.kv_last_page_len)
         s = self.spec
-        bk.wrapper.plan(lay.kv_indptr, lay.kv_indices, lay.kv_last_page_len, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
+        bk.wrapper.plan(lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _plan_lengths(self, bk: _Bucket, rows: list[int], lengths: list[int]) -> None:
@@ -124,11 +124,12 @@ class TalkerDecoder:
         indptr = torch.tensor([0] + list(torch.tensor(npages).cumsum(0).tolist()), dtype=torch.int32)
         last = torch.tensor([L - (n - 1) * ps for L, n in zip(lengths, npages)], dtype=torch.int32)
         idx = torch.tensor(indices, dtype=torch.int32)
-        bk.indptr.copy_(indptr)
-        bk.indices[:idx.numel()].copy_(idx)
-        bk.last.copy_(last)
+        bk.indptr.copy_(indptr, non_blocking=True)  # queued, no wait for the GPU (engine.runtime.hostcopy)
+        bk.indices[:idx.numel()].copy_(idx, non_blocking=True)
+        bk.last.copy_(last, non_blocking=True)
         s = self.spec
-        bk.wrapper.plan(indptr.to(self.device), idx.to(self.device), last.to(self.device), s.num_heads, s.num_kv_heads, s.head_dim, ps,
+        # the plan reads the index pointers and last-page lengths on the host, the indices on the device
+        bk.wrapper.plan(indptr, idx.to(self.device, non_blocking=True), last, s.num_heads, s.num_kv_heads, s.head_dim, ps,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _capture(self, bk: _Bucket) -> None:
@@ -190,8 +191,8 @@ class TalkerDecoder:
             self.kv.reserve(p, 0)
         bk.codes[:n].copy_(state["codes"])
         bk.codes[n:].zero_()
-        bk.positions[:n].copy_(torch.tensor([self.kv.lengths[s] for s in seqs], dtype=torch.int32))
-        bk.positions[n:].copy_(torch.tensor([self.kv.lengths.get(p, 0) for p in pads], dtype=torch.int32))
+        bk.positions[:n].copy_(torch.tensor([self.kv.lengths[s] for s in seqs], dtype=torch.int32), non_blocking=True)
+        bk.positions[n:].copy_(torch.tensor([self.kv.lengths.get(p, 0) for p in pads], dtype=torch.int32), non_blocking=True)
         for name in ("seeds", "steps", "history", "live"):
             getattr(bk, name)[:n].copy_(state[name])
         bk.live[n:] = False

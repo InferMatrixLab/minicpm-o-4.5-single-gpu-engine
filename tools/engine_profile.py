@@ -195,7 +195,7 @@ def _print(out: dict) -> None:
             print(f"  {p:16s} kernel-active {v['active_frac']:.3f}  kernels/s {v['kernels'] / k['window_s']:.0f}")
         for s, v in k["stages"].items():
             print(f"  {s:28s} {v['spans_per_s']:7.1f}/s rows {f(v['rows_mean'], 1):>5s} host {f(v['host_ms']):>7s} elapsed {f(v['elapsed_ms']):>7s} "
-                  f"kernel self {f(v['kernel_self_ms']):>7s} total {f(v['kernel_total_ms']):>7s} ms  frac self {v['kernel_self_frac']:.3f}  "
+                  f"kernel self {f(v['kernel_self_ms']):>7s} total {f(v['kernel_total_ms']):>7s} ms  frac self {v['kernel_self_frac']:.3f}  blocking {f(v.get('blocking_ms'))} ms  "
                   f"launch->start p50 {f(v['launch_to_start_ms_p50'])} ms")
         print("  capture perturbation (inside / outside the kernel window): " + ", ".join(
             f"{s} {f(v['inside_per_s'], 1)}/{f(v['outside_per_s'], 1)} per s, {f(v['inside_elapsed_ms'])}/{f(v['outside_elapsed_ms'])} ms"

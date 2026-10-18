@@ -92,8 +92,10 @@ class PagedKV:
         batch_idx = torch.cat([torch.full((n,), i, dtype=torch.int32) for i, n in enumerate(new_tokens)])
         for s, L in zip(seqs, after):
             self.lengths[s] = L
-        return BatchLayout(qo_indptr.to(device), kv_indptr.to(device), torch.tensor(indices, dtype=torch.int32, device=device),
-                           torch.tensor(last, dtype=torch.int32, device=device), positions.to(device), batch_idx.to(device), list(new_tokens))
+        last = torch.tensor(last, dtype=torch.int32)
+        dev = lambda t: t.to(device, non_blocking=True)  # noqa: E731  (queued: no wait for the GPU; engine.runtime.hostcopy)
+        return BatchLayout(dev(qo_indptr), dev(kv_indptr), dev(torch.tensor(indices, dtype=torch.int32)), dev(last), dev(positions), dev(batch_idx),
+                           list(new_tokens), qo_indptr, kv_indptr, last)
 
 
 @dataclass
@@ -105,6 +107,10 @@ class BatchLayout:
     positions: torch.Tensor  # [nnz] absolute position of every packed token
     batch_indices: torch.Tensor  # [nnz] row of every packed token
     new_tokens: list[int] = field(default_factory=list)
+    # host copies of what FlashInfer's plan reads on the host (given device tensors it copies them back, synchronizing)
+    qo_indptr_h: torch.Tensor | None = None
+    kv_indptr_h: torch.Tensor | None = None
+    kv_last_page_len_h: torch.Tensor | None = None
 
     @property
     def last_token_index(self) -> torch.Tensor:
@@ -170,7 +176,7 @@ class DecoderRunner:
 
     def plan(self, lay: BatchLayout) -> None:
         s = self.spec
-        self.prefill.plan(lay.qo_indptr, lay.kv_indptr, lay.kv_indices, lay.kv_last_page_len, s.num_heads, s.num_kv_heads, s.head_dim,
+        self.prefill.plan(lay.qo_indptr_h, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim,
                           self.kv.page_size, causal=True, q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def forward(self, x: torch.Tensor, lay: BatchLayout) -> torch.Tensor:

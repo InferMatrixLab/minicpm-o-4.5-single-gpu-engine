@@ -20,6 +20,8 @@ What it reports for each kernel window, on the host clock:
   stream-elapsed time between its CUDA events (it includes submission gaps, synchronization and waits), and the time
   its kernels ran (self: launched directly in the stage; total: with its inner stages), plus the delay from each launch
   call to its first kernel's start (queueing behind earlier work; a graph launch counts once);
+* **blocking calls**: per stage (innermost, self), the host time spent inside runtime calls that wait on the GPU
+  (synchronizations, copies), so a stage's host time splits into those waits and the rest (Python and launches);
 * **alignment**: per process, the half-width of the offset interval the markers allow before and after the capture,
   and the drift between the two.
 
@@ -38,6 +40,7 @@ from pathlib import Path
 ACTIVITY = ("kernel", "gpu_memcpy", "gpu_memset")
 LAUNCH = ("cuda_runtime", "cuda_driver")
 MARKER = "spin_kernel"
+BLOCKING = ("Synchronize", "cudaMemcpy", "cuMemcpy")  # runtime/driver calls that can block the host on the GPU
 ALIGN_TOL_NS = 1000  # timestamp granularity allowed when intersecting marker bounds
 
 
@@ -120,10 +123,13 @@ def load_capture(kdir: Path, marker_file: Path) -> dict:
     events = [e for e in json.load(gzip.open(tr) if tr.suffix == ".gz" else open(tr))["traceEvents"] if e.get("ph") == "X"]
     spins = sorted((e["ts"], e["dur"]) for e in events if e.get("cat") == "kernel" and MARKER in e["name"])
     to_host, align = alignment(ms, me, spins)
-    launches = {}
+    launches, waits = {}, []
     for e in events:
         if e.get("cat") in LAUNCH and "correlation" in e.get("args", {}):
             launches[e["args"]["correlation"]] = (to_host(e["ts"]), e.get("tid"))
+        if e.get("cat") in LAUNCH and any(b in e["name"] for b in BLOCKING):
+            s0 = to_host(e["ts"])
+            waits.append({"launch": s0, "s": s0, "e": s0 + e["dur"] / 1e6, "tid": e.get("tid"), "name": e["name"]})
     acts = []
     for e in events:
         if e.get("cat") in ACTIVITY and MARKER not in e["name"]:
@@ -131,7 +137,7 @@ def load_capture(kdir: Path, marker_file: Path) -> dict:
             lt, tid = launches.get(corr, (None, None))
             s = to_host(e["ts"])
             acts.append({"s": s, "e": s + e["dur"] / 1e6, "cat": e["cat"], "name": e["name"], "launch": lt, "tid": tid, "corr": corr})
-    return {"proc": rec["proc"], "pid": rec["pid"], "window": w, "align": align, "acts": acts}
+    return {"proc": rec["proc"], "pid": rec["pid"], "window": w, "align": align, "acts": acts, "waits": waits}
 
 
 def load_stage_files(d: Path) -> dict:
@@ -175,7 +181,7 @@ def attribute_window(tag: str, w0: float, w1: float, captures: list, stage_files
     span_s = w1 - w0
     res = {"tag": tag, "t0": w0, "t1": w1, "window_s": span_s, "alignment": {}, "processes": {}, "stages": {}}
     all_iv = []
-    stages: dict = defaultdict(lambda: {"spans": 0, "rows": 0, "host_s": 0.0, "elapsed_s": 0.0, "self_iv": [], "total_iv": [], "launches": {}, "kernels": 0})
+    stages: dict = defaultdict(lambda: {"spans": 0, "rows": 0, "host_s": 0.0, "elapsed_s": 0.0, "self_iv": [], "total_iv": [], "launches": {}, "kernels": 0, "wait_s": 0.0, "waits": 0})
     for cap in captures:
         key = f"{cap['proc']}-{cap['pid']}"
         res["alignment"][key] = cap["align"]
@@ -213,6 +219,20 @@ def attribute_window(tag: str, w0: float, w1: float, captures: list, stage_files
                     inner["launches"][a["corr"]] = (a["s"], a["launch"])
                 for nm in set(names):
                     stages[nm]["total_iv"].append((a["s"], a["e"]))
+        # blocking calls (synchronizations, copies): their host time, in the innermost stage open when they began
+        wby = defaultdict(list)
+        for wt in cap.get("waits", []):
+            if wt["e"] > w0 and wt["s"] < w1 and wt["tid"] in threads:
+                wby[wt["tid"]].append(wt)
+        for tid, ws in wby.items():
+            stem, f = threads[tid]
+            spans = [r for r in f["rows"] if r["c1"] >= w0 - 1.0 and r["c0"] <= w1 + 1.0]
+            ws.sort(key=lambda a: a["launch"])
+            for wt, stack in zip(ws, _assign(spans, ws)):
+                if stack:
+                    st = stages[f"{cap['proc']}.{spans[stack[-1]]['s']}"]
+                    st["wait_s"] += max(0.0, min(wt["e"], w1) - max(wt["s"], w0))
+                    st["waits"] += 1
         if unattributed:
             u = stages[f"{cap['proc']}.(outside stages)"]
             u["self_iv"] += [(a["s"], a["e"]) for a in unattributed]
@@ -236,7 +256,8 @@ def attribute_window(tag: str, w0: float, w1: float, captures: list, stage_files
             "kernel_total_ms": 1000 * union(st["total_iv"], w0, w1) / n if n else None,
             "host_frac": st["host_s"] / span_s, "elapsed_frac": st["elapsed_s"] / span_s,
             "kernel_self_frac": union(st["self_iv"], w0, w1) / span_s, "kernel_total_frac": union(st["total_iv"], w0, w1) / span_s,
-            "kernels_per_s": st["kernels"] / span_s, "launch_to_start_ms_p50": None if not st["delay"] else 1000 * _pct(st["delay"], 0.5),
+            "kernels_per_s": st["kernels"] / span_s, "blocking_ms": 1000 * st["wait_s"] / n if n else None, "blocking_calls_per_s": st["waits"] / span_s,
+            "launch_to_start_ms_p50": None if not st["delay"] else 1000 * _pct(st["delay"], 0.5),
             "launch_to_start_ms_p95": None if not st["delay"] else 1000 * _pct(st["delay"], 0.95)}
     res["device"] = {"active_frac": union(all_iv, w0, w1) / span_s, "busy_sum_frac": _clip_sum(all_iv, w0, w1) / span_s}
     if gpm:

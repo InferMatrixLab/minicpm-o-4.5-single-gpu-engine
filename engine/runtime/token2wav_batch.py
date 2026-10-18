@@ -26,6 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.models.token2wav import MEL_CACHE, SOURCE_CACHE, StreamState, Token2Wav, chunk_noise_seed, fade_in_out, hift_forward, strict_fp32
+from engine.runtime.hostcopy import to_device
 from engine.runtime.stage_trace import span
 
 TRIM_SUFFIX = 100
@@ -246,10 +247,11 @@ class BatchedToken2Wav:
         lasts = lasts or [last] * n
         merged = any(lasts) and not last
         L = CHUNK + PRE_LOOKAHEAD if merged else max(len(w) for w in windows)  # merged finals ride in a 28-token call
-        tok = torch.tensor([w + [0] * (L - len(w)) for w in windows], dtype=torch.int32, device="cuda")
-        valid = torch.tensor([len(w) for w in windows], dtype=torch.int64, device="cuda") if merged else None
+        tok = to_device([w + [0] * (L - len(w)) for w in windows], torch.int32)  # queued: no wait for the GPU (engine.runtime.hostcopy)
+        vl = [len(w) for w in windows] if merged else None
+        valid = to_device(vl, torch.int64) if merged else None
         spk = flow.spk_embed_affine_layer(F.normalize(torch.cat([st.prompt.spk for st in sts]), dim=1))
-        h = flow.encoder_proj(self._prof("encoder", n, self._encoder, sts, flow.input_embedding(tok), last, valid))
+        h = flow.encoder_proj(self._prof("encoder", n, self._encoder, sts, flow.input_embedding(tok), last, valid, vl))
         t_real = [2 * len(w) if fin else h.shape[1] for w, fin in zip(windows, lasts)] if merged else None
         if self.fast is not None:
             mu = h.transpose(1, 2)
@@ -272,7 +274,7 @@ class BatchedToken2Wav:
         assert all(len(w) - (0 if fin else PRE_LOOKAHEAD) <= h.shape[1] // 2 for w, fin in zip(windows, lasts))
         return out
 
-    def _encoder(self, sts: list[StreamState], xs: torch.Tensor, last: bool, valid: torch.Tensor | None = None) -> torch.Tensor:
+    def _encoder(self, sts: list[StreamState], xs: torch.Tensor, last: bool, valid: torch.Tensor | None = None, vl: list[int] | None = None) -> torch.Tensor:
         """``UpsampleConformerEncoderV2.forward_chunk`` over a batch with left-padded caches; updates each stream's caches.
 
         The cache length is padded to a graph bucket for steady windows (``EncoderGraphs``), else to the batch maximum.
@@ -292,7 +294,8 @@ class BatchedToken2Wav:
         A2 = atts[0].new_zeros((d2, n, nh, L2, dk2))
         mask1 = torch.ones(n, T1, L1 + T1, dtype=torch.bool, device=dev)
         mask2 = torch.ones(n, T2, L2 + T2, dtype=torch.bool, device=dev)
-        vl = valid.tolist() if valid is not None else None
+        if valid is not None and vl is None:
+            vl = valid.tolist()
         for i, a in enumerate(atts):
             A1[:, i, :, L1 - off1[i]:] = a[:d1, 0, :, :off1[i]]
             mask1[i, :, :L1 - off1[i]] = False
@@ -379,7 +382,8 @@ class BatchedToken2Wav:
         dev = feats_list[0][0].device
         toks = [torch.cat([f[0], torch.full((1, look), SILENCE_TOKEN, device=dev, dtype=f[0].dtype)], dim=1) for f in feats_list]
         T = max(t.shape[1] for t in toks)
-        n = torch.tensor([t.shape[1] - look for t in toks], device=dev)  # each prompt's frames after the pre-lookahead conv
+        ns = [t.shape[1] - look for t in toks]  # each prompt's frames after the pre-lookahead conv
+        n = to_device(ns, torch.int64, dev)
         B, T1 = len(toks), T - look
         xs, _, _ = enc.embed(flow.input_embedding(torch.cat([F.pad(t, (0, T - t.shape[1])) for t in toks])), None)
         # pre-lookahead layer (PreLookaheadLayer.forward_chunk with an empty cache)
@@ -410,7 +414,7 @@ class BatchedToken2Wav:
         h = flow.encoder_proj(o)
         new1, new2 = torch.stack(new1), torch.stack(new2)
         out = []
-        for i, ni in enumerate(n.tolist()):
+        for i, ni in enumerate(ns):
             att = torch.cat([new1[:, i:i + 1, :, :ni].repeat(1, 1, 1, 2, 1), new2[:, i:i + 1, :, :s * ni]], dim=0)
             out.append((h[i:i + 1, :s * ni].contiguous(), torch.cat([cnn1[i:i + 1], cnn2[i:i + 1]], dim=2).contiguous(), att.contiguous()))
         return out

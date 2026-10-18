@@ -112,7 +112,7 @@ class ThinkerDecoder:
         bk.indices[: lay.kv_indices.numel()].copy_(lay.kv_indices)
         bk.last.copy_(lay.kv_last_page_len)
         s = self.spec
-        bk.wrapper.plan(lay.kv_indptr, lay.kv_indices, lay.kv_last_page_len, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
+        bk.wrapper.plan(lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _capture(self, bk: _Bucket) -> None:
@@ -181,9 +181,9 @@ class ThinkerDecoder:
             self.kv.reserve(p, 0)
         rows = list(seqs) + pads
         pos = [self.kv.lengths[r] for r in rows]
-        bk.tokens[:n].copy_(torch.tensor(tokens, dtype=torch.int64))
+        bk.tokens[:n].copy_(torch.tensor(tokens, dtype=torch.int64), non_blocking=True)  # queued (engine.runtime.hostcopy)
         bk.tokens[n:].zero_()
-        bk.positions.copy_(torch.tensor(pos, dtype=torch.int32))
+        bk.positions.copy_(torch.tensor(pos, dtype=torch.int32), non_blocking=True)
         ps = self.kv.page_size
         if not self.use_graphs or bk.rows != rows or any(L % ps == 0 for L in pos):
             self._plan(bk, rows)

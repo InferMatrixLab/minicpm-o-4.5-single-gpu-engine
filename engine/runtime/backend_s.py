@@ -33,6 +33,7 @@ import numpy as np
 import torch
 
 from engine.runtime.backend import IM_END, MODEL_DIR, TTS_EOS, _rss_kib, request_seed
+from engine.runtime.hostcopy import to_device
 from engine.runtime.stage_trace import span
 from engine.server import AudioChunk, Done, EngineRequest, Overloaded, TextDelta
 
@@ -734,7 +735,7 @@ class TrackSBackend:
     def _prompt_embeds(self, lv: LiveS, a: int, b: int) -> torch.Tensor:
         if lv.prompt_embeds is not None:
             return lv.prompt_embeds[a:b].to(self.thinker.dtype)
-        return self.thinker.embed(torch.tensor(lv.prompt_ids[a:b], device=self.device))
+        return self.thinker.embed(to_device(lv.prompt_ids[a:b], torch.int64, self.device))
 
     def _prefill_forward(self, pre: list[LiveS]) -> list:
         """Prefill each row's granted share of its prompt (``prefill_now``; the whole rest when not set) in one ragged
@@ -753,7 +754,7 @@ class TrackSBackend:
         done = [i for i, lv in enumerate(pre) if lv.prefilled >= len(lv.prompt_ids)]
         out = [None] * len(pre)
         if done:
-            sel = last if len(done) == len(pre) else last[torch.tensor(done, device=last.device)]
+            sel = last if len(done) == len(pre) else last[to_device(done, torch.int64, last.device)]
             for i, tok in zip(done, torch.nn.functional.linear(sel, self.thinker.w["lm_head.weight"]).float().argmax(-1).tolist()):
                 out[i] = tok
         return out
@@ -841,7 +842,7 @@ class TrackSBackend:
                     ch = lv.chunks[0]
                     if ch.ready is not None:  # the hidden states come from the Thinker stream
                         torch.cuda.current_stream().wait_event(ch.ready)
-                    cond = self.talker.condition(torch.tensor(ch.ids, dtype=torch.long, device=self.device), ch.hidden)
+                    cond = self.talker.condition(to_device(ch.ids, torch.long, self.device), ch.hidden)
                     if not ch.final:
                         cond = torch.cat([cond[:-2], cond[-1:]], dim=0)  # text_eos only on the final chunk; audio_bos always
                     if lv.feed_last:  # the previous chunk stopped at the per-chunk limit before its last frame was fed
@@ -862,7 +863,7 @@ class TrackSBackend:
                 for lv in starts:
                     if lv.ts is None:
                         seed = request_seed(lv.req)
-                        lv.ts = {"codes": torch.zeros(1, dtype=torch.int64, device=self.device), "seeds": torch.tensor([seed], device=self.device),
+                        lv.ts = {"codes": torch.zeros(1, dtype=torch.int64, device=self.device), "seeds": to_device([seed], torch.int64, self.device),
                                  "steps": torch.zeros(1, dtype=torch.int64, device=self.device),
                                  "history": torch.full((1, self.cfg.window), PAD, dtype=torch.int64, device=self.device),
                                  "live": torch.ones(1, dtype=torch.bool, device=self.device)}
@@ -903,7 +904,7 @@ class TrackSBackend:
             codes = self.adec.decode_k([lv.seq for lv in active], state, k)  # [K, n] on the host
         for i, lv in enumerate(active):
             for name in ("codes", "seeds", "steps", "history", "live"):
-                lv.ts[name] = state[name][i:i + 1].clone()
+                lv.ts[name] = state[name][i:i + 1]  # a view: the batch is built anew by the next tick's cat, never written in place
             for j in range(codes.shape[0]):
                 tok = int(codes[j, i])
                 if tok == PAD:
@@ -929,7 +930,7 @@ class TrackSBackend:
         lv.chunk_frames += 1
         for w in lv.chunker.push([tok]):
             self._queue_window(lv, w)
-        lv.ts["codes"] = torch.tensor([tok], dtype=torch.int64, device=self.device)
+        lv.ts["codes"] = to_device([tok], torch.int64, self.device)
         if lv.frames >= lv.frame_cap:
             # the request's frame cap (talker max_new_tokens): the utterance ends with this frame, unfed; text the
             # Thinker has not yet passed gets no speech
