@@ -1,0 +1,28 @@
+{
+ "description": "Round-10 measurement on GPU2: track_s_fast_hift (track_s_fast with HiFT's upsampling stages in TF32, AC-3.4 within 1e-2), K=5, eval IDs; compared with the round-9 cells (8338bda)",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 2,
+ "port": 18926,
+ "run_order_seed": 20261024,
+ "concurrencies": [
+  1,
+  4,
+  16
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_hift",
+   "label": "r10-hift",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
