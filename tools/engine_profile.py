@@ -136,7 +136,7 @@ def analyze(d: Path) -> dict:
     run = json.loads((d / "run.json").read_text())
     tr = d / "trace"
     files = load_stage_files(tr)
-    tags = {c: (w["kernel"]["t0"], w["kernel"]["t1"]) for c, w in run["windows"].items() if "kernel" in w}
+    tags = {w["kernel"]["tag"]: (w["kernel"]["t0"], w["kernel"]["t1"]) for w in run["windows"].values() if "kernel" in w}
     kern = analyze_kernels(tr, tags, run["expected_processes"]) if tags else {}  # a spans-only run: no kernel windows
     reqs = _rows(tr / "requests.jsonl")
     client = {r["engine_id"]: (r["t_dispatch"], r["t_first_audio"]) for r in _rows(d / "client.jsonl") if r.get("engine_id")}
@@ -155,7 +155,8 @@ def analyze(d: Path) -> dict:
                     st["frames"] += r["f"]
                     st["host"] += r["c1"] - r["c0"]
                     st["elapsed"] += r["g1"] - r["g0"]
-        k0, k1 = tags.get(c, (w1, w1))
+        ktag = win.get("kernel", {}).get("tag")
+        k0, k1 = tags.get(ktag, (w1, w1))
         probe = {}  # the capture's perturbation: rates and elapsed times inside the kernel window vs the rest of the window
         for name in ("engine.thinker", "engine.talker", "t2w.decode", "t2w.setup"):
             stem, s = name.split(".")
@@ -169,7 +170,7 @@ def analyze(d: Path) -> dict:
             "window_s": span, "client": win.get("client"), "inventory_foreign": win["inventory"]["foreign"], "capture_perturbation": probe,
             "stages": {k: {"spans_per_s": v["spans"] / span, "rows_mean": v["rows"] / v["spans"], "frames_per_s": v["frames"] / span,
                            "host_ms": 1000 * v["host"] / v["spans"], "elapsed_ms": 1000 * v["elapsed"] / v["spans"]} for k, v in sorted(stages.items())},
-            "kernels": kern.get(c), "critical_path": critical_path(reqs, w0, w1, client)}
+            "kernels": kern.get(ktag), "critical_path": critical_path(reqs, w0, w1, client)}
     (d / "attribution.json").write_text(json.dumps(out, indent=1))
     return out
 
@@ -311,7 +312,8 @@ def cmd_run(a) -> int:
             def on_window(w0, w1, c=c):
                 if a.no_trace or a.spans_only:
                     return
-                kwin.append({"tag": str(c), "t0": w1 - 1.0 - a.kernel_s, "t1": w1 - 1.0})
+                tag = str(c) if not any(w["tag"].split("#")[0] == str(c) for w in kwin) else f"{c}#{sum(w['tag'].split('#')[0] == str(c) for w in kwin) + 1}"
+                kwin.append({"tag": tag, "t0": w1 - 1.0 - a.kernel_s, "t1": w1 - 1.0})
                 tmp = tr / "kernel_windows.tmp"
                 tmp.write_text(json.dumps(kwin))
                 tmp.replace(tr / "kernel_windows.json")
@@ -320,8 +322,9 @@ def cmd_run(a) -> int:
             res["inventory"] = inventory(ident["gpu_uuid"], proc.pid)
             if not (a.no_trace or a.spans_only):
                 res["kernel"] = kwin[-1]
-                res["captures_wait_s"] = wait_captures(tr, str(c))  # before the next C: an export never overlaps a window
-            run["windows"][str(c)] = res
+                res["captures_wait_s"] = wait_captures(tr, kwin[-1]["tag"])  # before the next C: an export never overlaps a window
+            key = str(c) if str(c) not in run["windows"] else f"{c}#{sum(k.split('#')[0] == str(c) for k in run['windows']) + 1}"
+            run["windows"][key] = res  # a repeated C keeps every window
             print(json.dumps({"c": c, **res["client"], "foreign": res["inventory"]["foreign"], "captures_wait_s": res.get("captures_wait_s")}), flush=True)
         time.sleep(3)  # trace rows and heartbeats of the last window are flushed within a second
     finally:
