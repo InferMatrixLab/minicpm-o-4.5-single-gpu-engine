@@ -98,7 +98,7 @@ def make(pages=512, page_size=128, max_live=64):
     be.adec = FakeDecoder(be)
     be.talker_commit, be.all = {}, []
     be.talker_pad_pages = (max(BUCKETS) - 1) * -(-4 // page_size)
-    be.trace = None
+    be.stage_trace_dir, be.aprefill = None, None
     return be
 
 

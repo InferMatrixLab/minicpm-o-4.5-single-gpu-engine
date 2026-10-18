@@ -26,6 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.models.token2wav import MEL_CACHE, SOURCE_CACHE, StreamState, Token2Wav, chunk_noise_seed, fade_in_out, hift_forward, strict_fp32
+from engine.runtime.stage_trace import span
 
 TRIM_SUFFIX = 100
 
@@ -109,12 +110,15 @@ def _block_chunk(block, x, c, cnn_cache, att_cache, mask, tr):
 
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
-                 fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False):
+                 fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False,
+                 batch_setup_encoder: bool = False):
         """``fast_dit``: the estimator solve of ``engine.runtime.dit_fast`` (slot-pool caches, packed ragged rows, CUDA
         graphs with ``use_graphs``) in place of the reference-module solve; FP16 flow only.  Streams must then be made with
         ``new_stream`` and released with ``release_stream``.  ``hift_decode_tf32``: HiFT's upsampling stages
-        in TF32 (``token2wav.decoder_tf32``; the f0 predictor, the source and the input/output convolutions stay strict FP32)."""
+        in TF32 (``token2wav.decoder_tf32``; the f0 predictor, the source and the input/output convolutions stay strict FP32).
+        ``batch_setup_encoder``: the prompt setups of one ``setup_many`` call share one padded flow-encoder batch."""
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
+        self.batch_setup_encoder = batch_setup_encoder
         self.fast = None
         if fast_dit:
             from engine.runtime.dit_fast import FastDiT
@@ -125,6 +129,7 @@ class BatchedToken2Wav:
         self.merge_finals = True
         self.max_flow_streams = 32  # the staged per-step solve keeps a 32-stream call's transient memory small
         self.profile: dict | None = None  # stage -> [calls, seconds, items] when set
+        self.trace = None  # diagnostic stage trace (engine.runtime.stage_trace): inner spans, no synchronization
         self.hift_graphs = self.enc_graphs = None
         self.hift_decode_tf32 = hift_decode_tf32
         if use_graphs:
@@ -214,6 +219,9 @@ class BatchedToken2Wav:
 
     def _prof(self, name, n, fn, *a):
         if self.profile is None:
+            if self.trace is not None:
+                with self.trace.span(name, n):
+                    return fn(*a)
             return fn(*a)
         import time
 
@@ -309,11 +317,10 @@ class BatchedToken2Wav:
 
     @torch.inference_mode()
     def setup_many(self, feats_list: list[tuple]) -> list:
-        """Prompt setups of several requests: each prompt (plus 3 silence tokens) through the flow encoder, then one Euler
-        solve over all prompts' frames (each with its prompt mel as condition and empty caches; frames right-padded to
-        the longest / a graph bucket, padding masked, conv caches gathered at each prompt's real end)."""
-        from engine.models.token2wav import SILENCE_TOKEN
-
+        """Prompt setups of several requests: each prompt (plus 3 silence tokens) through the flow encoder (one padded
+        batch with ``batch_setup_encoder``, else one prompt at a time), then one Euler solve over all prompts' frames
+        (each with its prompt mel as condition and empty caches; frames right-padded to the longest / a graph bucket,
+        padding masked, conv caches gathered at each prompt's real end)."""
         flow = self.flow
         est = flow.decoder.estimator
         steps, depth = self.t2w.n_timesteps, len(est.blocks)
@@ -321,25 +328,15 @@ class BatchedToken2Wav:
         dt = next(est.parameters()).dtype
         sts, hs, conds, spks, lens = [], [], [], [], []
         with strict_fp32(), torch.amp.autocast("cuda", dtype=self.dtype):
-            for tokens, _, spk, mels, _ in feats_list:
-                pad = torch.full((1, 3), SILENCE_TOKEN, device=tokens.device, dtype=tokens.dtype)
-                h, cnn, att = flow.encoder.forward_chunk(xs=flow.input_embedding(torch.cat([tokens, pad], dim=1)), last_chunk=False,
-                                                        cnn_cache=None, att_cache=None)
-                h = flow.encoder_proj(h)
+            with span(self.trace, "setup.encoder", len(feats_list)):
+                encs = self._setup_encoder_batched(feats_list) if self.batch_setup_encoder else [self._setup_encoder_one(f) for f in feats_list]
+            for (_, _, spk, mels, _), (h, cnn, att) in zip(feats_list, encs):
                 assert h.shape[1] == mels.shape[1], (h.shape, mels.shape)
-                if self.fast is not None:
-                    sts.append(StreamState(prompt=None, flow_cache={"conformer_cnn_cache": cnn.clone(), "conformer_att_cache": att.clone()},
-                                           hift_cache={}))
-                    hs.append(h.transpose(1, 2))
-                    conds.append(mels.transpose(1, 2))
-                    spks.append(flow.spk_embed_affine_layer(F.normalize(spk, dim=1)))
-                    lens.append(h.shape[1])
-                    continue
-                sts.append(StreamState(prompt=None, flow_cache={
-                    "conformer_cnn_cache": cnn.clone(), "conformer_att_cache": att.clone(),
-                    "estimator_cnn_cache": torch.zeros(steps, depth, 2, blk.conv.in_channels + blk.conv.out_channels, 2, device="cuda", dtype=dt),
-                    "estimator_att_cache": torch.zeros(steps, depth, 2, blk.attn.num_heads, 0, 2 * blk.attn.head_dim, device="cuda", dtype=dt)},
-                    hift_cache={}))
+                cache = {"conformer_cnn_cache": cnn, "conformer_att_cache": att}
+                if self.fast is None:
+                    cache["estimator_cnn_cache"] = torch.zeros(steps, depth, 2, blk.conv.in_channels + blk.conv.out_channels, 2, device="cuda", dtype=dt)
+                    cache["estimator_att_cache"] = torch.zeros(steps, depth, 2, blk.attn.num_heads, 0, 2 * blk.attn.head_dim, device="cuda", dtype=dt)
+                sts.append(StreamState(prompt=None, flow_cache=cache, hift_cache={}))
                 hs.append(h.transpose(1, 2))
                 conds.append(mels.transpose(1, 2))
                 spks.append(flow.spk_embed_affine_layer(F.normalize(spk, dim=1)))
@@ -349,12 +346,74 @@ class BatchedToken2Wav:
                 for c, st, L in zip(caches, sts, lens):
                     c.keep = L  # the trim length: the prompt's mel frames
                     st.flow_cache["fast"] = c
-                self.fast.solve(caches, [x[0] for x in hs], torch.cat(spks), [x[0] for x in conds], [True] * len(sts))
+                with span(self.trace, "setup.solve", len(sts)):
+                    self.fast.solve(caches, [x[0] for x in hs], torch.cat(spks), [x[0] for x in conds], [True] * len(sts))
                 return [self.t2w.prompt(f, st.flow_cache) for f, st in zip(feats_list, sts)]
             T = max(lens)
             padded = lambda xs: torch.cat([F.pad(x, (0, T - x.shape[2])) for x in xs])  # noqa: E731
             self._solve(sts, padded(hs).contiguous(), torch.cat(spks), cond=padded(conds).contiguous(), keep_cache=True, t_real=lens)
         return [self.t2w.prompt(f, st.flow_cache) for f, st in zip(feats_list, sts)]
+
+    def _setup_encoder_one(self, feats: tuple) -> tuple:
+        """One prompt (plus 3 silence tokens) through the reference ``forward_chunk`` with empty caches: (encoder_proj
+        output [1, 2n, C], conv caches [1, c, 2 + 2 * stride], attention caches [d1 + d2, 1, nh, 2n, 2 dk])."""
+        from engine.models.token2wav import SILENCE_TOKEN
+
+        flow = self.flow
+        tokens = feats[0]
+        pad = torch.full((1, 3), SILENCE_TOKEN, device=tokens.device, dtype=tokens.dtype)
+        h, cnn, att = flow.encoder.forward_chunk(xs=flow.input_embedding(torch.cat([tokens, pad], dim=1)), last_chunk=False, cnn_cache=None, att_cache=None)
+        return flow.encoder_proj(h), cnn.clone(), att.clone()  # the encoder's caches are scratch it reuses (BL-20261015-flow-shared-caches)
+
+    def _setup_encoder_batched(self, feats_list: list[tuple]) -> list[tuple]:
+        """``_setup_encoder_one`` of every prompt in one right-padded batch.  Each prompt's real positions see exactly its
+        own inputs: the pre-lookahead conv reads 3 tokens ahead, which for every real frame are its own (the 3 silence
+        tokens end each prompt); the later convs are causal; the conformer layers have no conv module, and attention keys
+        past each prompt's frames are masked.  Conv caches are gathered at each prompt's real end (the reference takes
+        the last frames of its unpadded sequence) and attention caches cut to its real length."""
+        from engine.models.token2wav import SILENCE_TOKEN
+
+        flow, enc = self.flow, self.flow.encoder
+        pl, up = enc.pre_lookahead_layer, enc.up_layer
+        look, s = pl.pre_lookahead_len, up.stride
+        dev = feats_list[0][0].device
+        toks = [torch.cat([f[0], torch.full((1, look), SILENCE_TOKEN, device=dev, dtype=f[0].dtype)], dim=1) for f in feats_list]
+        T = max(t.shape[1] for t in toks)
+        n = torch.tensor([t.shape[1] - look for t in toks], device=dev)  # each prompt's frames after the pre-lookahead conv
+        B, T1 = len(toks), T - look
+        xs, _, _ = enc.embed(flow.input_embedding(torch.cat([F.pad(t, (0, T - t.shape[1])) for t in toks])), None)
+        # pre-lookahead layer (PreLookaheadLayer.forward_chunk with an empty cache)
+        o = F.leaky_relu(pl.conv1(xs.transpose(1, 2).contiguous()))  # [B, c, T1]
+        cnn1 = torch.gather(o, 2, (n[:, None] - 2 + torch.arange(2, device=dev)[None, :])[:, None, :].expand(-1, o.shape[1], -1))
+        o = pl.conv2(torch.cat([o.new_zeros(B, o.shape[1], 2), o], dim=2)).transpose(1, 2).contiguous() + xs[:, :-look]
+        keys1 = torch.arange(T1, device=dev)[None, :] < n[:, None]
+        mask1 = keys1[:, None, :].expand(B, T1, T1)
+        pos = enc.embed.position_encoding(offset=None, size=T1)
+        new1 = []
+        for layer in enc.encoders:
+            o, _, c, _ = layer(o, mask1, pos, att_cache=None)
+            new1.append(c)
+        # upsampling (Upsample1D.forward_chunk with an empty cache: zeros, then the upsampled frames)
+        u = torch.cat([o.new_zeros(B, o.shape[2], 2 * s), F.interpolate(o.transpose(1, 2).contiguous(), scale_factor=up.scale_factor, mode="nearest")], dim=2)
+        cnn2 = torch.gather(u, 2, (s * n[:, None] + torch.arange(2 * s, device=dev)[None, :])[:, None, :].expand(-1, u.shape[1], -1))
+        o, _, _ = enc.up_embed(up.conv(u).transpose(1, 2).contiguous(), None)
+        T2 = s * T1
+        keys2 = torch.arange(T2, device=dev)[None, :] < s * n[:, None]
+        mask2 = keys2[:, None, :].expand(B, T2, T2)
+        pos = enc.embed.position_encoding(offset=None, size=T2)
+        new2 = []
+        for layer in enc.up_encoders:
+            o, _, c, _ = layer(o, mask2, pos, att_cache=None)
+            new2.append(c)
+        if enc.normalize_before:
+            o = enc.after_norm(o)
+        h = flow.encoder_proj(o)
+        new1, new2 = torch.stack(new1), torch.stack(new2)
+        out = []
+        for i, ni in enumerate(n.tolist()):
+            att = torch.cat([new1[:, i:i + 1, :, :ni].repeat(1, 1, 1, 2, 1), new2[:, i:i + 1, :, :s * ni]], dim=0)
+            out.append((h[i:i + 1, :s * ni].contiguous(), torch.cat([cnn1[i:i + 1], cnn2[i:i + 1]], dim=2).contiguous(), att.contiguous()))
+        return out
 
     def _t_pad(self, T: int, keep_cache: bool, empty_cache: bool) -> int:
         """Frames the solve runs at: the graph bucket for T when padding is exact for what is kept, else T."""

@@ -6,7 +6,8 @@ Thirty-two utterances: 32 distinct Seed-TTS reference voices (the tuning rows), 
 reference ``setup_cache`` and every window by the reference ``flow.inference_chunk`` with the stream's own caches and
 trimming (as ``Token2Wav._decode``).  Served path: the headline's ``BatchedToken2Wav`` (FP16 flow, fast DiT, CUDA
 graphs), batched setups and staggered streams so steady windows, ramped first windows and merged finals share calls.
-Bound: relative L2 of every chunk's mel <= 5e-3 (the AC-3.4 FP16 bound).  The vocoder is the same strict-FP32 HiFT on
+Run with the per-prompt and with the batched prompt-setup encoder (``batch_setup_encoder``: all 32 prompts in one
+padded encoder batch).  Bound: relative L2 of every chunk's mel <= 5e-3 (the AC-3.4 FP16 bound).  The vocoder is the same strict-FP32 HiFT on
 both sides; its graph/eager agreement on equal mels is ``test_token2wav_stream.py::test_hift_graphs_match_eager``.
 """
 
@@ -45,7 +46,8 @@ def _reference_mels(ref, feats, windows):
 
 
 @torch.inference_mode()
-def test_served_fast_fp16_flow_against_fp32_reference():
+@pytest.mark.parametrize("batch_setup", [False, True], ids=["setup_per_prompt", "setup_batched"])
+def test_served_fast_fp16_flow_against_fp32_reference(batch_setup):
     from bench.workload import canonical_requests, load_seed_tts_rows, make_id_sets
     from engine.models.token2wav import Token2Wav
     from engine.runtime.token2wav_batch import BatchedToken2Wav
@@ -63,7 +65,7 @@ def test_served_fast_fp16_flow_against_fp32_reference():
         ws = [(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, int(gen.integers(70, 151)))])]
         plans.append(ws + [(lambda w: (w.tokens, w.last))(ch.finish())])
     # served path: batched setups, streams started in four waves, every window of a tick in one decode call
-    bt = BatchedToken2Wav(served, use_graphs=True, fast_dit=True, fast_slots=65536)
+    bt = BatchedToken2Wav(served, use_graphs=True, fast_dit=True, fast_slots=65536, batch_setup_encoder=batch_setup)
     bt.capture_graphs(bt.setup(feats[0]))
     rec, flow = [], bt._flow
     bt._flow = lambda sts, ws, last, *rest: (lambda m: rec.extend(zip([id(s) for s in sts], [x.float().cpu() for x in m])) or m)(flow(sts, ws, last, *rest))
@@ -92,6 +94,6 @@ def test_served_fast_fp16_flow_against_fp32_reference():
             assert x.shape == y.shape, (j, k, x.shape, y.shape)
             errs.append((float((x - y).norm() / y.norm()), j, k))
     worst = max(errs)
-    print(f"AC-3.4 served FP16/fast vs FP32: {len(errs)} chunks, max rel L2 {worst[0]:.2e} (utt {worst[1]}, chunk {worst[2]}), "
+    print(f"AC-3.4 served FP16/fast (batch_setup_encoder={batch_setup}) vs FP32: {len(errs)} chunks, max rel L2 {worst[0]:.2e} (utt {worst[1]}, chunk {worst[2]}), "
           f"median {float(np.median([e[0] for e in errs])):.2e}")
     assert worst[0] <= BOUND, worst

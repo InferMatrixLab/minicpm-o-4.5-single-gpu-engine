@@ -33,6 +33,7 @@ import numpy as np
 import torch
 
 from engine.runtime.backend import IM_END, MODEL_DIR, TTS_EOS, _rss_kib, request_seed
+from engine.runtime.stage_trace import span
 from engine.server import AudioChunk, Done, EngineRequest, Overloaded, TextDelta
 
 THINKER_CHUNK = 10
@@ -105,11 +106,12 @@ class LiveS:
     def emit(self, ev) -> None:
         self.loop.call_soon_threadsafe(self.out.put_nowait, ev)
 
-    def mark(self, event: str) -> None:
+    def mark(self, event: str, t: float | None = None) -> None:
+        """A timeline event at ``t`` (the shared host clock; now when not given)."""
         if self.timeline is not None:
             import time
 
-            self.timeline.append((event, time.perf_counter()))
+            self.timeline.append((event, time.perf_counter() if t is None else t))
 
     @property
     def wants_audio(self) -> bool:
@@ -128,7 +130,8 @@ class TrackSBackend:
                  t2w_setup_calls_when_busy: int = 1, t2w_max_decode_rows: int | None = None, t2w_first_slack_ms: float = 250.0,
                  t2w_first_lane_slack_ms: float | None = None, prefill_token_budget: int | None = 2048, prefill_max_age_ms: float = 250.0,
                  prefill_slack_floor_ms: float | None = 300.0, talker_start_budget: int | None = 1024, feature_gpu_tokens: bool = True,
-                 feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False):
+                 feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
+                 t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -198,6 +201,14 @@ class TrackSBackend:
 
             self.tprefill = PrefillGraphs(self.trun)
             self.tprefill.capture_all()
+        # Talker chunk prefills: CUDA graphs per row count and token bucket (eager beyond them), the first frames of
+        # one call sampled together (one host transfer instead of one per row)
+        self.aprefill = None
+        if talker_prefill_graphs and use_graphs:
+            from engine.runtime.prefill_graph import ChunkPrefillGraphs
+
+            self.aprefill = ChunkPrefillGraphs(self.arun)
+            self.aprefill.capture_all()
         self.tdec.capture_all()
         self.adec.capture_all()
         self.t2wp = None
@@ -216,12 +227,13 @@ class TrackSBackend:
                                           "t2w_first_slack_ms": t2w_first_slack_ms, "t2w_first_lane_slack_ms": t2w_first_lane_slack_ms,
                                           "feature_gpu_tokens": feature_gpu_tokens,
                                           "feature_allocator": feature_allocator, "stage_trace_dir": stage_trace_dir,
-                                          "t2w_hift_decode_tf32": t2w_hift_decode_tf32}, self._on_t2w)
+                                          "t2w_hift_decode_tf32": t2w_hift_decode_tf32,
+                                          "t2w_batch_setup_encoder": t2w_batch_setup_encoder}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
             self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile, euler_graphs=t2w_euler_graphs,
-                                              hift_decode_tf32=t2w_hift_decode_tf32)
+                                              hift_decode_tf32=t2w_hift_decode_tf32, batch_setup_encoder=t2w_batch_setup_encoder)
             if t2w_graphs:  # a prepared default voice supplies the cache dtypes
                 self.t2w_batch.capture_graphs(self.t2w_batch.setup(self.t2w.features(model_dir / "assets" / "HT_ref_audio.wav")))
         self.frontend = MultimodalFrontend(model_dir, device=device)
@@ -230,11 +242,13 @@ class TrackSBackend:
         # seq -> committed pages.  The decoder's bucket padding rows take one K-frame block each beside them.
         self.talker_commit: dict[int, int] = {}
         self.talker_pad_pages = (max(self.adec.buckets) - 1) * -(-max(talker_k, talker_k_max) // self.akv.page_size)
+        if self.aprefill is not None:  # the chunk-prefill graphs' scratch sequence
+            self.talker_pad_pages += self.aprefill.PAD_PAGES
         self.admitted = 0
         self.thinker_lazy = thinker_lazy
         self.profile = profile
-        self.stage_trace_dir, self.trace = stage_trace_dir, None  # diagnostic stage trace (engine.runtime.stage_trace), made on the engine thread
-        self.timelines: dict[str, list[tuple[str, float]]] = {}  # request id -> (event, perf_counter), when profiling
+        self.stage_trace_dir = stage_trace_dir  # diagnostic stage trace (engine.runtime.stage_trace): one per engine thread
+        self.timelines: dict[str, list[tuple[str, float]]] = {}  # request id -> (event, perf_counter), when profiling or tracing
         self.tick_profile: dict[str, list] = {}  # stage -> [calls, seconds], when profiling
         self.pool = ThreadPoolExecutor(prepare_workers, thread_name_prefix="t2w-prepare")
         self.inbox: queue.Queue = queue.Queue()
@@ -336,22 +350,40 @@ class TrackSBackend:
             self._next += 1
         lv = LiveS(req=req, out=asyncio.Queue(), loop=asyncio.get_running_loop(), prompt_ids=prompt, seq=seq, prompt_embeds=embeds,
                    prompt_future=fut, frame_cap=self._frame_cap(req))
-        if self.profile:
+        if self.profile or self.stage_trace_dir:
             lv.timeline = self.timelines.setdefault(req.request_id, [])
             lv.mark("queued")
             if fut is not None:
                 fut.add_done_callback(lambda _: lv.mark("prompt_ready"))
         self.inbox.put(lv)
         try:
+            first = True
             while True:
                 ev = await lv.out.get()
                 if isinstance(ev, Exception):
                     raise ev
+                if first and isinstance(ev, AudioChunk):
+                    first = False
+                    lv.mark("first_yield")  # handed to the HTTP response
                 yield ev
                 if isinstance(ev, Done):
                     return
         finally:
             lv.cancelled = True
+            if self.stage_trace_dir and lv.timeline is not None:
+                self._write_timeline(req.request_id, lv)
+
+    def _write_timeline(self, rid: str, lv: LiveS) -> None:
+        """Tracing: the request's timeline to ``<stage_trace_dir>/requests.jsonl`` (``tools/engine_profile.py``)."""
+        import json
+
+        lv.mark("end")
+        row = json.dumps({"rid": rid, "seq": lv.seq, "prompt_tokens": len(lv.prompt_ids), "frames": lv.frames,
+                          "events": [[e, round(t, 6)] for e, t in lv.timeline]})
+        with self._lock:
+            with open(Path(self.stage_trace_dir) / "requests.jsonl", "a") as f:
+                f.write(row + "\n")
+        self.timelines.pop(rid, None)
 
     def stats(self) -> dict:
         import resource
@@ -364,12 +396,25 @@ class TrackSBackend:
                 **self.sched, **getattr(self, "t2w_stats", {})}
 
     # --- engine thread ---------------------------------------------------------------------------
-    def _run(self) -> None:
-        torch.cuda.set_device(torch.device(self.device).index or 0)  # torch >= 2.13 rejects a bare "cuda"
-        if self.stage_trace_dir:
+    @property
+    def trace(self):
+        """The calling thread's stage trace (made on first use: ``engine`` for the tick thread, ``engine-<thread>`` for
+        the split-thread and in-process Token2Wav threads), or None when tracing is off."""
+        if not getattr(self, "stage_trace_dir", None):
+            return None
+        tl = self.__dict__.get("_trace_tl")
+        if tl is None:
+            tl = self.__dict__.setdefault("_trace_tl", threading.local())
+        if getattr(tl, "trace", None) is None:
             from engine.runtime.stage_trace import StageTrace
 
-            self.trace = StageTrace(self.stage_trace_dir, "engine")
+            name = threading.current_thread().name
+            tl.trace = StageTrace(self.stage_trace_dir, "engine" if name == "engine" else f"engine-{name}", proc="engine")
+        return tl.trace
+
+    def _run(self) -> None:
+        torch.cuda.set_device(torch.device(self.device).index or 0)  # torch >= 2.13 rejects a bare "cuda"
+        _ = self.trace  # made before the first request (its base event synchronizes)
         while True:
             try:
                 while True:
@@ -472,6 +517,7 @@ class TrackSBackend:
         from engine.runtime.t2w_sched import AudioState
 
         lv.t_admit, lv.audio = _now(), AudioState()
+        lv.mark("admitted")
         if lv.wants_audio:
             from engine.token2wav_chunker import StreamChunker
 
@@ -502,6 +548,11 @@ class TrackSBackend:
         if kind == "stats":
             self.t2w_stats = m[2]
             return
+        if kind == "mark":  # tracing: a worker-side timeline event
+            lv = self.audio_live.get(seq)
+            if lv is not None:
+                lv.mark(m[2], m[3])
+            return
         if kind == "fatal":  # the Token2Wav worker died: every request still owed audio fails now
             for lv in list(self.audio_live.values()):
                 lv.emit(RuntimeError(f"token2wav worker failed: {m[2].strip().splitlines()[-1] if m[2] else ''}"))
@@ -517,6 +568,12 @@ class TrackSBackend:
         if kind == "audio":
             if lv.sample_offset == 0:
                 lv.mark("first_audio")
+            if len(m) > 4:  # tracing: the window's receipt and decode call in the worker, and its receipt here
+                index, t_recv, t_dec0, t_dec1 = m[4]
+                lv.mark(f"w_recv:{index}", t_recv)
+                lv.mark(f"w_decode:{index}", t_dec0)
+                lv.mark(f"w_decoded:{index}", t_dec1)
+                lv.mark(f"audio_recv:{index}")
             lv.audio.sent(len(m[3]), _now())
             lv.emit(AudioChunk(m[3], m[2]))
             lv.sample_offset = m[2] + len(m[3])
@@ -543,12 +600,15 @@ class TrackSBackend:
         lv.emit(Done("stop", {"prompt_tokens": len(lv.prompt_ids), "completion_tokens": len(lv.generated), "audio_frames": lv.frames}))
         self._release(lv)
 
-    def _timed(self, name: str, fn, *a) -> None:
-        if self.trace is not None and a[0]:  # stage trace: no synchronization; rows and (Talker) frames produced
-            frames = sum(lv.frames for lv in a[0])
-            tok = self.trace.begin(name)
+    def _timed(self, name: str, fn, *a, live: bool = True) -> None:
+        """``fn(*a)`` as stage ``name``; ``a[0]`` is the stage's rows (``live``: LiveS rows, whose Talker frames the
+        trace counts; otherwise only their number)."""
+        tr = self.trace
+        if tr is not None and a[0]:  # stage trace: no synchronization; rows and (Talker) frames produced
+            frames = sum(lv.frames for lv in a[0]) if live else 0
+            tok = tr.begin(name)
             fn(*a)
-            self.trace.end(tok, len(a[0]), sum(lv.frames for lv in a[0]) - frames)
+            tr.end(tok, len(a[0]), sum(lv.frames for lv in a[0]) - frames if live else 0)
             return
         if not self.profile:
             fn(*a)
@@ -642,14 +702,17 @@ class TrackSBackend:
         dec = [lv for lv in rows if not lv.pending_prefill]
         results = []  # (lv, next token, hidden of the fed token or None)
         if pre:
-            for lv, tok in zip(pre, self._prefill_forward(pre)):
+            with span(self.trace, "thinker.prefill", len(pre)):
+                toks = self._prefill_forward(pre)
+            for lv, tok in zip(pre, toks):
                 if tok is None:
                     continue  # a chunk of a long prompt: the rest in later ticks
                 lv.pending_prefill = False
                 lv.mark("prefilled")
                 results.append((lv, tok, None))
         if dec:
-            nxt, hid = self.tdec.step([lv.seq for lv in dec], [lv.generated[-1] for lv in dec])
+            with span(self.trace, "thinker.decode", len(dec)):
+                nxt, hid = self.tdec.step([lv.seq for lv in dec], [lv.generated[-1] for lv in dec])
             results += [(lv, tok, hid[i]) for i, (lv, tok) in enumerate(zip(dec, nxt))]
         for lv, tok, h in results:
             if h is not None:
@@ -772,37 +835,55 @@ class TrackSBackend:
         eos = self.talker.cfg.eos
         starts = self._talker_starts([lv for lv in rows if not lv.talking and lv.chunks])
         if starts:
-            feeds = []
-            for lv in starts:
-                ch = lv.chunks[0]
-                if ch.ready is not None:  # the hidden states come from the Thinker stream
-                    torch.cuda.current_stream().wait_event(ch.ready)
-                cond = self.talker.condition(torch.tensor(ch.ids, dtype=torch.long, device=self.device), ch.hidden)
-                if not ch.final:
-                    cond = torch.cat([cond[:-2], cond[-1:]], dim=0)  # text_eos only on the final chunk; audio_bos always
-                if lv.feed_last:  # the previous chunk stopped at the per-chunk limit before its last frame was fed
-                    cond = torch.cat([self.talker.code_embed(lv.ts["codes"]), cond], dim=0)
-                    lv.feed_last = False
-                feeds.append(cond)
-            ok = [i for i, (lv, f) in enumerate(zip(starts, feeds)) if not self._beyond_commit(lv, f.shape[0])]
-            starts, feeds = [starts[i] for i in ok], [feeds[i] for i in ok]
+            with span(self.trace, "talker.condition", len(starts)):
+                feeds = []
+                for lv in starts:
+                    ch = lv.chunks[0]
+                    if ch.ready is not None:  # the hidden states come from the Thinker stream
+                        torch.cuda.current_stream().wait_event(ch.ready)
+                    cond = self.talker.condition(torch.tensor(ch.ids, dtype=torch.long, device=self.device), ch.hidden)
+                    if not ch.final:
+                        cond = torch.cat([cond[:-2], cond[-1:]], dim=0)  # text_eos only on the final chunk; audio_bos always
+                    if lv.feed_last:  # the previous chunk stopped at the per-chunk limit before its last frame was fed
+                        cond = torch.cat([self.talker.code_embed(lv.ts["codes"]), cond], dim=0)
+                        lv.feed_last = False
+                    feeds.append(cond)
+                ok = [i for i, (lv, f) in enumerate(zip(starts, feeds)) if not self._beyond_commit(lv, f.shape[0])]
+                starts, feeds = [starts[i] for i in ok], [feeds[i] for i in ok]
         if starts:
-            lay = self.akv.layout([lv.seq for lv in starts], [f.shape[0] for f in feeds])
-            hidden = self.arun.forward(torch.cat(feeds), lay)
-            logits = torch.nn.functional.linear(hidden[lay.last_token_index], self.talker.head).float()
-            for i, lv in enumerate(starts):
-                if lv.ts is None:
-                    seed = request_seed(lv.req)
-                    lv.ts = {"codes": torch.zeros(1, dtype=torch.int64, device=self.device), "seeds": torch.tensor([seed], device=self.device),
-                             "steps": torch.zeros(1, dtype=torch.int64, device=self.device),
-                             "history": torch.full((1, self.cfg.window), PAD, dtype=torch.int64, device=self.device),
-                             "live": torch.ones(1, dtype=torch.bool, device=self.device)}
-                st = DecodeState(lv.ts["seeds"], lv.ts["steps"], lv.ts["history"], torch.zeros(1, dtype=torch.bool, device=self.device),
-                                 torch.ones(1, dtype=torch.bool, device=self.device))
-                tok = int(step(st, logits[i:i + 1], eos, self.cfg)[0])
-                lv.ts.update(steps=st.steps, history=st.history)
-                lv.chunk_frames = 0
-                self._take_frame(lv, tok, fed_upto=None)
+            with span(self.trace, "talker.prefill", len(starts)):
+                seqs, ns = [lv.seq for lv in starts], [f.shape[0] for f in feeds]
+                if self.aprefill is not None and self.aprefill.supports(len(starts), sum(ns)):
+                    hidden, last = self.aprefill.forward(torch.cat(feeds), seqs, ns)
+                else:
+                    lay = self.akv.layout(seqs, ns)
+                    hidden, last = self.arun.forward(torch.cat(feeds), lay), lay.last_token_index
+                logits = torch.nn.functional.linear(hidden[last], self.talker.head).float()
+                for lv in starts:
+                    if lv.ts is None:
+                        seed = request_seed(lv.req)
+                        lv.ts = {"codes": torch.zeros(1, dtype=torch.int64, device=self.device), "seeds": torch.tensor([seed], device=self.device),
+                                 "steps": torch.zeros(1, dtype=torch.int64, device=self.device),
+                                 "history": torch.full((1, self.cfg.window), PAD, dtype=torch.int64, device=self.device),
+                                 "live": torch.ones(1, dtype=torch.bool, device=self.device)}
+                n = len(starts)
+                if self.aprefill is not None:  # one sampling call and one host transfer for every row (rows are independent)
+                    st = DecodeState(torch.cat([lv.ts["seeds"] for lv in starts]), torch.cat([lv.ts["steps"] for lv in starts]),
+                                     torch.cat([lv.ts["history"] for lv in starts]), torch.zeros(n, dtype=torch.bool, device=self.device),
+                                     torch.ones(n, dtype=torch.bool, device=self.device))
+                    toks = step(st, logits, eos, self.cfg).tolist()
+                    for i, lv in enumerate(starts):
+                        lv.ts.update(steps=st.steps[i:i + 1], history=st.history[i:i + 1])
+                else:
+                    toks = []
+                    for i, lv in enumerate(starts):
+                        st = DecodeState(lv.ts["seeds"], lv.ts["steps"], lv.ts["history"], torch.zeros(1, dtype=torch.bool, device=self.device),
+                                         torch.ones(1, dtype=torch.bool, device=self.device))
+                        toks.append(int(step(st, logits[i:i + 1], eos, self.cfg)[0]))
+                        lv.ts.update(steps=st.steps, history=st.history)
+                for lv, tok in zip(starts, toks):
+                    lv.chunk_frames = 0
+                    self._take_frame(lv, tok, fed_upto=None)
         active = [lv for lv in rows if lv.talking and not lv.cancelled]
         if not active:
             return
@@ -818,7 +899,8 @@ class TrackSBackend:
             return
         starts_len = [self.akv.lengths[lv.seq] for lv in active]
         state = {name: torch.cat([lv.ts[name] for lv in active]) for name in ("codes", "seeds", "steps", "history", "live")}
-        codes = self.adec.decode_k([lv.seq for lv in active], state, k)  # [K, n] on the host
+        with span(self.trace, "talker.decode", len(active)):
+            codes = self.adec.decode_k([lv.seq for lv in active], state, k)  # [K, n] on the host
         for i, lv in enumerate(active):
             for name in ("codes", "seeds", "steps", "history", "live"):
                 lv.ts[name] = state[name][i:i + 1].clone()
@@ -956,7 +1038,7 @@ class TrackSBackend:
             for k in range(0, len(items), per):
                 part = items[k:k + per]
                 try:
-                    prompts = self._timed_ret("setup", self.t2w_batch.setup_many, [f for _, f in part])
+                    prompts = self._timed_ret("setup", self.t2w_batch.setup_many, [f for _, f in part], live=False)
                 except Exception as e:
                     for lv, _ in part:
                         lv.emit(RuntimeError(f"prompt setup: {type(e).__name__}: {e}"))
@@ -968,9 +1050,9 @@ class TrackSBackend:
                     lv.mark(f"prompt_setup:{len(part)}")
         return True
 
-    def _timed_ret(self, name: str, fn, *a):
+    def _timed_ret(self, name: str, fn, *a, live: bool = True):
         out = []
-        self._timed(name, lambda *x: out.append(fn(*x)), *a)
+        self._timed(name, lambda *x: out.append(fn(*x)), *a, live=live)
         return out[0]
 
     def _decode_windows(self, ready: list[LiveS]) -> None:

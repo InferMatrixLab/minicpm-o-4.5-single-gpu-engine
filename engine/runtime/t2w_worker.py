@@ -27,6 +27,7 @@ from engine.runtime.t2w_sched import AudioState, Policy, choose_windows, first_l
 
 
 _FEAT = None  # per feature process: an object with what ``Token2wav._prepare_prompt`` reads
+_TRACE = None  # per feature process with GPU tokens, while tracing: its stage trace (engine.runtime.stage_trace)
 
 
 def _rss_kib(pid: int) -> int | None:
@@ -39,7 +40,7 @@ def _rss_kib(pid: int) -> int | None:
     return None
 
 
-def _feat_init(model_dir: str, spk_threads: int, gpu_tokens: bool = True) -> None:
+def _feat_init(model_dir: str, spk_threads: int, gpu_tokens: bool = True, stage_trace_dir: str | None = None) -> None:
     """Feature-process initializer: CAMPPlus (CPU ONNX) and the fbank/mel front ends, plus the S3 tokenizer on the GPU
     when ``gpu_tokens`` (one CUDA context per feature process; the S3 encoder is launch-heavy Python, and in a thread of
     the worker it contends for the worker's GIL: measured slower).  Without it the process is CPU only and the worker
@@ -68,6 +69,13 @@ def _feat_init(model_dir: str, spk_threads: int, gpu_tokens: bool = True) -> Non
     opt.enable_mem_pattern = False
     h.spk_model = onnxruntime.InferenceSession(f"{model_dir}/assets/token2wav/campplus.onnx", sess_options=opt, providers=["CPUExecutionProvider"])
     _FEAT = h
+    if stage_trace_dir and gpu_tokens:
+        import os
+
+        from engine.runtime.stage_trace import StageTrace
+
+        global _TRACE
+        _TRACE = StageTrace(stage_trace_dir, f"feature-{os.getpid()}", proc="feature")
 
 
 _RESAMPLE: dict = {}
@@ -153,7 +161,11 @@ def _feat_job(ref: bytes):
             return ("done",) + tuple(x.cpu() for x in finish_prompt(_FEAT.audio_tokenizer, front))  # the whole prompt, on the CPU
 
     try:
-        out = run()  # every temporary of the job (audio, mels, futures, GPU tensors) is released when run() returns
+        if _TRACE is not None:
+            with _TRACE.span("feature.job", 1):
+                out = run()
+        else:
+            out = run()  # every temporary of the job (audio, mels, futures, GPU tensors) is released when run() returns
     finally:
         _trim_heap()  # so the trim sees the job's freed memory, not memory its locals still hold
     return out
@@ -317,6 +329,12 @@ class WorkerLoop:
     # messages from the engine
     def open(self, seq: int, seed: int, fut) -> None:
         self.reqs[seq] = _Req(seq, seed, features=fut, t_open=self.clock())
+        self._mark(seq, "w_open", self.reqs[seq].t_open)
+
+    def _mark(self, seq: int, event: str, t: float) -> None:
+        """A request timeline event on the worker clock (the engine's clock), sent only while tracing."""
+        if self.trace is not None:
+            self.emit(("mark", seq, event, t))
 
     def window(self, seq: int, tokens, last: bool, index: int) -> None:
         if seq in self.reqs:
@@ -370,6 +388,7 @@ class WorkerLoop:
                 self.close(r.seq)
                 continue
             r.feat, r.t_feat, r.features = f, self.clock(), None  # the future is not kept once resolved
+            self._mark(r.seq, "w_features", r.t_feat)
             if self.note is not None:
                 self.note(f"features_ready 1 {(r.t_feat - r.t_open) * 1000:.1f}")
 
@@ -381,6 +400,10 @@ class WorkerLoop:
                 prompts = self.bt.setup_many([r.feat for r in part])
                 if tok is not None:
                     self.trace.end(tok, len(part))
+                    t1 = time.perf_counter()
+                    for r in part:
+                        self._mark(r.seq, f"w_setup:{len(part)}", t0)
+                        self._mark(r.seq, "w_setup_done", t1)
                 self.log(f"setup@{b}", len(part), t0)
             except Exception as e:
                 for r in part:
@@ -410,10 +433,11 @@ class WorkerLoop:
         sel = [self.reqs[k] for k in choose_windows([(d, k) for k, d in dl.items()], self.policy)]
         if self.note is not None:
             self.note(f"slack {len(sel)} {(min(dl[r.seq] for r in sel) - now) * 1000:.1f}")
-        items = []
+        items, meta = [], []
         for r in sel:
-            tokens, last, _, _ = r.windows.popleft()
+            tokens, last, index, t_recv = r.windows.popleft()
             items.append((r.stream, tokens, last))
+            meta.append((index, t_recv))
         try:
             t0 = time.perf_counter()
             tok = self.trace.begin("decode") if self.trace is not None else None
@@ -427,9 +451,10 @@ class WorkerLoop:
                 self.close(r.seq)
             return True
         sent = self.clock()
-        for r, (_, _, last), wav in zip(sel, items, wavs):
+        for r, (_, _, last), wav, (index, t_recv) in zip(sel, items, wavs, meta):
             if len(wav):
-                self.emit(("audio", r.seq, r.offset, wav))
+                # while tracing: the window's index, its receipt, and the decode call's start and end (worker clock)
+                self.emit(("audio", r.seq, r.offset, wav) + ((index, t_recv, t0, sent),) if self.trace is not None else ("audio", r.seq, r.offset, wav))
                 r.offset += len(wav)
                 r.audio.sent(len(wav), sent)
             if last:
@@ -469,7 +494,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
     t2w = Token2Wav(f"{model_dir}/assets/token2wav", float16=cfg.get("float16_flow", False), spk_threads=cfg.get("spk_threads", 8))
     bt = BatchedToken2Wav(t2w, use_graphs=cfg.get("t2w_graphs", False), compile_estimator=cfg.get("t2w_compile", False),
                           euler_graphs=cfg.get("t2w_euler_graphs", False), fast_dit=cfg.get("t2w_fast_dit", False),
-                          fast_slots=cfg.get("t2w_fast_slots", 49152), hift_decode_tf32=cfg.get("t2w_hift_decode_tf32", False))
+                          fast_slots=cfg.get("t2w_fast_slots", 49152), hift_decode_tf32=cfg.get("t2w_hift_decode_tf32", False),
+                          batch_setup_encoder=cfg.get("t2w_batch_setup_encoder", False))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             p0 = bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav"))
@@ -502,7 +528,7 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         elif alloc != "glibc":
             raise ValueError(f"feature_allocator must be 'jemalloc' or 'glibc', not {alloc!r}")
         pool = ProcessPoolExecutor(cfg["feature_processes"], mp_context=mp.get_context("spawn"), initializer=_feat_init,
-                                   initargs=(model_dir, cfg.get("spk_threads", 8), cfg.get("feature_gpu_tokens", True)))
+                                   initargs=(model_dir, cfg.get("spk_threads", 8), cfg.get("feature_gpu_tokens", True), cfg.get("stage_trace_dir")))
         ref = open(f"{model_dir}/assets/HT_ref_audio.wav", "rb").read()
         warm = cfg.get("feature_warm_jobs", FEATURE_WARM_JOBS)
         for f in [pool.submit(_feat_warm, ref, warm) for _ in range(cfg["feature_processes"])]:
@@ -613,7 +639,7 @@ def _worker_main(inq, outq, cfg: dict) -> None:
     if cfg.get("stage_trace_dir"):
         from engine.runtime.stage_trace import StageTrace
 
-        loop.trace = StageTrace(cfg["stage_trace_dir"], "t2w")
+        loop.trace = bt.trace = StageTrace(cfg["stage_trace_dir"], "t2w")
     last_stats = 0.0
 
     def feature_rss() -> dict:
