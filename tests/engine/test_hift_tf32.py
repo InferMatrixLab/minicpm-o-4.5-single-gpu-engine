@@ -25,10 +25,11 @@ N_UTT, FIRST_CHUNK, BOUND = 32, 8, 1e-2
 EXTENDED_ROWS = (1, 2, 4, 8, 12, 16, 20, 24, 32)  # t2w_hift_rows of track_s_fast_r13
 
 
-def _serve(served, feats, plans, tf32: bool, hift_rows=None):
+def _serve(served, feats, plans, tf32: bool, hift_rows=None, batch_setup=False):
     from engine.runtime.token2wav_batch import BatchedToken2Wav
 
-    bt = BatchedToken2Wav(served, use_graphs=True, fast_dit=True, fast_slots=65536, hift_decode_tf32=tf32, hift_rows=hift_rows)
+    bt = BatchedToken2Wav(served, use_graphs=True, fast_dit=True, fast_slots=65536, hift_decode_tf32=tf32, hift_rows=hift_rows,
+                          batch_setup_encoder=batch_setup)
     p0 = bt.setup(feats[0])
     bt.capture_graphs(p0)
     bt.release_prompt(p0)
@@ -51,9 +52,14 @@ def _serve(served, feats, plans, tf32: bool, hift_rows=None):
     return got
 
 
-@pytest.mark.parametrize("hift_rows", [None, EXTENDED_ROWS], ids=["rows_to_16", "rows_to_32"])
+@pytest.mark.parametrize("hift_rows,batch_setup", [
+    (None, False), (EXTENDED_ROWS, False),
+    # B24: with the batched setup encoder (the r11c candidate's combination) one of 190 chunks reaches 1.062e-2
+    # (results/engine_profile/r14_hift_matched.json); recorded as a strict expected failure until repaired
+    pytest.param(None, True, marks=pytest.mark.xfail(strict=True, reason="B24: TF32 HiFT + batched setup exceeds the AC-3.4 chunk bound")),
+], ids=["rows_to_16", "rows_to_32", "rows_to_16_batched_setup"])
 @torch.inference_mode()
-def test_tf32_hift_decoder_within_the_hift_bound(hift_rows):
+def test_tf32_hift_decoder_within_the_hift_bound(hift_rows, batch_setup):
     from bench.workload import canonical_requests, load_seed_tts_rows, make_id_sets
     from engine.models.token2wav import Token2Wav
     from engine.token2wav_chunker import StreamChunker
@@ -69,9 +75,9 @@ def test_tf32_hift_decoder_within_the_hift_bound(hift_rows):
         ch = StreamChunker(first_chunk=FIRST_CHUNK)
         ws = [(w.tokens, w.last) for w in ch.push(speech)]
         plans.append(ws + [(lambda w: (w.tokens, w.last))(ch.finish())])
-    ref = _serve(served, feats, plans, tf32=False)
-    again = _serve(served, feats, plans, tf32=False)
-    new = _serve(served, feats, plans, tf32=True, hift_rows=hift_rows)
+    ref = _serve(served, feats, plans, tf32=False, batch_setup=batch_setup)
+    again = _serve(served, feats, plans, tf32=False, batch_setup=batch_setup)
+    new = _serve(served, feats, plans, tf32=True, hift_rows=hift_rows, batch_setup=batch_setup)
     chunk_errs, utt_errs, control = [], [], []
     rel = lambda a, b: float(np.linalg.norm(a - b) / np.linalg.norm(b))  # noqa: E731
     for j in range(N_UTT):
