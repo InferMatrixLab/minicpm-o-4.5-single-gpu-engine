@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import torch
 
+from engine.runtime.hostcopy import plan as fi_plan
 from engine.runtime.paged import DecoderRunner
 
 PAD_SEQ = (1 << 42) + 7
@@ -57,7 +58,7 @@ class PrefillGraphs:
         bk.positions.copy_(lay.positions)
         bk.batch_idx.copy_(lay.batch_indices)
         s = self.run.spec
-        bk.wrapper.plan(lay.qo_indptr_h, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim,
+        fi_plan(bk.wrapper, lay.qo_indptr_h, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim,
                         self.kv.page_size, causal=True, q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _body(self, bk: _Bucket) -> torch.Tensor:
@@ -153,7 +154,7 @@ class ChunkPrefillGraphs:
         bk.positions.copy_(lay.positions)
         bk.batch_idx.copy_(lay.batch_indices)
         s = self.run.spec
-        bk.wrapper.plan(lay.qo_indptr_h, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim,
+        fi_plan(bk.wrapper, lay.qo_indptr_h, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim,
                         self.kv.page_size, causal=True, q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
         return lay
 

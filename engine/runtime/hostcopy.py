@@ -18,3 +18,20 @@ def host(data, dtype=torch.int32) -> torch.Tensor:
 
 def to_device(data, dtype=torch.int32, device="cuda") -> torch.Tensor:
     return torch.tensor(data, dtype=dtype).to(device, non_blocking=True)
+
+
+def plan(wrapper, *args, **kwargs) -> None:
+    """``wrapper.plan(*args, **kwargs)`` for a FlashInfer wrapper, ordered against its previous plan.
+
+    ``plan`` writes the plan into the wrapper's page-locked host buffer and uploads it with an asynchronous copy on the
+    current stream.  With host inputs nothing synchronizes before that write, so a second plan of the same wrapper could
+    overwrite the buffer while the first upload is still queued (the replay that follows it would read the second plan:
+    an illegal memory access under load).  Each plan therefore waits for its predecessor's upload, an event recorded
+    right after it, and not for the work queued behind it."""
+    done = getattr(wrapper, "_engine_plan_done", None)
+    if done is not None:
+        done.synchronize()
+    wrapper.plan(*args, **kwargs)
+    ev = torch.cuda.Event()
+    ev.record()
+    wrapper._engine_plan_done = ev

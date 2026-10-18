@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.runtime.fp8 import linear
+from engine.runtime.hostcopy import plan as fi_plan
 from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights, hf_rms_norm, hf_rope, hf_rope_tables
 
 PAD_SEQ_BASE = 1 << 41
@@ -112,7 +113,7 @@ class ThinkerDecoder:
         bk.indices[: lay.kv_indices.numel()].copy_(lay.kv_indices)
         bk.last.copy_(lay.kv_last_page_len)
         s = self.spec
-        bk.wrapper.plan(lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
+        fi_plan(bk.wrapper, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _capture(self, bk: _Bucket) -> None:

@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.runtime.fp8 import linear
+from engine.runtime.hostcopy import plan as fi_plan
 
 
 @dataclass(frozen=True)
@@ -176,7 +177,7 @@ class DecoderRunner:
 
     def plan(self, lay: BatchLayout) -> None:
         s = self.spec
-        self.prefill.plan(lay.qo_indptr_h, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim,
+        fi_plan(self.prefill, lay.qo_indptr_h, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim,
                           self.kv.page_size, causal=True, q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def forward(self, x: torch.Tensor, lay: BatchLayout) -> torch.Tensor:

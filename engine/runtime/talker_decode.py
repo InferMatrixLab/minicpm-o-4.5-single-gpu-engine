@@ -19,6 +19,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from engine.runtime.hostcopy import plan as fi_plan
 from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights
 from engine.talker_sampler import PAD, TalkerSampling, draw, repetition_penalty, top_p_top_k_filter
 
@@ -113,7 +114,7 @@ class TalkerDecoder:
         bk.indices[:n].copy_(lay.kv_indices)
         bk.last.copy_(lay.kv_last_page_len)
         s = self.spec
-        bk.wrapper.plan(lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
+        fi_plan(bk.wrapper, lay.kv_indptr_h, lay.kv_indices, lay.kv_last_page_len_h, s.num_heads, s.num_kv_heads, s.head_dim, self.kv.page_size,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _plan_lengths(self, bk: _Bucket, rows: list[int], lengths: list[int]) -> None:
@@ -129,7 +130,7 @@ class TalkerDecoder:
         bk.last.copy_(last, non_blocking=True)
         s = self.spec
         # the plan reads the index pointers and last-page lengths on the host, the indices on the device
-        bk.wrapper.plan(indptr, idx.to(self.device, non_blocking=True), last, s.num_heads, s.num_kv_heads, s.head_dim, ps,
+        fi_plan(bk.wrapper, indptr, idx.to(self.device, non_blocking=True), last, s.num_heads, s.num_kv_heads, s.head_dim, ps,
                         q_data_type=self.kv.k.dtype, kv_data_type=self.kv.k.dtype)
 
     def _capture(self, bk: _Bucket) -> None:

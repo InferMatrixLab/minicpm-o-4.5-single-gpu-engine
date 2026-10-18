@@ -29,7 +29,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.runtime.dit_kernels import conv_gather, ln_mish, ln_mod, qk_norm_scatter
-from engine.runtime.hostcopy import host, to_device
+from engine.runtime.hostcopy import host, plan as fi_plan, to_device
 
 TRIM_SUFFIX = 100
 ROW_BUCKETS = (2, 4, 8, 16, 32, 64)  # request rows (2 x requests), excluding the two pad rows
@@ -302,7 +302,7 @@ class FastDiT:
             qo = torch.tensor([0] * (rb // 2 + 1) + [nb // 2] * (rb // 2 + 1) + [nb], dtype=torch.int32, device=self.device)
             kv = torch.tensor([0] * (rb // 2 + 1) + [cap // 2] * (rb // 2 + 1) + [cap], dtype=torch.int32, device=self.device)
             idx = torch.tensor(self.pad_slots, dtype=torch.int32, device=self.device).repeat(cap // len(self.pad_slots) + 1)[:cap]
-            self._gw[rb].plan(qo, kv, idx, torch.ones(R, dtype=torch.int32, device=self.device), self.heads, self.heads, self.hd, 1,
+            fi_plan(self._gw[rb], qo, kv, idx, torch.ones(R, dtype=torch.int32, device=self.device), self.heads, self.heads, self.hd, 1,
                               causal=False, q_data_type=self.dtype, kv_data_type=self.dtype)
         return self._gw[rb]
 
@@ -342,7 +342,7 @@ class FastDiT:
         dev = self.device
         qo_t = torch.tensor(qo, dtype=torch.int32, device=dev)
         idx = torch.tensor(self.pad_slots[:nb], dtype=torch.int32, device=dev)
-        w.plan(qo_t, qo_t, idx, torch.ones(R, dtype=torch.int32, device=dev), self.heads, self.heads, self.hd, 1, causal=False,
+        fi_plan(w, qo_t, qo_t, idx, torch.ones(R, dtype=torch.int32, device=dev), self.heads, self.heads, self.hd, 1, causal=False,
                q_data_type=self.dtype, kv_data_type=self.dtype)
         buf["slots"].copy_(idx.long())
         rows = [r for r in range(R) for _ in range(qo[r + 1] - qo[r])]
@@ -396,7 +396,7 @@ class FastDiT:
         if p["bucket"] is not None:
             self.capture(*p["bucket"])
             g, buf, w = self.graphs[p["bucket"]]
-            w.plan(p["qo"], p["kv"], p["kv_idx"], p["last"], self.heads, self.heads, self.hd, 1, causal=False, q_data_type=self.dtype,
+            fi_plan(w, p["qo"], p["kv"], p["kv_idx"], p["last"], self.heads, self.heads, self.hd, 1, causal=False, q_data_type=self.dtype,
                    kv_data_type=self.dtype)
             buf["x0"].copy_(x0)
             buf["static"].copy_(static)
@@ -409,7 +409,7 @@ class FastDiT:
             x = buf["out"]
             self.counts["graph"] += 1
         else:
-            self.attn.plan(p["qo"], p["kv"], p["kv_idx"], p["last"], self.heads, self.heads, self.hd, 1, causal=False, q_data_type=self.dtype,
+            fi_plan(self.attn, p["qo"], p["kv"], p["kv_idx"], p["last"], self.heads, self.heads, self.hd, 1, causal=False, q_data_type=self.dtype,
                            kv_data_type=self.dtype)
             buf = {"x0": x0, "static": static, "out": torch.empty_like(x0), "slots": p["slots"], "meta": p["meta"], "rd": p["rd"], "wr": p["wr"]}
             self._body(buf, self.attn)
