@@ -1,0 +1,28 @@
+{
+ "description": "Round-11 measurement on GPU2 with the host-copy change and its plan-ordering fix (e73aced; the r11b cells of 3c6aebe hit a FlashInfer plan-buffer race): track_s_fast_r11, K=5, eval IDs; compared with r11 (1fab3f0)",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 2,
+ "port": 18932,
+ "run_order_seed": 20261030,
+ "concurrencies": [
+  1,
+  4,
+  16
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r11",
+   "label": "r11c",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
