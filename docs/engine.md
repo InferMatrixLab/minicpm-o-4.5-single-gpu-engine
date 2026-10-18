@@ -176,6 +176,24 @@ audio.
   - A stage trace's heartbeat is a monotonic completeness watermark: every stage that began before it is in the file. It never passes the earliest start of a stage still running or waiting for its end event, and failing stages end their spans.
   - One raw-inventory validator serves traced analysis and untraced controls: three successful, finite, in-window samples without foreign processes, and the summary reconciled with them. A failed `nvidia-smi` query fails its sample, each sample records per-process ownership evidence, and an invalid untraced control writes `valid: false` and returns 1.
   - The round-12 records pass it (three in-window samples per window, one owned MPS server, no foreign process); they predate the per-process ownership field.
+- **Round 14: whole-K Talker capture — neutral (`talker_whole_k`, off; b544107).**
+  - One CUDA graph per (bucket, K, page-crossing pattern) holds all K frames of a block. A frame attends through the FlashInfer wrapper of the last planned frame (frame 0 and the frames where a row starts a page, as the per-frame path re-plans), the others advance its last-page fill in the graph. Codes go to a fixed [K, rows] output copied once. Every pattern is captured at startup.
+  - Bitwise equal to the per-frame graph and the eager path (codes, sampler state, KV) for 16- and 128-token pages, K=4/8, mid-block EOS, padding and a row cancelled between blocks (`tests/engine/test_talker_decode.py`).
+  - Served, spans-only, paired from the same frozen worktree (`results/engine_profile/r14b_pair_{r11,r14}`): C=1 385.8 / 385.8 fps, C=8 1109.5 / 1087.8, C=16 1656.6 / 1616.7, C=32 2481.7 / 2427.8. The K-step decode stays ~10 ms of host time per call (10.07 / 9.99 at C=32): the host waits for the K frames' GPU work at the copy, and the saved replays and clones are tens of microseconds.
+  - An earlier variant that planned every frame (`r14_pair_*`) was slower per call (10.0 -> 10.7 ms at C=32).
+  - Not promoted. The lever this points to is the tick's two GPU waits (Thinker step, Talker step), not the launches.
+- **Round 14: HiFT bucket sets on matched inputs, and an AC-3.4 finding (B24).**
+  - `tools/spike/hift_bucket_matched.py` (`results/engine_profile/r14_hift_matched.json`, b544107 clean) uses the 32-utterance served-path workload with the batched setup encoder: strict FP32 once, current buckets twice, extended buckets twice.
+
+    | comparison | max | median |
+    |---|---|---|
+    | repeat spread, current buckets | 2.0e-4 | 0 |
+    | repeat spread, extended buckets | 2.5e-4 | 0 |
+    | extended vs current | 1.4e-3 | 0 |
+
+    The extended-vs-current difference exceeds the repeat spread (TF32 algorithm choice depends on batch shape); it lies within the original AC-3.4 bound, which is what that option was measured against.
+  - With the batched setup encoder, the TF32 HiFT upsampling fails the AC-3.4 chunk bound on one of 190 chunks: 1.062e-2 for both bucket sets (utterance 9, chunk 4; next highest 8.3e-3; strict-FP32 run to run 3.9e-6). Without the batched setup the same workload's maximum is 5.34e-3.
+  - The r11c candidate (`track_s_fast_r11`) combines both options, so its HiFT component does not meet AC-3.4 as measured. `tests/engine/test_hift_tf32.py[rows_to_16_batched_setup]` records it as a strict expected failure (B24) until repaired; the r11c performance numbers stand, its numerical qualification does not.
 - **Remaining levers, by the round-11 measurements:**
   - The worker idles during that wait. Overlapping it with setups and the next call's host work, as implemented in round 12 (asynchronous results, at most two calls in flight), does not help: it produced more, smaller calls queueing on the GPU. Other overlap designs remain possible. The measured worker levers are its GPU work (the DiT solve, the setup solve, HiFT) and fewer, larger calls.
   - About half of the engine tick is still host gaps (engine kernel-active 0.46 at C=32 in the CUPTI run): the Talker's per-row bookkeeping (~4 ms a tick at C=32), the K-step decode (3 ms), multi-row Thinker prefills run eagerly (22 ms host vs 12 ms of kernels), and the tick serializes the Thinker's and the Talker's synchronizations.
