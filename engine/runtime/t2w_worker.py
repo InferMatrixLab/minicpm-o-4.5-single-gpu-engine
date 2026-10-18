@@ -399,6 +399,7 @@ class WorkerLoop:
 
     def _setups(self, calls: list) -> bool:
         for b, part in calls:
+            self._complete(block=False)  # a finished call's audio does not wait behind setup host work
             try:
                 t0 = time.perf_counter()
                 tok = self.trace.begin("setup") if self.trace is not None else None
@@ -443,6 +444,7 @@ class WorkerLoop:
             tokens, last, index, t_recv = r.windows.popleft()
             items.append((r.stream, tokens, last))
             meta.append((index, t_recv))
+        self._complete(block=False)
         if self.async_results and len(self.inflight) >= self.max_inflight:
             self._complete(block=True, limit=1)  # bounded: the oldest call's samples first
         try:

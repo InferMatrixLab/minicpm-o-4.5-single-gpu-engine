@@ -38,7 +38,7 @@ import torch
 
 LEAD_S = 5.0  # the profiler starts this long before a window (its start-up, measured ~2 s under load, stays outside it)
 MARKERS = 16  # marker kernels before and after each capture
-_TRACES: list = []  # this process's traces (the kernel-window thread flushes them every second)
+_TRACES: list = []  # this process's traces (the flusher thread writes them every second)
 
 
 class StageTrace:
@@ -105,6 +105,16 @@ class StageTrace:
 
 
 _REGISTRY_LOCK = threading.Lock()
+_FLUSHER: dict[int, threading.Thread] = {}
+
+
+def _flush_loop() -> None:
+    """Every second, flush every trace of this process (idle ones too: their heartbeats show that a window's rows are
+    complete), with or without kernel windows."""
+    while True:
+        time.sleep(1.0)
+        for tr in list(_TRACES):
+            tr.flush(block=False)
 
 
 def register(directory: Path, proc: str, trace_name: str) -> None:
@@ -118,6 +128,9 @@ def register(directory: Path, proc: str, trace_name: str) -> None:
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "t": time.perf_counter(), "traces": []}
         if trace_name not in rec["traces"]:
             rec["traces"].append(trace_name)
+        if os.getpid() not in _FLUSHER:
+            _FLUSHER[os.getpid()] = threading.Thread(target=_flush_loop, daemon=True, name="stage-trace-flush")
+            _FLUSHER[os.getpid()].start()
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(rec))
         tmp.replace(p)
@@ -152,13 +165,8 @@ class KernelWindows(threading.Thread):
         torch.cuda.set_device(self.device)
         self.stream = torch.cuda.Stream()
         done: set = set()
-        last = 0.0
         while True:
             time.sleep(0.05)
-            if time.perf_counter() - last >= 1.0:  # idle threads' traces too: their heartbeats cover every window
-                last = time.perf_counter()
-                for tr in list(_TRACES):
-                    tr.flush(block=False)
             try:
                 wins = json.loads(self.control.read_text()) if self.control.exists() else []
             except (OSError, ValueError):
