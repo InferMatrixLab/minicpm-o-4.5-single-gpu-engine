@@ -138,8 +138,38 @@ audio.
     - The GPU suites pass as at 1fab3f0: 35 passed, and the 2 failures that predate this round fail identically there. The formal six-C sweep of e73aced is `r11c` (below).
     - Formal sweep `r11c` (e73aced code, six C, K=5, evaluation IDs; `results/engine_sweeps/r11c_gpu{2,3}`): 30 runs valid, no failed request, six cells verify (`r11c_verify.log`). Against r11 (`r11c_vs_r11.log`): throughput +0.5% / +0.8% / +2.3% / +2.5% / +3.0% / +3.6% at C = 1/2/4/8/16/32 (2437 vs 2353 fps at C=32; LCB > 1 except C=1, 0.999); TTFA p50 -1.0..-3.0% at C=2..32, unchanged at C=1. Envelope (`r11c_envelope.log`): still 10 of 24 LCB >= 2.0 (all TTFA); throughput LCB 1.061-1.420, RTF 1.083-1.460; failing TTFA p50 C=2 1.997/1.951 and C=32 1.590/1.550.
     - The crashed run also showed two queued operations gaps. The worker's feature processes outlived it (Q1/worker death). The engine server ignored SIGTERM after the error, so the profiler's launcher kill left it running (Q6). Both were stopped by exact PID.
+- **Round 12: attribution consumer checks (B23 residuals, 4ee6aa4 / d7c920e).**
+  - Every stage trace registers in its process's registry (`procs/<proc>-<pid>.json`, `traces`), and a per-process thread flushes every trace each second, so idle traces write heartbeats in spans-only runs too.
+  - The analysis rejects (`tests/engine_api/test_kernel_attribution.py`, 21 tests):
+    - a registered trace without its file (a whole lost stage file and one lost split-thread file);
+    - a capture of another process, PID or tag, and a requested window its markers do not bracket (a valid [10,11] capture analysed for [20,21] used to read as idle);
+    - a registered trace that starts inside a window or has no heartbeat after it (spans-only analyses too);
+    - a missing `gpm.jsonl`, or a required counter (SM utilization, occupancy, DRAM bandwidth, tensor pipes) with finite samples over less than 90% of the window. Means and coverage are per counter, and an unavailable sample is missing evidence, not zero: 100% then null now reads 100% at 50% coverage, not 50%.
+  - The run identity records the repo fingerprint (commit, tracked-diff digest), the source-tree digest, every untracked source file's digest and the engine environment's package digest.
+  - The run's own MPS server is the one whose control daemon serves this run's pipe directory; an MPS server of another daemon is foreign even under the same user.
+  - The GPU inventory is sampled three times inside every measured window. The analysis refuses a window without samples or with a foreign process.
+- **Round 12: clean attribution of `track_s_fast_r11`** (frozen worktree d7c920e: clean, no untracked source; GPU inventory sampled in every window, no foreign process; every coverage check passes; `results/engine_profile/r12_pair2_sync` spans-only, `r12_attr_kernels` CUPTI, `r12_attr_untraced` untraced).
+  - GPM SM utilization at C = 1/8/16/32: untraced 45.7 / 64.4 / 65.8 / 67.2%, spans-only 44.6 / 64.2 / 65.3 / 66.8%, CUPTI 36.5 / 59.7 / 57.8 / 56.5%. The round-11 "~50% SM" figure was the instrumented one; the unperturbed server uses about two thirds of the SMs at C >= 8, with occupancy 15-22% and DRAM bandwidth 21-23%.
+  - CUPTI run, kernel-active per process at C=32: engine 0.48, Token2Wav worker 0.68.
+  - Kernel time per call at C=32: Talker K-step decode 6.9 ms, worker DiT solve 18.9 ms, HiFT 28.1 ms per decode call, setup solve 23.1 ms.
+  - Throughput: untraced 400 / 1142 / 1695 / 2490 fps, spans-only 387 / 1097 / 1659 / 2460, CUPTI 358 / 982 / 1473 / 2179.
+- **Round 12: asynchronous Token2Wav results — negative (`t2w_async_results`, off; 4ee6aa4 / d7c920e).**
+  - `BatchedToken2Wav.decode(async_result=True)` queues a call's GPU work and a non-blocking copy into a pinned host tensor plus an event. `WorkerLoop` keeps at most two calls in flight and emits them in call order once copied, dropping the samples of requests closed meanwhile.
+  - Exact: CPU loop tests cover order, done, close while pending, the bound, failures, and the same messages as the synchronous loop. On the GPU, 36 windows are within 4.2e-5 of the synchronous path (the decode's own spread).
+  - Stress (C=16/32, 4 × 2 min, untraced): 8,717 requests, none invalid.
+  - Served, spans-only, paired runs from the same frozen worktree (`results/engine_profile/r12_pair2_{sync,async}`):
+
+    | C | sync fps / TTFA p50 | async fps / TTFA p50 |
+    |---|---|---|
+    | 1 | 387 / 128 ms | 387 / 129 ms |
+    | 8 | 1097 / 359 ms | 1058 / 399 ms |
+    | 16 | 1659 / 469 ms | 1620 / 510 ms |
+    | 32 | 2460 / 643 ms | 2460 / 683 ms |
+
+    An earlier pair before the completion-polling refinement (`r12_pair_*`) gave the same picture.
+  - Cause: with calls in flight the worker launches more, smaller decode calls (C=32: 8.3/s × 14.3 rows instead of 6.1/s × 19.5). They queue behind each other on a GPU already at 67-69% SM utilization (untraced spans-only GPM), so a window's launch-to-emission time grows (C=32 137 -> 171 ms) and setups wait behind queued decode work (host 19 -> 37 ms). The worker's remaining time is GPU work under MPS, not host time the overlap could hide.
 - **Remaining levers, by the round-11 measurements:**
-  - The worker idles during that wait. Running setups and the next call's host work while a decode call's GPU work is in flight (asynchronous result copy) is the next worker lever.
+  - The worker idles during that wait. Overlapping it with setups and the next call's host work (asynchronous results) was measured in round 12 and does not help: the worker's remaining time is GPU work beside the engine's under MPS. The worker levers are now its GPU work (the DiT solve, the setup solve, HiFT) and fewer, larger calls.
   - About half of the engine tick is still host gaps (engine kernel-active 0.46 at C=32 in the CUPTI run): the Talker's per-row bookkeeping (~4 ms a tick at C=32), the K-step decode (3 ms), multi-row Thinker prefills run eagerly (22 ms host vs 12 ms of kernels), and the tick serializes the Thinker's and the Talker's synchronizations.
   - The first text chunk (283 ms of the C=32 first audio) scales with the tick.
   - Kernel efficiency: SM utilization ~50-56% with 6-18% occupancy means small kernels; whole K-step capture and fusion target the ~400 kernels of a Talker frame.
