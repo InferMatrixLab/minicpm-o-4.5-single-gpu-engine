@@ -132,7 +132,7 @@ class TrackSBackend:
                  t2w_first_lane_slack_ms: float | None = None, prefill_token_budget: int | None = 2048, prefill_max_age_ms: float = 250.0,
                  prefill_slack_floor_ms: float | None = 300.0, talker_start_budget: int | None = 1024, feature_gpu_tokens: bool = True,
                  feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
-                 t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False):
+                 t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -229,9 +229,10 @@ class TrackSBackend:
                                           "feature_gpu_tokens": feature_gpu_tokens,
                                           "feature_allocator": feature_allocator, "stage_trace_dir": stage_trace_dir,
                                           "t2w_hift_decode_tf32": t2w_hift_decode_tf32,
-                                          "t2w_batch_setup_encoder": t2w_batch_setup_encoder}, self._on_t2w)
+                                          "t2w_batch_setup_encoder": t2w_batch_setup_encoder, "t2w_async_results": t2w_async_results}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
+            assert not t2w_async_results, "asynchronous results are a Token2Wav-process option (t2w_process)"
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
             self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile, euler_graphs=t2w_euler_graphs,
                                               hift_decode_tf32=t2w_hift_decode_tf32, batch_setup_encoder=t2w_batch_setup_encoder)

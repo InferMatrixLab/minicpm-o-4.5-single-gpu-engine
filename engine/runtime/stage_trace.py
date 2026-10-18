@@ -19,8 +19,9 @@ memcpy and memset of the process with its device start/end, and the runtime call
 ``t0`` to after ``t1``.  Around the capture it launches marker kernels on its own stream between two host timestamps:
 each marker's device start lies between them, which bounds the offset of the profiler's clock to the host clock (the
 bound is measured, not assumed).  It writes ``<dir>/kernels/<proc>-<pid>-<tag>.json`` (the trace; ``tools/engine_profile.py`` compresses it after the run) and then
-``...markers.json`` (whose presence marks a complete capture).  Every process registers itself in
-``<dir>/procs/<proc>-<pid>.json`` when its trace is made, so the analysis knows which processes must have windows.
+``...markers.json`` (whose presence marks a complete capture).  Every process registers itself and each stage trace it
+makes in ``<dir>/procs/<proc>-<pid>.json``, so the analysis knows which processes must have windows and which stage
+files must exist.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ class StageTrace:
                                   "ident": threading.get_ident(), "native_id": threading.get_native_id()}) + "\n")
         self.fh.flush()
         _TRACES.append(self)
+        register(directory, proc or name, name)
         if kernel_windows and os.environ.get("STAGE_TRACE_KERNEL_WINDOWS", "1") != "0":  # 0: spans only (overhead bisection)
             KernelWindows.ensure(directory, proc or name)
 
@@ -102,6 +104,25 @@ class StageTrace:
             self.last_flush = time.perf_counter()
 
 
+_REGISTRY_LOCK = threading.Lock()
+
+
+def register(directory: Path, proc: str, trace_name: str) -> None:
+    """``<dir>/procs/<proc>-<pid>.json``: this process and every stage trace (file) it made, so the analysis can require
+    each of them (a lost stage file is not an uninstrumented process)."""
+    with _REGISTRY_LOCK:
+        (directory / "procs").mkdir(parents=True, exist_ok=True)
+        p = directory / "procs" / f"{proc}-{os.getpid()}.json"
+        rec = json.loads(p.read_text()) if p.exists() else {
+            "proc": proc, "pid": os.getpid(), "device": torch.cuda.current_device(), "device_name": torch.cuda.get_device_name(torch.cuda.current_device()),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "t": time.perf_counter(), "traces": []}
+        if trace_name not in rec["traces"]:
+            rec["traces"].append(trace_name)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rec))
+        tmp.replace(p)
+
+
 def span(trace: StageTrace | None, stage: str, n: int = 0):
     """``trace.span(stage, n)``, or nothing when tracing is off."""
     return trace.span(stage, n) if trace is not None else contextlib.nullcontext()
@@ -116,11 +137,6 @@ class KernelWindows(threading.Thread):
     def ensure(cls, directory: Path, proc: str) -> None:
         if os.getpid() in cls._started:
             return
-        (directory / "procs").mkdir(parents=True, exist_ok=True)
-        dev = torch.cuda.current_device()
-        (directory / "procs" / f"{proc}-{os.getpid()}.json").write_text(json.dumps(
-            {"proc": proc, "pid": os.getpid(), "device": dev, "device_name": torch.cuda.get_device_name(dev),
-             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "t": time.perf_counter()}))
         t = cls(directory, proc)
         cls._started[os.getpid()] = t
         t.start()

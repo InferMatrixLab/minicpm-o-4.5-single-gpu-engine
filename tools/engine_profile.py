@@ -90,19 +90,46 @@ def process_tree(pid: int) -> list[dict]:
     return out
 
 
-def inventory(uuid: str, server_pid: int) -> dict:
-    """The GPU's compute processes during a window and whether any is foreign: not in the server's tree and not an MPS
-    server of this user (the private MPS daemon runs detached from the tree)."""
+def _environ(pid: int) -> dict:
+    try:
+        return dict(x.split("=", 1) for x in open(f"/proc/{pid}/environ").read().split("\0") if "=" in x)
+    except OSError:
+        return {}
+
+
+def _ppid(pid: int) -> int | None:
+    try:
+        return int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def inventory(uuid: str, server_pid: int, mps_pipe: str | None) -> dict:
+    """The GPU's compute processes now and whether any is foreign. Owned: the server's process tree, and the MPS server
+    whose control daemon serves this run's own pipe directory (``scripts/serve_engine.sh``: /tmp/cgz-engine-mps-<port>);
+    an MPS server of another daemon is foreign even under the same user."""
     tree = process_tree(server_pid)
     mine = {p["pid"] for p in tree}
     apps = gpu_apps(uuid)
-    foreign = [a for a in apps if a["pid"] not in mine and not (a["name"].endswith("nvidia-cuda-mps-server") and a["uid"] == os.getuid())]
-    return {"gpu_apps": apps, "server_tree": tree, "foreign": foreign}
+    own_mps = [a["pid"] for a in apps if a["name"].endswith("nvidia-cuda-mps-server") and mps_pipe is not None
+               and _environ(_ppid(a["pid"]) or -1).get("CUDA_MPS_PIPE_DIRECTORY") == mps_pipe]
+    foreign = [a for a in apps if a["pid"] not in mine and a["pid"] not in own_mps]
+    return {"t": time.perf_counter(), "gpu_apps": apps, "server_tree": tree, "own_mps_servers": own_mps, "foreign": foreign}
+
+
+SOURCE_DIRS = ("engine", "tools", "scripts", "configs", "bench")
 
 
 def identity(out: Path, cfg_text: str, gpu: int) -> dict:
+    """What ran: the commit, the digest of the tracked diff and the tracked source tree, every untracked source file with
+    its digest, the config, the engine interpreter's packages, the GPU."""
+    from bench.fingerprint import env_fingerprint, file_sha256, repo_fingerprint, tree_sha256
+
     uuid = _sh(["nvidia-smi", "-i", str(gpu), "--query-gpu=uuid", "--format=csv,noheader"])
+    untracked = [f for f in _sh(["git", "ls-files", "--others", "--exclude-standard", "--", *SOURCE_DIRS]).splitlines() if f.endswith((".py", ".sh", ".json"))]
     return {"commit": _sh(["git", "rev-parse", "HEAD"]), "dirty": _sh(["git", "status", "--porcelain", "-uno"]).splitlines(),
+            "repo": repo_fingerprint(ROOT), "source_tree_sha256": tree_sha256(ROOT, SOURCE_DIRS),
+            "untracked_source": {f: file_sha256(ROOT / f) for f in untracked}, "engine_env": env_fingerprint(ENGINE_PY),
             "config_sha256": hashlib.sha256(cfg_text.encode()).hexdigest(), "engine_python": ENGINE_PY,
             "engine_python_version": _sh([ENGINE_PY, "-c", "import sys, torch; print(sys.version.split()[0], torch.__version__, torch.version.cuda)"]),
             "gpu": gpu, "gpu_uuid": uuid, "gpu_name": _sh(["nvidia-smi", "-i", str(gpu), "--query-gpu=name", "--format=csv,noheader"]),
@@ -131,11 +158,19 @@ def expected_processes(cfg: dict) -> dict:
 
 
 def analyze(d: Path) -> dict:
-    from tools.kernel_attribution import analyze_kernels, critical_path, load_stage_files
+    from tools.kernel_attribution import TraceError, analyze_kernels, check_stage_coverage, critical_path, gpm_mean, load_gpm, load_stage_files, registered
 
     run = json.loads((d / "run.json").read_text())
     tr = d / "trace"
     files = load_stage_files(tr)
+    procs = registered(tr, run["expected_processes"], files)
+    gpm = load_gpm(tr)
+    for c, win in run["windows"].items():  # an uncontended comparison needs the owned inventory sampled inside every window
+        inv = win.get("inventory", {})
+        if not inv.get("samples"):
+            raise TraceError(f"window {c}: no GPU inventory sampled inside the measured window")
+        if inv.get("foreign"):
+            raise TraceError(f"window {c}: foreign GPU processes {inv['foreign']}")
     tags = {w["kernel"]["tag"]: (w["kernel"]["t0"], w["kernel"]["t1"]) for w in run["windows"].values() if "kernel" in w}
     kern = analyze_kernels(tr, tags, run["expected_processes"]) if tags else {}  # a spans-only run: no kernel windows
     reqs = _rows(tr / "requests.jsonl")
@@ -144,6 +179,7 @@ def analyze(d: Path) -> dict:
     for c, win in run["windows"].items():
         w0, w1 = win["t0"], win["t1"]
         span = w1 - w0
+        check_stage_coverage(files, procs, w0, w1)  # spans-only runs too: they are the source of host timings
         stages = {}
         for stem, f in files.items():
             proc = stem.split("-")[0] if stem.startswith("feature-") else stem
@@ -163,11 +199,12 @@ def analyze(d: Path) -> dict:
             rs = [r for r in files.get(stem, {"rows": []})["rows"] if r["s"] == s and w0 <= r["c0"] < w1]
             ins = [r for r in rs if k0 <= r["c0"] < k1]
             outs = [r for r in rs if not k0 <= r["c0"] < k1]
-            probe[name] = {"inside_per_s": len(ins) / (k1 - k0) if k1 > k0 else None, "outside_per_s": len(outs) / (span - (k1 - k0)),
+            probe[name] = {"inside_per_s": len(ins) / (k1 - k0) if k1 > k0 else None, "outside_per_s": len(outs) / (span - (k1 - k0)) if span > k1 - k0 else None,
                            "inside_elapsed_ms": 1000 * sum(r["g1"] - r["g0"] for r in ins) / len(ins) if ins else None,
                            "outside_elapsed_ms": 1000 * sum(r["g1"] - r["g0"] for r in outs) / len(outs) if outs else None}
         out["windows"][c] = {
             "window_s": span, "client": win.get("client"), "inventory_foreign": win["inventory"]["foreign"], "capture_perturbation": probe,
+            "gpm_window": gpm_mean(gpm, w0, w1, ("sm_util", "sm_occupancy", "dram_bw_util", "tensor_util")),
             "stages": {k: {"spans_per_s": v["spans"] / span, "rows_mean": v["rows"] / v["spans"], "frames_per_s": v["frames"] / span,
                            "host_ms": 1000 * v["host"] / v["spans"], "elapsed_ms": 1000 * v["elapsed"] / v["spans"]} for k, v in sorted(stages.items())},
             "kernels": kern.get(ktag), "critical_path": critical_path(reqs, w0, w1, client)}
@@ -207,7 +244,7 @@ def _print(out: dict) -> None:
         print("  every window (p50 / p95 ms): " + ", ".join(f"{s} {f(v['p50_ms'], 1)}/{f(v['p95_ms'], 1)}" for s, v in ew.items()))
 
 
-async def _load(url: str, c: int, warm_s: float, measure_s: float, on_window, client_rows: list) -> dict:
+async def _load(url: str, c: int, warm_s: float, measure_s: float, on_window, client_rows: list, sample_inventory=None) -> dict:
     import numpy as np
 
     from bench.adapters import get_adapter
@@ -245,8 +282,15 @@ async def _load(url: str, c: int, warm_s: float, measure_s: float, on_window, cl
             tr = await send_request(session, url, adapter, SimpleNamespace(request_id=f"p{c}-{nxt[0]}"), timeout_s=300, payload=payloads[i])
             done.append(tr)
 
+    samples: list = []
+
+    async def sampler():  # the GPU's process inventory inside the measured window (start, middle, end)
+        for t in (w0 + 1.0, (w0 + w1) / 2, w1 - 1.0):
+            await asyncio.sleep(max(0.0, t - time.perf_counter()))
+            samples.append(await asyncio.to_thread(sample_inventory))
+
     async with make_session() as session:
-        await asyncio.gather(*(client(session) for _ in range(c)))
+        await asyncio.gather(*(client(session) for _ in range(c)), *([sampler()] if sample_inventory is not None else []))
     ms = [request_metrics(t) for t in done]
     for t, m in zip(done, ms):
         client_rows.append({"c": c, "client_id": t.request_id, "engine_id": engine_ids.get(t.request_id), "ok": m.ok, "t_dispatch": m.t_dispatch,
@@ -257,7 +301,7 @@ async def _load(url: str, c: int, warm_s: float, measure_s: float, on_window, cl
               "frames_per_s": 25 * audio / measure_s,  # audio of the requests completing in the window, over the window
               "ttfa_p50_s": float(np.percentile([m.ttfa_s for m in inside], 50)) if inside else None,
               "rtf_mean": float(np.mean([m.rtf for m in inside])) if inside else None}
-    return {"t0": w0, "t1": w1, "client": client}
+    return {"t0": w0, "t1": w1, "client": client, "inventory_samples": samples}
 
 
 def _wait_health(url: str, proc, timeout_s: float = 1800) -> None:
@@ -318,8 +362,9 @@ def cmd_run(a) -> int:
                 tmp.write_text(json.dumps(kwin))
                 tmp.replace(tr / "kernel_windows.json")
 
-            res = asyncio.run(_load(url, c, a.warm_s, a.measure_s, on_window, client_rows))
-            res["inventory"] = inventory(ident["gpu_uuid"], proc.pid)
+            res = asyncio.run(_load(url, c, a.warm_s, a.measure_s, on_window, client_rows,
+                                    lambda: inventory(ident["gpu_uuid"], proc.pid, f"/tmp/cgz-engine-mps-{a.port}/pipe")))
+            res["inventory"] = {"foreign": [f for smp in res["inventory_samples"] for f in smp["foreign"]], "samples": len(res["inventory_samples"])}
             if not (a.no_trace or a.spans_only):
                 res["kernel"] = kwin[-1]
                 res["captures_wait_s"] = wait_captures(tr, kwin[-1]["tag"])  # before the next C: an export never overlaps a window
@@ -338,7 +383,17 @@ def cmd_run(a) -> int:
                 proc.kill()
         gpm.send_signal(signal.SIGTERM)
         gpm.wait(timeout=30)
-    if a.no_trace:  # a control run: client metrics only
+    if a.no_trace:  # a control run: client metrics, the GPU's counters and the inventory per window (control.json)
+        from tools.kernel_attribution import GPM_REQUIRED, gpm_mean, load_gpm
+
+        gpm = load_gpm(tr)
+        ctl = {c: {"client": w["client"], "inventory": w["inventory"], "gpm_window": gpm_mean(gpm, w["t0"], w["t1"], GPM_REQUIRED)}
+               for c, w in run["windows"].items()}
+        (out / "control.json").write_text(json.dumps(ctl, indent=1))
+        for c, v in ctl.items():
+            g = v["gpm_window"]
+            print(f"C={c} fps {v['client']['frames_per_s']:.0f} GPM sm {g['sm_util']:.1f}% occ {g['sm_occupancy']:.1f}% dram {g['dram_bw_util']:.1f}% "
+                  f"tensor {g['tensor_util']:.1f}%  inventory samples {v['inventory']['samples']} foreign {len(v['inventory']['foreign'])}")
         return 0
     for f in sorted((tr / "kernels").glob("*.json")):  # the captures, compressed once the server is gone
         if not f.name.endswith(".markers.json"):

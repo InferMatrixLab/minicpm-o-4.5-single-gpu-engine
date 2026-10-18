@@ -11,6 +11,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -35,12 +36,15 @@ def _markers(t: float, n: int = 16):
 
 
 def _write_dir(d: Path, kernels: list, spans: list, hb: float = 12.0, window=(10.0, 11.0), procs=(("engine", 100),), skip_capture=(), rec_extra=None,
-               waits=()):
+               waits=(), gpm=True, extra_traces=()):
     (d / "procs").mkdir(parents=True)
     (d / "kernels").mkdir()
     w = {"tag": "w", "t0": window[0], "t1": window[1]}
+    if gpm:  # full counter coverage of 0..30 s
+        (d / "gpm.jsonl").write_text("".join(json.dumps({"t0": t, "t1": t + 0.5, "sm_util": 40.0, "sm_occupancy": 10.0, "dram_bw_util": 12.0,
+                                                         "tensor_util": 3.0}) + "\n" for t in np.arange(0, 30, 0.5)))
     for proc, pid in procs:
-        (d / "procs" / f"{proc}-{pid}.json").write_text(json.dumps({"proc": proc, "pid": pid}))
+        (d / "procs" / f"{proc}-{pid}.json").write_text(json.dumps({"proc": proc, "pid": pid, "traces": [proc, *extra_traces]}))
         rows = [{"s": "_start", "c0": 1.0, "pid": pid, "ident": IDENT}] + spans + [{"s": "_hb", "c0": hb}]
         (d / f"{proc}.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
         if (proc, pid) in skip_capture:
@@ -123,6 +127,38 @@ def test_incomplete_traces_are_rejected(tmp_path, case):
         ka.analyze_kernels(tmp_path, {"w": (10.0, 11.0)}, expected)
 
 
+def test_lost_stage_files_are_rejected(tmp_path):
+    _write_dir(tmp_path, KERNELS, SPANS)
+    (tmp_path / "engine.jsonl").unlink()  # the whole stage file: its kernels must not become "outside stages"
+    with pytest.raises(ka.TraceError, match="registered stage trace engine missing"):
+        ka.analyze_kernels(tmp_path, {"w": (10.0, 11.0)}, {"engine": 1})
+    _write_dir(tmp_path / "b", KERNELS, SPANS, extra_traces=("engine-talker",))  # a split-thread trace registered, its file lost
+    with pytest.raises(ka.TraceError, match="engine-talker missing"):
+        ka.analyze_kernels(tmp_path / "b", {"w": (10.0, 11.0)}, {"engine": 1})
+
+
+def test_requested_window_must_be_the_captured_one(tmp_path):
+    _write_dir(tmp_path, KERNELS, SPANS, hb=30.0)  # a valid capture of [10, 11]; heartbeats after 21
+    with pytest.raises(ka.TraceError, match="does not cover"):
+        ka.analyze_kernels(tmp_path, {"w": (20.0, 21.0)}, {"engine": 1})  # read as idle before the repair
+
+
+def test_gpm_coverage_is_per_counter():
+    rows = [{"t0": 0, "t1": 1, "sm_util": 100.0, "tensor_util": 5.0}, {"t0": 1, "t1": 2, "sm_util": None, "tensor_util": float("nan")}]
+    with pytest.raises(ka.TraceError, match="sm_util"):
+        ka.gpm_mean(rows, 0, 2, ("sm_util",))  # half the window has no SM evidence: not "50% utilization"
+    g = ka.gpm_mean(rows, 0, 2, min_coverage=0.0)
+    assert g["sm_util"] == 100.0 and g["coverage"]["sm_util"] == 0.5 and g["tensor_util"] == 5.0
+    with pytest.raises(ka.TraceError, match="dram_bw_util"):  # a counter never sampled
+        ka.gpm_mean([{"t0": 0, "t1": 2, "sm_util": 50.0, "sm_occupancy": 5.0, "tensor_util": 1.0}], 0, 2, ka.GPM_REQUIRED)
+
+
+def test_missing_gpm_file_is_rejected(tmp_path):
+    _write_dir(tmp_path, KERNELS, SPANS, gpm=False)
+    with pytest.raises(ka.TraceError, match="gpm.jsonl missing"):
+        ka.analyze_kernels(tmp_path, {"w": (10.0, 11.0)}, {"engine": 1})
+
+
 def test_thread_key_matches_the_profiler_records():
     # observed: pthread_self 140011243106944 -> runtime records tid 395775360 (tools/spike probe, round 11)
     assert ka.thread_key(140011243106944) == 395775360
@@ -185,3 +221,34 @@ def test_traced_talker_stage_counts_frames():
 
     be._timed("talker", step, rows)
     assert rec == [("talker", 2, 8)]
+
+
+def test_inventory_owns_only_this_runs_mps_server(monkeypatch):
+    import tools.engine_profile as ep
+
+    apps = [{"pid": 11, "name": "/usr/bin/nvidia-cuda-mps-server", "mib": 60, "uid": 1000},  # this run's daemon (pid 10)
+            {"pid": 21, "name": "/usr/bin/nvidia-cuda-mps-server", "mib": 60, "uid": 1000},  # another daemon of the same user
+            {"pid": 5, "name": "python", "mib": 9000, "uid": 1000}]  # the engine (in the server tree)
+    monkeypatch.setattr(ep, "process_tree", lambda pid: [{"pid": 4, "cmd": "launcher"}, {"pid": 5, "cmd": "engine"}])
+    monkeypatch.setattr(ep, "gpu_apps", lambda uuid: apps)
+    monkeypatch.setattr(ep, "_ppid", lambda pid: {11: 10, 21: 20}.get(pid))
+    monkeypatch.setattr(ep, "_environ", lambda pid: {"CUDA_MPS_PIPE_DIRECTORY": {10: "/tmp/cgz-engine-mps-18950/pipe", 20: "/tmp/other/pipe"}[pid]})
+    inv = ep.inventory("uuid", 4, "/tmp/cgz-engine-mps-18950/pipe")
+    assert inv["own_mps_servers"] == [11]
+    assert [f["pid"] for f in inv["foreign"]] == [21]  # same UID is not ownership
+
+
+def test_analysis_requires_an_in_window_uncontended_inventory(tmp_path):
+    import tools.engine_profile as ep
+
+    _write_dir(tmp_path / "trace", KERNELS, SPANS)
+    win = {"t0": 10.0, "t1": 11.0, "client": {}, "kernel": {"tag": "w", "t0": 10.0, "t1": 11.0}}
+    for inv, msg in (({"samples": 0, "foreign": []}, "no GPU inventory"), ({"samples": 3, "foreign": [{"pid": 21}]}, "foreign GPU processes")):
+        (tmp_path / "run.json").write_text(json.dumps({"identity": {}, "config": {}, "expected_processes": {"engine": 1},
+                                                       "windows": {"w": {**win, "inventory": inv}}}))
+        with pytest.raises(ka.TraceError, match=msg):
+            ep.analyze(tmp_path)
+    (tmp_path / "run.json").write_text(json.dumps({"identity": {}, "config": {}, "expected_processes": {"engine": 1},
+                                                   "windows": {"w": {**win, "inventory": {"samples": 3, "foreign": []}}}}))
+    out = ep.analyze(tmp_path)["windows"]["w"]
+    assert out["kernels"]["device"]["active_frac"] == pytest.approx(0.01, abs=1e-4) and out["gpm_window"]["coverage"]["sm_util"] == 1.0

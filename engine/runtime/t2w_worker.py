@@ -316,7 +316,9 @@ class WorkerLoop:
     ``min_batch`` windows wait, a first or last window is among them, or the oldest waited ``max_wait``."""
 
     def __init__(self, bt, emit, resolve, calls_for, policy: Policy, mode: str = "edf", min_batch: int = 8, max_wait: float = 0.04,
-                 clock=time.perf_counter, log=None, note=None):
+                 clock=time.perf_counter, log=None, note=None, async_results: bool = False, max_inflight: int = 2):
+        """``async_results``: a decode call does not wait for its GPU work; its samples are emitted (in call order) once
+        its copy to the host completed, while setups and later calls run; at most ``max_inflight`` calls are pending."""
         if mode not in MODES:
             raise ValueError(f"t2w_policy must be one of {MODES}, not {mode!r}")
         self.bt, self.emit, self.resolve, self.calls_for, self.policy, self.mode = bt, emit, resolve, calls_for, policy, mode
@@ -325,6 +327,8 @@ class WorkerLoop:
         self.note = note
         self.trace = None  # diagnostic stage trace (engine.runtime.stage_trace)
         self.reqs: dict[int, _Req] = {}
+        self.async_results, self.max_inflight = async_results, max(1, max_inflight)
+        self.inflight: deque = deque()  # (pending audio, requests, items, window meta, launch time), in call order
 
     # messages from the engine
     def open(self, seq: int, seed: int, fut) -> None:
@@ -348,6 +352,7 @@ class WorkerLoop:
 
     # one scheduling tick
     def tick(self) -> bool:
+        completed = self._complete(block=False)
         self._resolve_ready()
         ready = sorted((r for r in self.reqs.values() if r.stream is None and r.feat is not None), key=lambda r: r.t_feat)
         calls = [(part[0].t_feat, (b, part)) for b, part in self.calls_for(ready)]
@@ -363,7 +368,7 @@ class WorkerLoop:
                 worked = self._decode(gate=True) or worked
             return worked
         order = [c for _, c in sorted(calls, key=lambda x: x[0])]
-        worked = False
+        worked = completed
         while order and first_lane_open(self._waiting_deadline(), self.clock(), self.policy):
             worked = self._setups([order.pop(0)]) or worked  # the first-chunk lane, rechecked before every call
         worked = self._decode() or worked
@@ -438,20 +443,52 @@ class WorkerLoop:
             tokens, last, index, t_recv = r.windows.popleft()
             items.append((r.stream, tokens, last))
             meta.append((index, t_recv))
+        if self.async_results and len(self.inflight) >= self.max_inflight:
+            self._complete(block=True, limit=1)  # bounded: the oldest call's samples first
         try:
             t0 = time.perf_counter()
             tok = self.trace.begin("decode") if self.trace is not None else None
-            wavs = self.bt.decode(items)
-            if tok is not None:
-                self.trace.end(tok, len(items), sum(len(w) for w in wavs) // 960)  # audio frames (24 kHz, 25 frames/s)
+            wavs = self.bt.decode(items, async_result=True) if self.async_results else self.bt.decode(items)
+            if tok is not None:  # audio frames (24 kHz, 25 frames/s); an asynchronous call's span ends at its launch
+                self.trace.end(tok, len(items), 0 if self.async_results else sum(len(w) for w in wavs) // 960)
             self.log("decode", len(items), t0)
         except Exception as e:
-            for r in sel:
+            self._fail(sel, e)
+            return True
+        if self.async_results:
+            self.inflight.append((wavs, sel, items, meta, t0))
+        else:
+            self._emit_results(sel, items, wavs, meta, t0)
+        return True
+
+    def _fail(self, sel, e) -> None:
+        for r in sel:
+            if self.reqs.get(r.seq) is r:
                 self.emit(("error", r.seq, f"token2wav: {type(e).__name__}: {e}"))
                 self.close(r.seq)
-            return True
+
+    def _complete(self, block: bool, limit: int | None = None) -> bool:
+        """Emit the pending calls whose samples reached the host, oldest first (``block``: wait for the oldest)."""
+        n = 0
+        while self.inflight and (limit is None or n < limit):
+            pend, sel, items, meta, t0 = self.inflight[0]
+            if not (block and n == 0) and not pend.ready():
+                break
+            self.inflight.popleft()
+            n += 1
+            try:
+                wavs = pend.result()
+            except Exception as e:
+                self._fail(sel, e)
+                continue
+            self._emit_results(sel, items, wavs, meta, t0)
+        return n > 0
+
+    def _emit_results(self, sel, items, wavs, meta, t0) -> None:
         sent = self.clock()
         for r, (_, _, last), wav, (index, t_recv) in zip(sel, items, wavs, meta):
+            if self.reqs.get(r.seq) is not r:  # closed while its call was pending: its samples are dropped
+                continue
             if len(wav):
                 # while tracing: the window's index, its receipt, and the decode call's start and end (worker clock)
                 self.emit(("audio", r.seq, r.offset, wav) + ((index, t_recv, t0, sent),) if self.trace is not None else ("audio", r.seq, r.offset, wav))
@@ -460,7 +497,6 @@ class WorkerLoop:
             if last:
                 self.emit(("done", r.seq))
                 self.close(r.seq)
-        return True
 
 
 def worker_main(inq, outq, cfg: dict) -> None:
@@ -609,7 +645,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
             prof.write(f"{time.time():.4f} {line}\n")
 
     loop = WorkerLoop(bt, outq.put, resolve, lambda ready: setup_calls(ready, SETUP_T, ROW_LIMIT), policy, mode=cfg.get("t2w_policy", "edf"),
-                      min_batch=cfg.get("t2w_min_batch", 8), max_wait=cfg.get("t2w_max_wait_ms", 40.0) / 1000, log=log, note=note)
+                      min_batch=cfg.get("t2w_min_batch", 8), max_wait=cfg.get("t2w_max_wait_ms", 40.0) / 1000, log=log, note=note,
+                      async_results=cfg.get("t2w_async_results", False))
     reqs = loop.reqs
 
     def reader():
@@ -685,7 +722,7 @@ def _worker_main(inq, outq, cfg: dict) -> None:
         with torch.inference_mode():
             worked = loop.tick()
         if not worked and not msgs:
-            wake.wait(0.002)
+            wake.wait(0.0005 if loop.inflight else 0.002)  # a pending call's samples are polled more often
             wake.clear()
 
 

@@ -109,6 +109,32 @@ def _block_chunk(block, x, c, cnn_cache, att_cache, mask, tr):
     return x, new_cnn, new_att
 
 
+class PendingAudio:
+    """One decode call's samples on their way to the host: a non-blocking copy into a pinned host tensor on the compute
+    stream, then an event.  The device source is stream-ordered before any later work that could reuse its memory, and
+    the caching host allocator reuses the pinned block only after the copy's event, so the call's owner only has to keep
+    this object until ``result`` (a request closed meanwhile simply drops its samples)."""
+
+    def __init__(self, flat: torch.Tensor | None, spans: list):
+        self.spans = spans
+        self.host = None
+        if flat is not None:
+            self.host = torch.empty(flat.numel(), dtype=flat.dtype, pin_memory=True)
+            self.host.copy_(flat, non_blocking=True)
+        self.event = torch.cuda.Event()
+        self.event.record()
+
+    def ready(self) -> bool:
+        return self.event.query()
+
+    def result(self) -> list[np.ndarray | None]:
+        self.event.synchronize()
+        flat = self.host.numpy() if self.host is not None else np.zeros(0, np.float32)
+        out = [flat[a:b].copy() if sp is not None else None for sp in self.spans for a, b in [sp or (0, 0)]]
+        self.host = None  # the pinned block goes back to the allocator
+        return out
+
+
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
                  fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False,
@@ -153,8 +179,11 @@ class BatchedToken2Wav:
                 self.euler = EulerGraphs(self.flow.decoder, fn, next(est.parameters()).dtype, self.dtype, t2w.n_timesteps)
 
     @torch.inference_mode()
-    def decode(self, items: list[tuple[StreamState, list[int], bool]]) -> list[np.ndarray]:
-        """``items[i] = (stream, window tokens, last)`` -> float32 samples per item, exactly as ``Token2Wav.decode`` each."""
+    def decode(self, items: list[tuple[StreamState, list[int], bool]], async_result: bool = False):
+        """``items[i] = (stream, window tokens, last)`` -> float32 samples per item, exactly as ``Token2Wav.decode`` each.
+
+        ``async_result``: return a ``PendingAudio`` instead, without waiting for the GPU (the samples come through a
+        pinned buffer and an event; every stream's caches are already advanced on the host)."""
         from engine.token2wav_chunker import CHUNK, PRE_LOOKAHEAD
 
         groups = defaultdict(list)
@@ -172,7 +201,7 @@ class BatchedToken2Wav:
                         for i, m in zip(idx, self._prof("flow", len(idx), self._flow, [items[i][0] for i in idx], [items[i][1] for i in idx], last,
                                                         [bool(items[i][2]) for i in idx])):
                             mels[i] = m
-            return self._prof("vocode", len(items), self._vocode, items, mels)
+            return self._prof("vocode", len(items), self._vocode, items, mels, async_result)
 
     def new_stream(self, prompt, noise_seed: int = 0, adopt: bool = False):
         """``Token2Wav.new_stream``; with the fast DiT the stream gets its own copy of the prompt's estimator caches, or
@@ -614,7 +643,7 @@ class BatchedToken2Wav:
         return out
 
     # --- vocoder ------------------------------------------------------------------------------------------------------
-    def _vocode(self, items, mels) -> list[np.ndarray]:
+    def _vocode(self, items, mels, async_result: bool = False):
         """HiFT per group of equal mel / source-cache length, then the reference cross-fade, cache update and trimming on
         the whole group, and one device-to-host copy for the call."""
         groups = defaultdict(list)
@@ -641,10 +670,12 @@ class BatchedToken2Wav:
                 if not last:
                     sp = torch.cat([torch.zeros(SOURCE_CACHE, device=sp.device, dtype=sp.dtype), sp[:-SOURCE_CACHE]]) if first else sp[:-SOURCE_CACHE]
                 pieces.append((i, sp))
-        flat = torch.cat([p for _, p in pieces]).float().cpu().numpy() if pieces else np.zeros(0, np.float32)
-        out: list[np.ndarray | None] = [None] * len(items)
+        spans: list[tuple[int, int] | None] = [None] * len(items)
         o = 0
         for i, p in pieces:
-            out[i] = flat[o:o + p.numel()]
+            spans[i] = (o, o + p.numel())
             o += p.numel()
-        return out
+        if async_result:
+            return PendingAudio(torch.cat([p for _, p in pieces]).float() if pieces else None, spans)
+        flat = torch.cat([p for _, p in pieces]).float().cpu().numpy() if pieces else np.zeros(0, np.float32)
+        return [flat[a:b] if sp is not None else None for sp in spans for a, b in [sp or (0, 0)]]

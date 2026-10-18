@@ -42,6 +42,8 @@ LAUNCH = ("cuda_runtime", "cuda_driver")
 MARKER = "spin_kernel"
 BLOCKING = ("Synchronize", "cudaMemcpy", "cuMemcpy")  # runtime/driver calls that can block the host on the GPU
 ALIGN_TOL_NS = 1000  # timestamp granularity allowed when intersecting marker bounds
+GPM_REQUIRED = ("sm_util", "sm_occupancy", "dram_bw_util", "tensor_util")
+GPM_MIN_COVERAGE = 0.9  # of the window, per required counter, by finite samples
 
 
 class TraceError(Exception):
@@ -104,7 +106,9 @@ def alignment(markers_start: list, markers_end: list, spins: list) -> tuple:
     return to_host, {"halfwidth_start_us": h0 / 1000, "halfwidth_end_us": h1 / 1000, "drift_us": (m1 - m0) / 1000}
 
 
-def load_capture(kdir: Path, marker_file: Path) -> dict:
+def load_capture(kdir: Path, marker_file: Path, want: dict | None = None) -> dict:
+    """``want``: the requested window ``{"tag", "t0", "t1", "proc", "pid"}``; the capture must be that process's capture
+    of that window, and its markers must bracket the requested bounds (not only the bounds it recorded)."""
     rec = json.loads(marker_file.read_text())
     w = rec["window"]
     name = marker_file.name
@@ -112,9 +116,13 @@ def load_capture(kdir: Path, marker_file: Path) -> dict:
         raise TraceError(f"{name}: capture missed its window")
     if rec.get("error"):
         raise TraceError(f"{name}: capture failed: {rec['error']}")
+    if want is not None:
+        if (rec["proc"], rec["pid"], w["tag"]) != (want["proc"], want["pid"], want["tag"]):
+            raise TraceError(f"{name}: capture of {rec['proc']}-{rec['pid']} window {w['tag']}, requested {want['proc']}-{want['pid']} {want['tag']}")
+        w = {**w, "t0": want["t0"], "t1": want["t1"]}
     ms, me = rec["markers_start"], rec["markers_end"]
     if not ms or not me or ms[-1][1] / 1e9 > w["t0"] or me[0][0] / 1e9 < w["t1"]:
-        raise TraceError(f"{name}: capture does not cover its window")
+        raise TraceError(f"{name}: capture does not cover the window [{w['t0']}, {w['t1']}]")
     tr = kdir / rec["trace"]
     if not tr.exists() and (kdir / (rec["trace"] + ".gz")).exists():
         tr = kdir / (rec["trace"] + ".gz")  # compressed after the run
@@ -150,7 +158,7 @@ def load_stage_files(d: Path) -> dict:
         starts = [r for r in rows if r["s"] == "_start"]
         if not starts:  # a stage file of an older format: no process identity
             raise TraceError(f"{p.name}: no _start row")
-        out[p.stem] = {"pid": starts[-1]["pid"], "ident": starts[-1].get("ident"), "rows": [r for r in rows if not r["s"].startswith("_")],
+        out[p.stem] = {"pid": starts[-1]["pid"], "ident": starts[-1].get("ident"), "start": starts[-1]["c0"], "rows": [r for r in rows if not r["s"].startswith("_")],
                        "hb": max((r["c0"] for r in rows if r["s"] == "_hb"), default=None)}
     return out
 
@@ -265,22 +273,33 @@ def attribute_window(tag: str, w0: float, w1: float, captures: list, stage_files
     return res
 
 
-def gpm_mean(rows: list, w0: float, w1: float) -> dict:
-    """Overlap-weighted means of the GPM rows over [w0, w1] (percent), with the covered fraction."""
-    acc, wsum = defaultdict(float), 0.0
+def gpm_mean(rows: list, w0: float, w1: float, required: tuple = (), min_coverage: float = GPM_MIN_COVERAGE) -> dict:
+    """Per counter, the overlap-weighted mean of its finite samples over [w0, w1] (percent) and the fraction of the
+    window those samples cover (``coverage``): an unavailable or nonfinite sample is missing evidence, never zero.
+    Raises ``TraceError`` when a ``required`` counter covers less than ``min_coverage`` of the window."""
+    import math
+
+    acc, cov = defaultdict(float), defaultdict(float)
     for r in rows:
         ov = max(0.0, min(r["t1"], w1) - max(r["t0"], w0))
         if ov <= 0:
             continue
-        wsum += ov
         for k, v in r.items():
-            if k not in ("t0", "t1") and v is not None:
+            if k not in ("t0", "t1") and isinstance(v, (int, float)) and math.isfinite(v):
                 acc[k] += v * ov
-    return {"covered_frac": wsum / (w1 - w0), **{k: v / wsum for k, v in acc.items()}} if wsum else {"covered_frac": 0.0}
+                cov[k] += ov
+    span = w1 - w0
+    out = {k: acc[k] / cov[k] for k in cov if cov[k] > 0}
+    out["coverage"] = {k: cov[k] / span for k in set(cov) | set(required)}
+    short = [k for k in required if out["coverage"].get(k, 0.0) < min_coverage]
+    if short:
+        raise TraceError(f"GPM counters {short} cover less than {min_coverage:.0%} of [{w0}, {w1}] ({ {k: round(out['coverage'].get(k, 0.0), 3) for k in short} })")
+    return out
 
 
-def check_complete(d: Path, tags: list, expected: dict, stage_files: dict) -> list[Path]:
-    """The marker files of every registered process for every window; raises when anything required is missing."""
+def registered(d: Path, expected: dict, stage_files: dict) -> list[dict]:
+    """The registered processes; each must be expected and each of its registered stage traces must exist as a stage
+    file of that process (a lost stage file is rejected, not read as activity outside the stages)."""
     procs = [json.loads(p.read_text()) for p in sorted((d / "procs").glob("*.json"))]
     counts = defaultdict(int)
     for p in procs:
@@ -288,6 +307,30 @@ def check_complete(d: Path, tags: list, expected: dict, stage_files: dict) -> li
     for name, n in expected.items():
         if counts[name] != n:
             raise TraceError(f"{counts[name]} registered {name} processes, {n} expected")
+    for p in procs:
+        if not p.get("traces"):
+            raise TraceError(f"{p['proc']}-{p['pid']}: registry lists no stage traces")
+        for t in p["traces"]:
+            f = stage_files.get(t)
+            if f is None or f["pid"] != p["pid"]:
+                raise TraceError(f"{p['proc']}-{p['pid']}: registered stage trace {t} missing")
+    return procs
+
+
+def check_stage_coverage(stage_files: dict, procs: list, t0: float, t1: float) -> None:
+    """Every registered stage trace started before the window and wrote a heartbeat after it."""
+    for p in procs:
+        for t in p["traces"]:
+            f = stage_files[t]
+            if f["start"] > t0:
+                raise TraceError(f"stage trace {t} starts inside the window [{t0}, {t1}]")
+            if f["hb"] is None or f["hb"] < t1:
+                raise TraceError(f"stage trace {t} has no heartbeat after the window (rows may be incomplete)")
+
+
+def check_complete(d: Path, tags: list, expected: dict, stage_files: dict) -> list[Path]:
+    """The marker files of every registered process for every window; raises when anything required is missing."""
+    procs = registered(d, expected, stage_files)
     missing, files = [], []
     for p in procs:
         for tag in tags:
@@ -371,16 +414,35 @@ def critical_path(requests: list, w0: float, w1: float, client: dict | None = No
     return {"requests": n, "first_audio": {k: summ(v) for k, v in segs.items()}, "every_window": {k: summ(v) for k, v in legs.items()}}
 
 
-def analyze_kernels(d: Path, tags: dict, expected: dict) -> dict:
+def load_gpm(d: Path, required: bool = True) -> list | None:
+    p = d / "gpm.jsonl"
+    if not p.exists():
+        if required:
+            raise TraceError("gpm.jsonl missing: no hardware-counter evidence")
+        return None
+    return [json.loads(x) for x in p.read_text().splitlines() if x.strip()]
+
+
+def analyze_kernels(d: Path, tags: dict, expected: dict, require_gpm: bool = True) -> dict:
     """``tags``: kernel-window tag -> (t0, t1); ``expected``: process name -> count.  Raises ``TraceError`` on an
-    incomplete trace."""
+    incomplete trace (a registered stage file or capture missing, a capture of another process / window or not covering
+    the requested bounds, a required hardware counter without coverage)."""
     stage_files = load_stage_files(d)
     files = check_complete(d, list(tags), expected, stage_files)
-    gpm_p = d / "gpm.jsonl"
-    gpm = [json.loads(x) for x in gpm_p.read_text().splitlines() if x.strip()] if gpm_p.exists() else None
+    procs = {(p["proc"], p["pid"]): p for p in registered(d, expected, stage_files)}
+    gpm = load_gpm(d, require_gpm)
     out = {}
     for tag, (t0, t1) in tags.items():
         check_heartbeats(stage_files, t1)
-        caps = [load_capture(d / "kernels", f) for f in files if f.name.endswith(f"-{tag}.markers.json")]
-        out[tag] = attribute_window(tag, t0, t1, caps, stage_files, gpm)
+        check_stage_coverage(stage_files, list(procs.values()), t0, t1)
+        caps = []
+        for f in files:
+            if not f.name.endswith(f"-{tag}.markers.json"):
+                continue
+            proc, pid = f.name[: -len(f"-{tag}.markers.json")].rsplit("-", 1)
+            caps.append(load_capture(d / "kernels", f, {"proc": proc, "pid": int(pid), "tag": tag, "t0": t0, "t1": t1}))
+        res = attribute_window(tag, t0, t1, caps, stage_files, None)
+        if gpm is not None:
+            res["gpm"] = gpm_mean(gpm, t0, t1, GPM_REQUIRED if require_gpm else ())
+        out[tag] = res
     return out
