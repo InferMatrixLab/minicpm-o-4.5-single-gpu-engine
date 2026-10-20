@@ -17,7 +17,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 REF = ROOT / "results" / "engine_parity" / "track_s_ref_bf16.pt"
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = MODEL_PATH
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or os.environ.get("ENGINE_GPU_TESTS") != "1" or not REF.exists(),
                                 reason="GPU test with the HF Track S reference file")
 

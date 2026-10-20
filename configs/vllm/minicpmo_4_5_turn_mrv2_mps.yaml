@@ -1,3 +1,3 @@
 # MPS-on candidate: the pinned vllm-omni minicpmo_4_5_turn_mrv2.yaml plus vllm-omni's own private-MPS switch.
-base_config: /workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn_mrv2.yaml
+base_config: ../../../vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn_mrv2.yaml
 cuda_mps: true

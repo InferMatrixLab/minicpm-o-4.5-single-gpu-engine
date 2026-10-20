@@ -4,7 +4,6 @@ fp32 isolates the implementation from bf16 accumulation order; the bf16 toleranc
 """
 
 import json
-from pathlib import Path
 
 import pytest
 import torch
@@ -12,7 +11,8 @@ from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
 from engine.models.thinker import Thinker
 
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = MODEL_PATH
 pytestmark = pytest.mark.skipif(not MODEL.exists(), reason="checkpoint not available")
 
 

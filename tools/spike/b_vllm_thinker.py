@@ -7,11 +7,12 @@ condition) are reachable from the public API.
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-MODEL_DIR = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+MODEL_DIR = Path(os.environ.get("MODEL_PATH") or os.path.join(os.environ.get("HF_HUB_CACHE") or os.path.expanduser("~/.cache/huggingface/hub"), "models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582"))
 
 
 def export(dst: Path) -> Path:
@@ -72,4 +73,5 @@ def run(batch: int, out: Path, export_dir: Path) -> dict:
 
 if __name__ == "__main__":
     b = int(sys.argv[1]) if len(sys.argv) > 1 else 8
-    run(b, Path(f"/workspace/cgzheng/cgzheng/qwen3_omni/results/l20x/spike/b_b{b}.json"), Path("/workspace/models/cgzheng/thinker_qwen3_export"))
+    root = Path(__file__).resolve().parents[2]
+    run(b, root / "results" / "l20x" / "spike" / f"b_b{b}.json", Path(os.environ.get("THINKER_EXPORT_DIR", root / "artifacts" / "thinker_qwen3_export")))

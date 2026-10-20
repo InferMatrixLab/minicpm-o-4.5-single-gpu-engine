@@ -36,7 +36,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import random
 import subprocess
 import sys
@@ -49,14 +48,15 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from bench import paths  # noqa: E402
 from evals.evaluator import EVAL_PYTHON, SGLANG_DIR, EvaluatorMismatch, verify_evaluator  # noqa: E402
 
-VLLM_PYTHON = "/workspace/cgzheng/cgzheng/vllm-omni/.venv/bin/python"
-VLLM_DIR = Path("/workspace/cgzheng/cgzheng/vllm-omni")
+VLLM_PYTHON = str(paths.VLLM_OMNI_PYTHON)
+VLLM_DIR = paths.VLLM_OMNI_REPO
 VLLM_COMMIT = "2ec5f265c69520cdd5e5f0a19db485d38885843e"
 VLLM_LOCK = ROOT / "evals" / "vllm-omni-env.lock"
-MODEL_PATH = "/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582"
-DAILY_ROOT = Path("/workspace/models/hub/datasets--liarliar--Daily-Omni/snapshots/bf5a6ee4c829510b7a14869e3104efeafc330b07")
+MODEL_PATH = str(paths.MODEL_PATH)
+DAILY_ROOT = paths.DAILY_OMNI
 EXPECTED_DIR = ROOT / "evals" / "multimodal" / "expected"
 BENCHES = ("mmmu", "mmsu", "daily_omni")
 FLOORS = {"mmmu": 0.64, "mmsu": 0.533, "daily_omni": 0.77}
@@ -242,9 +242,9 @@ def generation_problems(rep: dict, report_dir: Path | None = None) -> list[str]:
 
 
 def _env(gpu: int | None = None) -> dict:
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": "/workspace/models/hub", "HF_HOME": os.environ.get("HF_HOME", "/workspace/models"),
-           "HF_DATASETS_CACHE": os.environ.get("HF_DATASETS_CACHE", "/workspace/models/cgzheng/datasets"),
-           "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules", "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": str(paths.HF_HUB_CACHE), "HF_HOME": str(paths.HF_HOME),
+           "HF_DATASETS_CACHE": str(paths.HF_DATASETS_CACHE),
+           "HF_MODULES_CACHE": str(paths.HF_MODULES_CACHE), "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
     if gpu is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     return env

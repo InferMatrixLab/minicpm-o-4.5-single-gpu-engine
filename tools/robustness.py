@@ -90,7 +90,8 @@ from bench.client import ResponseConsumer, make_session, send_request  # noqa: E
 from bench.metrics import RequestMetrics, request_metrics  # noqa: E402
 from bench.workload import canonical_requests, load_seed_tts_rows, make_id_sets  # noqa: E402
 
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = MODEL_PATH
 WINDOW = 25  # codec frames per steady Token2Wav window (engine.token2wav_chunker.CHUNK)
 IDLE_KEYS = ("admitted", "live", "queued", "thinker_kv_pages_used", "talker_kv_pages_used", "audio_live", "t2w_requests", "t2w_streams",
              "t2w_cache_slots_used")  # zero when drained

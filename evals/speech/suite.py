@@ -16,7 +16,6 @@ evaluator fingerprint is verified before any model is loaded.
 from __future__ import annotations
 
 import argparse
-import os
 import hashlib
 import json
 import subprocess
@@ -32,6 +31,7 @@ import soundfile as sf
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from bench import paths  # noqa: E402
 from bench.verify import verify_cell  # noqa: E402
 from bench.workload import load_seed_tts_rows  # noqa: E402
 from evals.evaluator import ASR_PYTHON, ASSETS_LOCK, EVAL_PYTHON, SETTINGS, SGLANG_DIR, verify_evaluator  # noqa: E402
@@ -151,8 +151,8 @@ def rows_sha256(rows: list[GenRow]) -> str:
 
 
 def _env() -> dict:
-    return {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": "/workspace/models/hub", "HF_HOME": os.environ.get("HF_HOME", "/workspace/models"), "HF_DATASETS_CACHE": os.environ.get("HF_DATASETS_CACHE", "/workspace/models/cgzheng/datasets"),
-            "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules", "HF_HUB_OFFLINE": "1"}
+    return {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "HF_HUB_CACHE": str(paths.HF_HUB_CACHE), "HF_HOME": str(paths.HF_HOME), "HF_DATASETS_CACHE": str(paths.HF_DATASETS_CACHE),
+            "HF_MODULES_CACHE": str(paths.HF_MODULES_CACHE), "HF_HUB_OFFLINE": "1"}
 
 
 def _run_worker(python: str, script: str, job: dict, gpu: int, cwd: Path) -> dict:

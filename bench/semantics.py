@@ -22,16 +22,15 @@ import os
 import subprocess
 from pathlib import Path
 
+from bench import paths
 from bench.eligibility import ConfigClass
 
-VLLM_REPO = Path("/workspace/cgzheng/cgzheng/vllm-omni")
-VLLM_PYTHON = str(VLLM_REPO / ".venv/bin/python")
+VLLM_REPO = paths.VLLM_OMNI_REPO
+VLLM_PYTHON = str(paths.VLLM_OMNI_PYTHON)
 VLLM_DEPLOY_DIR = VLLM_REPO / "vllm_omni" / "deploy"
-SGLANG_REPO = Path("/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main")
+SGLANG_REPO = paths.SGLANG_OMNI_REPO
 SGLANG_CONFIG = SGLANG_REPO / "sglang_omni" / "models" / "minicpm_o" / "config.py"
-MODEL_PATH = os.environ.get(
-    "MODEL_PATH", "/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582"
-)
+MODEL_PATH = str(paths.MODEL_PATH)
 
 #: CLI arguments known not to change the classified semantics (value-taking flags list their arity).
 SEMANTIC_NEUTRAL_ARGS = {"vllm-omni": {}, "sglang-omni": {"--thinker.factory.max_seq_len": 1}}
@@ -97,7 +96,7 @@ def resolve_vllm_configs(configs: list[str]) -> None:
     if not todo:
         return
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "", "HF_HUB_OFFLINE": "1",
-           "HF_MODULES_CACHE": os.environ.get("HF_MODULES_CACHE", "/workspace/models/cgzheng/hf_modules")}
+           "HF_MODULES_CACHE": str(paths.HF_MODULES_CACHE)}
     out = subprocess.run([VLLM_PYTHON, "-c", _RESOLVE, MODEL_PATH, *(k[0] for k in todo)], capture_output=True, text=True, env=env, cwd=str(VLLM_REPO))
     if out.returncode != 0:
         raise SemanticsUnknown(f"vllm-omni resolver failed for {[k[0] for k in todo]}: {out.stderr.strip().splitlines()[-1:]}")

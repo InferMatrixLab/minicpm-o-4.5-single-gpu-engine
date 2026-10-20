@@ -9,9 +9,11 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from bench import paths
+
 SEED_TTS_REPO = "zhaochenyang20/seed-tts-eval"
 SEED_TTS_REVISION = "8f5e1aa2a35d42f42e940074c1983358b9491f89"
-HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE_BENCH", "/workspace/models/hub")
+HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE_BENCH") or str(paths.HF_HUB_CACHE)
 MODEL_REPO = "openbmb/MiniCPM-o-4_5"
 MODEL_REVISION = "503e754207c94da6bb26850b4469f367c9ea3582"
 

@@ -1,0 +1,26 @@
+MiniCPM-o 4.5 single-GPU engine
+
+The engine runs the MiniCPM-o 4.5 checkpoint (openbmb/MiniCPM-o-4_5, revision
+503e754207c94da6bb26850b4469f367c9ea3582), whose weights, processor and model code
+are licensed under Apache-2.0. The engine imports the checkpoint's processor and
+encoder code. engine/models/multimodal.py contains an adapted copy of
+MiniCPMWhisperEncoderLayer.forward for transformers 5.x. engine/runtime/track_s.py
+ports MiniCPMO.streaming_generate and its chunked Talker generation
+(modeling_minicpmo.py, utils.py) to the paged runtime.
+
+The Token2Wav reference modules (stepaudio2: Token2wav, the CosyVoice2 flow and
+HiFT) come from minicpmo-utils 1.0.6, Apache-2.0. engine/models/token2wav.py,
+engine/runtime/token2wav_batch.py, engine/runtime/dit_fast.py and the graph
+modules restructure that computation for batched, slot-cached and graph-captured
+execution; they are tested against the reference modules.
+
+FlashInfer, Triton and PyTorch provide GPU operators. No vLLM or SGLang engine,
+scheduler or serving pipeline runs inside the engine. vLLM-Omni and SGLang-Omni
+(Apache-2.0) are run unmodified as baselines from pinned checkouts; the speech
+evaluation imports SGLang-Omni's Seed-TTS WER and speaker-similarity tools from
+the pinned checkout. evals/speech/wavlm_blocked.py evaluates the attention of the
+pinned WavLM scorer (s3prl) in query blocks over the same elements.
+
+Model weights, datasets and evaluation audio are downloaded separately and are
+not included in this repository. The Apache-2.0 text is in
+third_party_licenses/Apache-2.0.txt.

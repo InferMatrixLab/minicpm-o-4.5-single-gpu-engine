@@ -1,0 +1,647 @@
+{
+ "schema": "winners/v1",
+ "gpu_class": {
+  "gpu_driver": "570.133.20",
+  "gpu_memory_mib": "143771",
+  "gpu_sku": "L20X"
+ },
+ "selected_on": "tuning",
+ "metrics": {
+  "throughput": "max",
+  "ttfa_p50": "min",
+  "ttfa_p95": "min",
+  "rtf_mean": "min"
+ },
+ "qualification": {
+  "path": "results/l20x/campaign/qualification_v2/campaign_qualification.json",
+  "sha256": "bcb0ad262aa0195e17fa4400a1421ec5557656ffb386a3b1df3a7a989a468527"
+ },
+ "sweeps": [
+  "results/l20x/campaign/tune_gpu1",
+  "results/l20x/campaign/tune_gpu2",
+  "results/l20x/campaign/tune_gpu3"
+ ],
+ "eligible": [
+  "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+  "sglang-omni:speech-mps-off:748941674fb6",
+  "sglang-omni:speech-mps-on:ac0e44a46d2d",
+  "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+  "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+  "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+  "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1"
+ ],
+ "excluded": {
+  "vllm-omni:minicpmo_4_5_turn_mrv2_h200-mps-off:dc79a33becca": "not-qualified; class_r=True",
+  "vllm-omni:minicpmo_4_5_turn_mrv2_mps-mps-on:6fa348f474ac": "not-qualified; class_r=True"
+ },
+ "values": {
+  "1": {
+   "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+    "cell": "results/l20x/campaign/tune_gpu1/05_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c1",
+    "k": 2,
+    "experiment_digest": "9efad4b651c6e887d54184d35b0ebe18d121950af434ebe18429511870957707",
+    "throughput": 196.28285476474807,
+    "ttfa_p50": 0.3018466951325536,
+    "ttfa_p95": 0.3376016475260258,
+    "rtf_mean": 0.1291324835311834
+   },
+   "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac": {
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "cell": "results/l20x/campaign/tune_gpu1/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c1",
+    "k": 2,
+    "experiment_digest": "93b554e7c2365d5ee01fd188bc18d800fea28550738df5d4c700e58f62b4f29b",
+    "throughput": 270.7026090587629,
+    "ttfa_p50": 0.38608789816498756,
+    "ttfa_p95": 0.5082818624563515,
+    "rtf_mean": 0.09594844638729279
+   },
+   "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68": {
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "cell": "results/l20x/campaign/tune_gpu1/08_sglang-omni_speech-mps-off_748941674fb6_c1",
+    "k": 2,
+    "experiment_digest": "6a07d7368d5c99869b26bac2bdfea7206151e2c94edbcc695c709d225a4c0140",
+    "throughput": 265.1676301333381,
+    "ttfa_p50": 0.39481780771166086,
+    "ttfa_p95": 0.5173108057118952,
+    "rtf_mean": 0.09801165430167064
+   },
+   "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "cell": "results/l20x/campaign/tune_gpu1/02_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c1",
+    "k": 2,
+    "experiment_digest": "4529941c25dc70dc32820adf88461dfc3ccf09b84d721891e0936ebbbdbd855d",
+    "throughput": 194.09234459138136,
+    "ttfa_p50": 0.30074499640613794,
+    "ttfa_p95": 0.33677829066291454,
+    "rtf_mean": 0.13052738578320255
+   },
+   "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f": {
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "cell": "results/l20x/campaign/tune_gpu1/11_sglang-omni_speech-mps-on_ac0e44a46d2d_c1",
+    "k": 2,
+    "experiment_digest": "aa81ddd987f5e31f8dcd7975fd104aae8e84488a825bd439c8e60090c2a067ec",
+    "throughput": 256.33742017510326,
+    "ttfa_p50": 0.4075315911322832,
+    "ttfa_p95": 0.5367709330283106,
+    "rtf_mean": 0.10128721107036565
+   },
+   "b85b1a2728b48ccc658c4311c39ddd148e8711bdf7708d686ccac4a3d7414d72": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+    "cell": "results/l20x/campaign/tune_gpu1/06_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c1",
+    "k": 2,
+    "experiment_digest": "983d4b058e448d7ed824ec430193cd44a10f79cac037156f6927a74e711a2575",
+    "throughput": 194.46904651662012,
+    "ttfa_p50": 0.3955673398450017,
+    "ttfa_p95": 0.43467030255123973,
+    "rtf_mean": 0.13180155206746477
+   },
+   "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "cell": "results/l20x/campaign/tune_gpu1/10_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c1",
+    "k": 2,
+    "experiment_digest": "c1c53b73cb3f93d1812fdf13fc685a103f8a4da454b188d2847351491ff23269",
+    "throughput": 197.41254189737373,
+    "ttfa_p50": 0.384003265760839,
+    "ttfa_p95": 0.4225868107751012,
+    "rtf_mean": 0.12989529696305208
+   }
+  },
+  "2": {
+   "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+    "cell": "results/l20x/campaign/tune_gpu2/11_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c2",
+    "k": 2,
+    "experiment_digest": "e34aa219d910bdbdcf40e55ccdf3d823a3380643a169fe7778dbc4cb8ab025f5",
+    "throughput": 305.8076175582488,
+    "ttfa_p50": 0.3930404940620065,
+    "ttfa_p95": 0.5185148786753416,
+    "rtf_mean": 0.1663264490690387
+   },
+   "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac": {
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "cell": "results/l20x/campaign/tune_gpu2/06_sglang-omni_speech-mm32k_4ebf4e2bdd31_c2",
+    "k": 2,
+    "experiment_digest": "19c77c5d09a0593bb853bbe4e4487417af811a1fc9e8aca3a5ec84fbf67fc297",
+    "throughput": 424.9089330999641,
+    "ttfa_p50": 0.4977251496165991,
+    "ttfa_p95": 0.6554821903817356,
+    "rtf_mean": 0.1227220079460444
+   },
+   "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68": {
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "cell": "results/l20x/campaign/tune_gpu2/03_sglang-omni_speech-mps-off_748941674fb6_c2",
+    "k": 2,
+    "experiment_digest": "4e41d436ecedbb6d4a7795b5935db3d03b91108642141c0c79b3377ac299674f",
+    "throughput": 431.09179064744046,
+    "ttfa_p50": 0.48854728043079376,
+    "ttfa_p95": 0.6476964150555432,
+    "rtf_mean": 0.12064313520012153
+   },
+   "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "cell": "results/l20x/campaign/tune_gpu2/12_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c2",
+    "k": 2,
+    "experiment_digest": "9aedf5865bf0faa431c507e43ddb9ee231780bca21bcfcf1017d66966a1f474f",
+    "throughput": 312.2824096084355,
+    "ttfa_p50": 0.37928832322359085,
+    "ttfa_p95": 0.46047253040596847,
+    "rtf_mean": 0.16272724790325216
+   },
+   "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f": {
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "cell": "results/l20x/campaign/tune_gpu2/09_sglang-omni_speech-mps-on_ac0e44a46d2d_c2",
+    "k": 2,
+    "experiment_digest": "55079cf81644fdde9f845af6467a159d7e6cd1d483bb8727d6f86063f7ddb7be",
+    "throughput": 437.6108712309189,
+    "ttfa_p50": 0.4791714996099472,
+    "ttfa_p95": 0.634928957093507,
+    "rtf_mean": 0.11886197834543183
+   },
+   "b85b1a2728b48ccc658c4311c39ddd148e8711bdf7708d686ccac4a3d7414d72": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+    "cell": "results/l20x/campaign/tune_gpu2/01_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c2",
+    "k": 2,
+    "experiment_digest": "d006beefaa435a4ea4d4a5be020a4bc8e801b9d1fb5952c4075dd290ef994f8d",
+    "throughput": 263.1289392266541,
+    "ttfa_p50": 0.5125333676114678,
+    "ttfa_p95": 0.6660167495720091,
+    "rtf_mean": 0.1979977519527059
+   },
+   "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "cell": "results/l20x/campaign/tune_gpu2/04_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c2",
+    "k": 2,
+    "experiment_digest": "be47e7ee193447c8e8671b760e724995b79fb04d2721170c2e82996c71408b37",
+    "throughput": 284.56284506143936,
+    "ttfa_p50": 0.43629227951169014,
+    "ttfa_p95": 0.5927212012931704,
+    "rtf_mean": 0.18312191005864742
+   }
+  },
+  "4": {
+   "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+    "cell": "results/l20x/campaign/tune_gpu3/09_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c4",
+    "k": 2,
+    "experiment_digest": "8cece16e895ad805fac5cb089f365486e3bb8d440ea71402244b7d90fb6a2e79",
+    "throughput": 354.97566475050473,
+    "ttfa_p50": 0.8936999384313822,
+    "ttfa_p95": 1.0479133250191808,
+    "rtf_mean": 0.2934914277677916
+   },
+   "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac": {
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "cell": "results/l20x/campaign/tune_gpu3/07_sglang-omni_speech-mm32k_4ebf4e2bdd31_c4",
+    "k": 2,
+    "experiment_digest": "434704b565a817d7da1e8916d22e6e079d974fc2a4cc0d6874ab0e0f80cb458e",
+    "throughput": 636.0063759578293,
+    "ttfa_p50": 0.6552772307768464,
+    "ttfa_p95": 0.8904058868996799,
+    "rtf_mean": 0.16325852570370208
+   },
+   "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68": {
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "cell": "results/l20x/campaign/tune_gpu3/01_sglang-omni_speech-mps-off_748941674fb6_c4",
+    "k": 2,
+    "experiment_digest": "e86971b4b515ecda5773c94602f417c84beee9b1157a17fff1139ec613d67ac6",
+    "throughput": 642.2723456957228,
+    "ttfa_p50": 0.6547896480187774,
+    "ttfa_p95": 0.8834948604926467,
+    "rtf_mean": 0.1615386325333485
+   },
+   "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "cell": "results/l20x/campaign/tune_gpu3/05_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c4",
+    "k": 2,
+    "experiment_digest": "6ce9ac7561a0f50a474e890c2027c3e62fbf55ffb2a85e4da4b73d2c9650d444",
+    "throughput": 383.0529097321058,
+    "ttfa_p50": 0.7158590108156204,
+    "ttfa_p95": 0.9639396646991372,
+    "rtf_mean": 0.2699001326005305
+   },
+   "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f": {
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "cell": "results/l20x/campaign/tune_gpu3/13_sglang-omni_speech-mps-on_ac0e44a46d2d_c4",
+    "k": 2,
+    "experiment_digest": "a37d632315a3febf9ea4727d9357e8be5fa9cf19aa6963c750ee98e05735aef8",
+    "throughput": 687.7742795294394,
+    "ttfa_p50": 0.6019672658294439,
+    "ttfa_p95": 0.8279160817153752,
+    "rtf_mean": 0.15119034039980211
+   },
+   "b85b1a2728b48ccc658c4311c39ddd148e8711bdf7708d686ccac4a3d7414d72": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+    "cell": "results/l20x/campaign/tune_gpu3/03_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c4",
+    "k": 2,
+    "experiment_digest": "5b3660708885eadce5f9b44c6c16837477928b30195ed6c27962b2af7b47db84",
+    "throughput": 331.6009444867671,
+    "ttfa_p50": 0.7863549683243036,
+    "ttfa_p95": 0.9743327217176556,
+    "rtf_mean": 0.3121135244738974
+   },
+   "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "cell": "results/l20x/campaign/tune_gpu3/04_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c4",
+    "k": 2,
+    "experiment_digest": "ebaa244fe0f0324a5b27c64a44f3616b1c2055ba02484e13deb6fb2bc79fae7b",
+    "throughput": 353.18075546856824,
+    "ttfa_p50": 0.6326324008405209,
+    "ttfa_p95": 0.9404964167624712,
+    "rtf_mean": 0.29315168324068575
+   }
+  },
+  "8": {
+   "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+    "cell": "results/l20x/campaign/tune_gpu3/10_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c8",
+    "k": 2,
+    "experiment_digest": "b9701caa6396c00edec272102a9f78c04d24f4bd34406f16950bf3e0f20c77ed",
+    "throughput": 373.5549122219552,
+    "ttfa_p50": 1.1887639360502362,
+    "ttfa_p95": 1.633038840536028,
+    "rtf_mean": 0.5460117112098568
+   },
+   "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac": {
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "cell": "results/l20x/campaign/tune_gpu3/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c8",
+    "k": 2,
+    "experiment_digest": "a0ba96c8b0040532402736242682c4236686dda238292331d164a901606cbcd0",
+    "throughput": 980.8406894516686,
+    "ttfa_p50": 0.8901406470686197,
+    "ttfa_p95": 1.1303277927450837,
+    "rtf_mean": 0.20956692314207165
+   },
+   "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68": {
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "cell": "results/l20x/campaign/tune_gpu3/08_sglang-omni_speech-mps-off_748941674fb6_c8",
+    "k": 2,
+    "experiment_digest": "13c0a40429de03622b91002eaab650722153d29ab7c22cc6de4b65a58659875c",
+    "throughput": 937.6017584546669,
+    "ttfa_p50": 0.9423059355467558,
+    "ttfa_p95": 1.1856279013678432,
+    "rtf_mean": 0.22153540895698962
+   },
+   "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "cell": "results/l20x/campaign/tune_gpu3/12_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c8",
+    "k": 2,
+    "experiment_digest": "2636d372fac7e7dd64f8ea7d70caf626976507712439c5c726be55b66dc68515",
+    "throughput": 405.4568147017427,
+    "ttfa_p50": 1.0480972351506352,
+    "ttfa_p95": 1.527626546099782,
+    "rtf_mean": 0.502488901050111
+   },
+   "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f": {
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "cell": "results/l20x/campaign/tune_gpu3/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c8",
+    "k": 2,
+    "experiment_digest": "da667144322f9113783c84471bbf16ae0a9235c22fca7c1bcb05494b83886867",
+    "throughput": 980.8356561966539,
+    "ttfa_p50": 0.8713386300951242,
+    "ttfa_p95": 1.1849751832894981,
+    "rtf_mean": 0.20983664757359496
+   },
+   "b85b1a2728b48ccc658c4311c39ddd148e8711bdf7708d686ccac4a3d7414d72": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+    "cell": "results/l20x/campaign/tune_gpu3/11_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c8",
+    "k": 2,
+    "experiment_digest": "b701d88340eaf4915e55b99d77293798c7417146105dc59f72d76c04a65e382c",
+    "throughput": 355.8563880970969,
+    "ttfa_p50": 0.9861744036898017,
+    "ttfa_p95": 1.5955436675809325,
+    "rtf_mean": 0.5733406266705621
+   },
+   "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "cell": "results/l20x/campaign/tune_gpu3/06_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c8",
+    "k": 2,
+    "experiment_digest": "655e5237d418035180ee76829d903b380d990cd348cc8a409af49f0d892fef27",
+    "throughput": 385.4385296802913,
+    "ttfa_p50": 0.9415355091914535,
+    "ttfa_p95": 1.545476652029902,
+    "rtf_mean": 0.5292347714128158
+   }
+  },
+  "16": {
+   "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+    "cell": "results/l20x/campaign/tune_gpu2/05_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c16",
+    "k": 2,
+    "experiment_digest": "0c0c6999d83cbf4e432b4f33c944bac10e4b5b333539b9c84275ddc3da0c26db",
+    "throughput": 382.9396342688331,
+    "ttfa_p50": 1.8605970153585076,
+    "ttfa_p95": 2.8659065832383934,
+    "rtf_mean": 1.0628792780281824
+   },
+   "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac": {
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "cell": "results/l20x/campaign/tune_gpu2/13_sglang-omni_speech-mm32k_4ebf4e2bdd31_c16",
+    "k": 2,
+    "experiment_digest": "82d0845b0110b45910ebbe99765e6b115a6fd38807736aa310d85390fbe8ba82",
+    "throughput": 1272.9268353591056,
+    "ttfa_p50": 1.2883618026971817,
+    "ttfa_p95": 1.9007414635270838,
+    "rtf_mean": 0.322904460217161
+   },
+   "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68": {
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "cell": "results/l20x/campaign/tune_gpu2/08_sglang-omni_speech-mps-off_748941674fb6_c16",
+    "k": 2,
+    "experiment_digest": "97922874f9f5155e4c2a8feb29f580e7a665221f860f2b1e89ac321df1cd314a",
+    "throughput": 1307.627129976675,
+    "ttfa_p50": 1.2930497815832496,
+    "ttfa_p95": 1.76619086060673,
+    "rtf_mean": 0.31683184867530234
+   },
+   "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "cell": "results/l20x/campaign/tune_gpu2/10_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c16",
+    "k": 2,
+    "experiment_digest": "c6502224c2324462327a01f80c4fb98bc6dfebd0af1eb6e38a161abec01e3ccc",
+    "throughput": 417.58784355851094,
+    "ttfa_p50": 1.5845427382737398,
+    "ttfa_p95": 2.3206031919457017,
+    "rtf_mean": 0.9706396360978367
+   },
+   "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f": {
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "cell": "results/l20x/campaign/tune_gpu2/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c16",
+    "k": 2,
+    "experiment_digest": "d7f8e706611d551b845e50c1f2114af933d8601666dd6b7dd15582c122c35435",
+    "throughput": 1366.9778391803954,
+    "ttfa_p50": 1.223739837296307,
+    "ttfa_p95": 1.6752419912256302,
+    "rtf_mean": 0.3010293148383354
+   },
+   "b85b1a2728b48ccc658c4311c39ddd148e8711bdf7708d686ccac4a3d7414d72": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+    "cell": "results/l20x/campaign/tune_gpu2/07_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c16",
+    "k": 2,
+    "experiment_digest": "aea970f33dbe708728602cc3d4ab48e24fd0bb133fe3987b92c32fd35dece13c",
+    "throughput": 362.8825862282732,
+    "ttfa_p50": 1.1812526592984796,
+    "ttfa_p95": 2.077399095334113,
+    "rtf_mean": 1.1329921385365176
+   },
+   "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "cell": "results/l20x/campaign/tune_gpu2/00_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c16",
+    "k": 2,
+    "experiment_digest": "ab92e0dcb2e521ebe28e24e7c07173d9386bc335bb2bd5b353d00c97af3a6a5a",
+    "throughput": 407.42051764785845,
+    "ttfa_p50": 1.0229373592883348,
+    "ttfa_p95": 1.93492186749354,
+    "rtf_mean": 1.0188383385322566
+   }
+  },
+  "32": {
+   "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+    "cell": "results/l20x/campaign/tune_gpu1/03_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c32",
+    "k": 2,
+    "experiment_digest": "f1acd45b7d8fdce6527ee437a0ec68222c9c38469584a79f934fee6f91d0c1f5",
+    "throughput": 397.0828884433108,
+    "ttfa_p50": 3.6196777587756515,
+    "ttfa_p95": 5.045321376156062,
+    "rtf_mean": 2.0407600359792406
+   },
+   "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac": {
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "cell": "results/l20x/campaign/tune_gpu1/12_sglang-omni_speech-mm32k_4ebf4e2bdd31_c32",
+    "k": 2,
+    "experiment_digest": "c69ecf6fe1b4fdcb7686315616eddb3af469b3379824c6dbef56708bf7254f47",
+    "throughput": 1682.8896534416767,
+    "ttfa_p50": 1.9576306864619255,
+    "ttfa_p95": 2.8074289127252996,
+    "rtf_mean": 0.4952153982070987
+   },
+   "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68": {
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "cell": "results/l20x/campaign/tune_gpu1/07_sglang-omni_speech-mps-off_748941674fb6_c32",
+    "k": 2,
+    "experiment_digest": "10d7f5c242a9058e15d891b7abe693aa842ca141204c80a75fef7207fe8d93da",
+    "throughput": 1862.3669282653323,
+    "ttfa_p50": 1.7778286440297961,
+    "ttfa_p95": 2.515533487126231,
+    "rtf_mean": 0.4421885810916564
+   },
+   "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "cell": "results/l20x/campaign/tune_gpu1/13_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c32",
+    "k": 2,
+    "experiment_digest": "6a2b4b69530d945e0a0faefdcd7e40f685f76a394babf1b47e5119aade9e146b",
+    "throughput": 425.13889085015967,
+    "ttfa_p50": 3.396746135316789,
+    "ttfa_p95": 5.131221025250852,
+    "rtf_mean": 1.8993421776244275
+   },
+   "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f": {
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "cell": "results/l20x/campaign/tune_gpu1/04_sglang-omni_speech-mps-on_ac0e44a46d2d_c32",
+    "k": 2,
+    "experiment_digest": "b3d266257688c3e784eb16258dc057fcd195b42f2f27c9273c7251b71ac1d700",
+    "throughput": 1799.5161010863546,
+    "ttfa_p50": 1.8619358837604523,
+    "ttfa_p95": 2.517897807154803,
+    "rtf_mean": 0.46227963387540616
+   },
+   "b85b1a2728b48ccc658c4311c39ddd148e8711bdf7708d686ccac4a3d7414d72": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+    "cell": "results/l20x/campaign/tune_gpu1/09_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c32",
+    "k": 2,
+    "experiment_digest": "b12f398e8911c9e1a0fd90aa47f93f24d2275aea8574437af7bf02bed3baf461",
+    "throughput": 369.3789916796154,
+    "ttfa_p50": 1.2227459587156773,
+    "ttfa_p95": 3.184199615009129,
+    "rtf_mean": 2.165395585121018
+   },
+   "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6": {
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "cell": "results/l20x/campaign/tune_gpu1/01_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c32",
+    "k": 2,
+    "experiment_digest": "d875b5604416ca68f10fcb6d7e3f2a156c0a850bc9e4cdde223400a08d65fd6e",
+    "throughput": 402.5085442819094,
+    "ttfa_p50": 1.0236237179487944,
+    "ttfa_p95": 3.374034833069891,
+    "rtf_mean": 1.998766609598707
+   }
+  }
+ },
+ "cells": {
+  "1": {
+   "throughput": {
+    "candidate_digest": "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac",
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "value": 270.7026090587629,
+    "cell": "results/l20x/campaign/tune_gpu1/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c1"
+   },
+   "ttfa_p50": {
+    "candidate_digest": "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792",
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "value": 0.30074499640613794,
+    "cell": "results/l20x/campaign/tune_gpu1/02_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c1"
+   },
+   "ttfa_p95": {
+    "candidate_digest": "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792",
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "value": 0.33677829066291454,
+    "cell": "results/l20x/campaign/tune_gpu1/02_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c1"
+   },
+   "rtf_mean": {
+    "candidate_digest": "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac",
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "value": 0.09594844638729279,
+    "cell": "results/l20x/campaign/tune_gpu1/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c1"
+   }
+  },
+  "2": {
+   "throughput": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 437.6108712309189,
+    "cell": "results/l20x/campaign/tune_gpu2/09_sglang-omni_speech-mps-on_ac0e44a46d2d_c2"
+   },
+   "ttfa_p50": {
+    "candidate_digest": "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792",
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "value": 0.37928832322359085,
+    "cell": "results/l20x/campaign/tune_gpu2/12_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c2"
+   },
+   "ttfa_p95": {
+    "candidate_digest": "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792",
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+    "value": 0.46047253040596847,
+    "cell": "results/l20x/campaign/tune_gpu2/12_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c2"
+   },
+   "rtf_mean": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 0.11886197834543183,
+    "cell": "results/l20x/campaign/tune_gpu2/09_sglang-omni_speech-mps-on_ac0e44a46d2d_c2"
+   }
+  },
+  "4": {
+   "throughput": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 687.7742795294394,
+    "cell": "results/l20x/campaign/tune_gpu3/13_sglang-omni_speech-mps-on_ac0e44a46d2d_c4"
+   },
+   "ttfa_p50": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 0.6019672658294439,
+    "cell": "results/l20x/campaign/tune_gpu3/13_sglang-omni_speech-mps-on_ac0e44a46d2d_c4"
+   },
+   "ttfa_p95": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 0.8279160817153752,
+    "cell": "results/l20x/campaign/tune_gpu3/13_sglang-omni_speech-mps-on_ac0e44a46d2d_c4"
+   },
+   "rtf_mean": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 0.15119034039980211,
+    "cell": "results/l20x/campaign/tune_gpu3/13_sglang-omni_speech-mps-on_ac0e44a46d2d_c4"
+   }
+  },
+  "8": {
+   "throughput": {
+    "candidate_digest": "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac",
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "value": 980.8406894516686,
+    "cell": "results/l20x/campaign/tune_gpu3/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c8"
+   },
+   "ttfa_p50": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 0.8713386300951242,
+    "cell": "results/l20x/campaign/tune_gpu3/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c8"
+   },
+   "ttfa_p95": {
+    "candidate_digest": "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac",
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "value": 1.1303277927450837,
+    "cell": "results/l20x/campaign/tune_gpu3/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c8"
+   },
+   "rtf_mean": {
+    "candidate_digest": "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac",
+    "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+    "value": 0.20956692314207165,
+    "cell": "results/l20x/campaign/tune_gpu3/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c8"
+   }
+  },
+  "16": {
+   "throughput": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 1366.9778391803954,
+    "cell": "results/l20x/campaign/tune_gpu2/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c16"
+   },
+   "ttfa_p50": {
+    "candidate_digest": "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6",
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "value": 1.0229373592883348,
+    "cell": "results/l20x/campaign/tune_gpu2/00_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c16"
+   },
+   "ttfa_p95": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 1.6752419912256302,
+    "cell": "results/l20x/campaign/tune_gpu2/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c16"
+   },
+   "rtf_mean": {
+    "candidate_digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+    "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+    "value": 0.3010293148383354,
+    "cell": "results/l20x/campaign/tune_gpu2/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c16"
+   }
+  },
+  "32": {
+   "throughput": {
+    "candidate_digest": "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68",
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "value": 1862.3669282653323,
+    "cell": "results/l20x/campaign/tune_gpu1/07_sglang-omni_speech-mps-off_748941674fb6_c32"
+   },
+   "ttfa_p50": {
+    "candidate_digest": "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6",
+    "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+    "value": 1.0236237179487944,
+    "cell": "results/l20x/campaign/tune_gpu1/01_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c32"
+   },
+   "ttfa_p95": {
+    "candidate_digest": "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68",
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "value": 2.515533487126231,
+    "cell": "results/l20x/campaign/tune_gpu1/07_sglang-omni_speech-mps-off_748941674fb6_c32"
+   },
+   "rtf_mean": {
+    "candidate_digest": "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68",
+    "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+    "value": 0.4421885810916564,
+    "cell": "results/l20x/campaign/tune_gpu1/07_sglang-omni_speech-mps-off_748941674fb6_c32"
+   }
+  }
+ },
+ "failures": [
+  {
+   "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+   "concurrency": 8,
+   "reason": "failed attempt",
+   "attempts": [
+    {
+     "cell": "results/l20x/campaign/tune_gpu3/attempts/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c8.20261015-142248",
+     "archived": true,
+     "seed_index": 0,
+     "concurrency": 8,
+     "reasons": [
+      "result.json unreadable: [Errno 2] No such file or directory: 'results/l20x/campaign/tune_gpu3/attempts/02_sglang-omni_speech-mps-on_ac0e44a46d2d_c8.20261015-142248/result.json'"
+     ]
+    }
+   ]
+  }
+ ]
+}

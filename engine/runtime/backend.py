@@ -35,7 +35,8 @@ import torch
 
 from engine.server import AudioChunk, BadRequest, Done, EngineRequest, Overloaded, TextDelta
 
-MODEL_DIR = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL_DIR = MODEL_PATH
 TTS_EOS, IM_END = 151704, 151645
 
 

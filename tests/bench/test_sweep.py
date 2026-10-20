@@ -6,7 +6,6 @@ the fake server's processes.
 """
 
 import asyncio
-import gzip
 import json
 import socket
 import sys

@@ -27,7 +27,6 @@ import asyncio
 import glob
 import gzip
 import json
-import os
 import sys
 import time
 import urllib.request

@@ -1,11 +1,11 @@
 """AC-3.7 probe: FP8 Thinker variants (which projections in FP8) against the BF16 engine Thinker (GPU, diagnostic)."""
 import sys, json, torch
-sys.path.insert(0, "/workspace/cgzheng/cgzheng/qwen3_omni")
-from pathlib import Path
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from engine.models.thinker import Thinker
 from engine.runtime.fp8 import quantize_layers
 from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV, fuse_weights
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = MODEL_PATH
 th = Thinker.load(MODEL, device="cuda"); c = th.cfg
 spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
 kv = PagedKV(spec, 4096); layers = fuse_weights(th.w, spec)

@@ -2,7 +2,7 @@
 
 Run with the vllm-omni environment (the test skips elsewhere):
 
-    /workspace/cgzheng/cgzheng/vllm-omni/.venv/bin/python -m pytest tests/bench/test_vllm_native_crosscheck.py
+    "$OMNI_VLLM_REPO"/.venv/bin/python -m pytest tests/bench/test_vllm_native_crosscheck.py
 
 The native client stamps ``audio_ttfp`` on the first ``modality == "audio"``
 event even when it carries no samples, and ``audio_rtf`` on the last audio

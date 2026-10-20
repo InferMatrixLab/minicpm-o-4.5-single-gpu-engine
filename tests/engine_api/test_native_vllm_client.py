@@ -10,9 +10,13 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-VLLM = Path("/workspace/cgzheng/cgzheng/vllm-omni")
-MODEL = "/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582"
-DATA = "/workspace/models/hub/datasets--zhaochenyang20--seed-tts-eval/snapshots/8f5e1aa2a35d42f42e940074c1983358b9491f89"
+sys.path.insert(0, str(ROOT))
+
+from bench import paths  # noqa: E402
+
+VLLM = paths.VLLM_OMNI_REPO
+MODEL = str(paths.MODEL_PATH)
+DATA = str(paths.SEED_TTS_EVAL)
 pytestmark = pytest.mark.skipif(not (VLLM / ".venv/bin/vllm").exists(), reason="vllm-omni environment not available")
 
 SERVER = """

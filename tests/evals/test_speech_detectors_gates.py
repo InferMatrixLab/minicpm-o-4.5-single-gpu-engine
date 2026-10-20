@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from evals.speech.detectors import RowQuality, corpus_metrics, repetition_flag, silence_profile, truncation_flag, word_recall  # noqa: E402
-from evals.speech.gates import FLOOR_FILTERED_WER, FLOOR_SIM, FLOOR_UTMOS, QRef, absolute_floors, comparative_gates, freeze_qref  # noqa: E402
+from evals.speech.gates import FLOOR_FILTERED_WER, FLOOR_SIM, FLOOR_UTMOS, absolute_floors, comparative_gates, freeze_qref  # noqa: E402
 
 SR = 24000
 

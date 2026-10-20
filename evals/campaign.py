@@ -604,7 +604,7 @@ def _run_mean_ci(vals: np.ndarray, replicates: int = 10000, seed: int = 0) -> tu
 
 def compute_envelope(winners_path: str | Path, sweeps: list[str]) -> dict:
     """The provisional class-R envelope: every (C, metric) winner measured on the evaluation IDs, from verified cells only."""
-    from bench.eligibility import ConfigClass, EnvelopeEntry, validate_envelope
+    from bench.eligibility import EnvelopeEntry, validate_envelope
     from bench.semantics import SemanticsUnknown, class_r
     from bench.stats import StatisticsInputError, per_run_values
     from bench.verify import verify_cell

@@ -3,11 +3,11 @@
 Abandoned: every owner marker PID is dead, the recorded control/server PIDs (if any) are dead, and no live process has
 CUDA_MPS_PIPE_DIRECTORY pointing at the dir.  Its logs and owner markers are copied under results/l20x/mps_probe/abandoned/, then the dir is removed.
 """
-import json, os, shutil, sys, time
+import getpass, json, os, shutil, tempfile, time
 from pathlib import Path
 
-ROOT = Path("/tmp/sglang-omni-mps-cgzheng")
-DEST = Path("/workspace/cgzheng/cgzheng/qwen3_omni/results/l20x/mps_probe/abandoned")
+ROOT = Path(tempfile.gettempdir()) / f"sglang-omni-mps-{getpass.getuser()}"  # sglang_omni.mps.runtime's state dir
+DEST = Path(__file__).resolve().parents[1] / "results" / "l20x" / "mps_probe" / "abandoned"
 
 
 def alive(pid: int) -> bool:

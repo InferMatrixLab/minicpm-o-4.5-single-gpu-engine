@@ -31,12 +31,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from bench import paths  # noqa: E402
 from bench.effective_inputs import EffectiveInput, array_hash, save_dumps  # noqa: E402
 from bench.workload import canonical_requests, load_seed_tts_rows, make_id_sets  # noqa: E402
 
-MODEL_PATH = os.environ.get(
-    "MODEL_PATH", "/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582"
-)
+MODEL_PATH = str(paths.MODEL_PATH)
 T2W_DIR = os.path.join(MODEL_PATH, "assets", "token2wav")
 
 
@@ -179,7 +178,6 @@ def dump_sglang_omni(n: int) -> list[EffectiveInput]:
 
 def dump_engine(n: int) -> list[EffectiveInput]:
     """The engine's own preprocessing: its chat rendering and ``engine.models.token2wav.Token2Wav.prepare`` (run in .venv-engine)."""
-    import soundfile as sf
     from transformers import AutoTokenizer
 
     import io

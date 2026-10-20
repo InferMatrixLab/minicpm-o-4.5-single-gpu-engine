@@ -26,4 +26,4 @@ reference path exactly.
 
 Run the unit tests with `.venv/bin/python -m pytest tests/bench`, and the
 vllm-omni native-client cross-check with the vllm-omni environment:
-`/workspace/cgzheng/cgzheng/vllm-omni/.venv/bin/python -m pytest tests/bench/test_vllm_native_crosscheck.py`.
+`"$OMNI_VLLM_REPO"/.venv/bin/python -m pytest tests/bench/test_vllm_native_crosscheck.py`.

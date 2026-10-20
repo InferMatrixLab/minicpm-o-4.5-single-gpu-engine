@@ -6,9 +6,14 @@
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 
-HUB = Path(os.environ.get("HF_HUB_CACHE", "/workspace/models/hub"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from bench import paths  # noqa: E402
+
+HUB = paths.HF_HUB_CACHE
 SGL_CACHE = Path(os.environ.get("SGLANG_OMNI_CACHE", Path.home() / ".cache" / "sglang-omni"))
 
 REPOS = {

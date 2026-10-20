@@ -10,12 +10,13 @@ the variant's attention is set on the Talker explicitly).
 """
 
 import json
+import os
 import sys
 
 import torch
 import torch.nn.functional as F
 
-MODEL = "/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582"
+MODEL = os.environ.get("MODEL_PATH") or os.path.join(os.environ.get("HF_HUB_CACHE") or os.path.expanduser("~/.cache/huggingface/hub"), "models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
 TREF = "results/engine_parity/thinker_ref_bf16.pt"
 AREF = "results/engine_parity/talker_ref_bf16.pt"
 

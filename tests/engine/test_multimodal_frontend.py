@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from bench import paths
+
 ROOT = Path(__file__).resolve().parents[2]
 SAMPLES = ROOT / "results" / "engine_parity" / "mm_samples.pkl"
 REF = ROOT / "results" / "engine_parity" / "mm_ref_cpu_fp32.pt"
@@ -22,7 +24,7 @@ pytestmark = pytest.mark.skipif(not (SAMPLES.exists() and REF.exists()), reason=
 
 @pytest.fixture(scope="module")
 def results():
-    os.environ.setdefault("HF_MODULES_CACHE", "/workspace/models/cgzheng/hf_modules")
+    os.environ.setdefault("HF_MODULES_CACHE", str(paths.HF_MODULES_CACHE))
     from engine.models.multimodal import MultimodalFrontend
     from engine.testing.mm_samples import MODEL, to_msgs
 
@@ -76,7 +78,7 @@ def test_gpu_bf16_embeddings_match_hf_bf16():
     kernels for the Whisper encoder: layer-0 LayerNorm outputs are identical, its attention output is not), while HF
     bf16 itself is at 0.908 from HF fp32.  Pending a user decision analogous to AC-3.1 (judge against HF's own bf16
     noise); the CPU fp32 parity above passes the literal bound."""
-    os.environ.setdefault("HF_MODULES_CACHE", "/workspace/models/cgzheng/hf_modules")
+    os.environ.setdefault("HF_MODULES_CACHE", str(paths.HF_MODULES_CACHE))
     from engine.models.multimodal import MultimodalFrontend
     from engine.testing.mm_samples import MODEL, to_msgs
 

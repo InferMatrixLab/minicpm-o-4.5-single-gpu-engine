@@ -11,8 +11,10 @@ from pathlib import Path
 
 import numpy as np
 
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
-DAILY = sorted(Path("/workspace/models/hub/datasets--liarliar--Daily-Omni/snapshots").glob("*/Videos"))
+from bench import paths
+from bench.paths import MODEL_PATH
+MODEL = MODEL_PATH
+DAILY = sorted((paths.HF_HUB_CACHE / "datasets--liarliar--Daily-Omni" / "snapshots").glob("*/Videos"))
 
 
 def _images():

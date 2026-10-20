@@ -7,12 +7,12 @@ fewer in the gated residuals), and the slot bookkeeping matches the reference ca
 """
 
 import os
-from pathlib import Path
 
 import pytest
 import torch
 
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = MODEL_PATH
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or os.environ.get("ENGINE_GPU_TESTS") != "1",
                                 reason="GPU test (set ENGINE_GPU_TESTS=1 on a free GPU)")
 

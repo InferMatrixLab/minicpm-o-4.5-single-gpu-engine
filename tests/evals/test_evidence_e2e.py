@@ -273,6 +273,8 @@ def _sweep_spec(tmp_path, name, *, seed, kind, id_set, k, concurrencies, labels,
     return str(out)
 
 
+@pytest.mark.skipif(not any((ROOT / "results" / d / "canonical.jsonl").exists() for d in ("effective_inputs_v1", "effective_inputs")),
+                    reason="canonical effective inputs not generated (python -m bench.effective_dump canonical)")
 def test_full_chain_winners_dref_final_gate(tmp_path, monkeypatch):
     """qualification -> tuning winners -> winner-bound D_ref -> final reports -> complete final Q_ref -> declared engine gate.
 

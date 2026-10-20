@@ -232,15 +232,15 @@ def test_inventory_owns_only_this_runs_mps_server(monkeypatch):
     monkeypatch.setattr(ep, "process_tree", lambda pid: [{"pid": 4, "cmd": "launcher"}, {"pid": 5, "cmd": "engine"}])
     monkeypatch.setattr(ep, "gpu_apps", lambda uuid: apps)
     monkeypatch.setattr(ep, "_ppid", lambda pid: {11: 10, 21: 20}.get(pid))
-    monkeypatch.setattr(ep, "_environ", lambda pid: {"CUDA_MPS_PIPE_DIRECTORY": {10: "/tmp/cgz-engine-mps-18950/pipe", 20: "/tmp/other/pipe"}[pid]})
+    monkeypatch.setattr(ep, "_environ", lambda pid: {"CUDA_MPS_PIPE_DIRECTORY": {10: "/tmp/minicpmo-engine-mps-18950/pipe", 20: "/tmp/other/pipe"}[pid]})
     monkeypatch.setattr(ep, "mps_clients", lambda pipe, pid: {"ok": True, "clients": [5, 77]})  # 77 shares our server unseen by NVML
-    inv = ep.inventory("uuid", 4, "/tmp/cgz-engine-mps-18950/pipe")
+    inv = ep.inventory("uuid", 4, "/tmp/minicpmo-engine-mps-18950/pipe")
     assert inv["own_mps_servers"] == [11]
     assert sorted(f["pid"] for f in inv["foreign"]) == [21, 77]  # same UID is not ownership; a hidden client is foreign
     assert not ep.validate_inventory({"t0": 0, "t1": 1e12, "inventory_samples": [inv] * 3, "inventory": {"samples": 3, "foreign": inv["foreign"]}}) == []
 
 
-PIPE = "/tmp/cgz-engine-mps-18999/pipe"
+PIPE = "/tmp/minicpmo-engine-mps-18999/pipe"
 
 
 def _sample(t, foreign=(), error=None, extra_apps=(), clients=(5, 6), client_query_ok=True, record_foreign=None):

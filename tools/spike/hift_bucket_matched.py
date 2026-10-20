@@ -21,7 +21,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = MODEL_PATH
 N_UTT, FIRST_CHUNK = 32, 8
 EXTENDED = (1, 2, 4, 8, 12, 16, 20, 24, 32)
 

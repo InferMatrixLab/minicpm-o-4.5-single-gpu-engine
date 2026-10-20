@@ -16,14 +16,14 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from bench import paths  # noqa: E402
 from engine.server import BadRequest, parse_request  # noqa: E402
 
 NATIVE_POLICY = {"max_slice_nums": 1, "use_image_id": False}
 
 
 def _body(**kw):
-    img = "data:image/png;base64," + __import__("base64").b64encode((Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/"
-                                                                         "503e754207c94da6bb26850b4469f367c9ea3582/assets/fossil.png")).read_bytes()).decode()
+    img = "data:image/png;base64," + __import__("base64").b64encode((paths.MODEL_PATH / "assets" / "fossil.png").read_bytes()).decode()
     return {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": img}}, {"type": "text", "text": "What is it?"}]}],
             "modalities": ["text"], **kw}
 
@@ -83,7 +83,7 @@ def test_backend_passes_the_policy_and_rejects_prompts_beyond_the_context():
 def test_real_frontend_keeps_long_prompts_whole():
     """A prompt longer than 8192 tokens keeps its final question and consistent image bounds (the processor would have cut
     it at 8192 with its default ``max_length``)."""
-    os.environ.setdefault("HF_MODULES_CACHE", "/workspace/models/cgzheng/hf_modules")
+    os.environ.setdefault("HF_MODULES_CACHE", str(paths.HF_MODULES_CACHE))
     from PIL import Image
 
     from engine.models.multimodal import MultimodalFrontend

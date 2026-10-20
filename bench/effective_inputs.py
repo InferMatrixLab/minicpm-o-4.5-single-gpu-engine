@@ -200,7 +200,9 @@ def save_dumps(path: Path, dumps: list[EffectiveInput]) -> None:
 
 # --- provenance: which execution produced a dump -------------------------------------------------
 PROVENANCE_SCHEMA = "effective_dump/v1"
-STACK_REPOS = {"vllm-omni": "/workspace/cgzheng/cgzheng/vllm-omni", "sglang-omni": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main"}
+from bench.paths import SGLANG_OMNI_REPO, VLLM_OMNI_REPO  # noqa: E402
+
+STACK_REPOS = {"vllm-omni": str(VLLM_OMNI_REPO), "sglang-omni": str(SGLANG_OMNI_REPO)}
 _ADAPTER_MODULE = {"vllm-omni": "vllm_omni", "sglang-omni": "sglang_omni", "engine": "engine"}
 
 

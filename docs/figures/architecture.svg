@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 660" font-family="Helvetica, Arial, sans-serif" font-size="12.5">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+    <style>
+      .proc { fill: #f6f8fa; stroke: #57606a; stroke-width: 1.4; }
+      .mod { fill: #ffffff; stroke: #8c959f; stroke-width: 1; }
+      .gpu { fill: #fff4e5; stroke: #d4a72c; }
+      .title { font-weight: bold; font-size: 14px; fill: #1f2328; }
+      .name { font-weight: bold; fill: #1f2328; }
+      .txt { fill: #424a53; }
+      .note { fill: #57606a; font-size: 11.5px; }
+      .flow { stroke: #444; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+      .ipc { stroke: #9a6700; stroke-width: 1.6; fill: none; stroke-dasharray: 5 3; marker-end: url(#a); }
+    </style>
+  </defs>
+  <rect width="1040" height="660" fill="#ffffff"/>
+  <text x="20" y="28" class="title" font-size="17">MiniCPM-o 4.5 · single-GPU streaming speech engine</text>
+
+  <!-- client -->
+  <rect x="20" y="46" width="1000" height="62" rx="6" class="mod"/>
+  <text x="34" y="66" class="name">Client · OpenAI-compatible POST /v1/chat/completions</text>
+  <text x="34" y="84" class="txt">request: messages with text, image, audio or video parts, a ref_audio voice prompt, Talker sampling and a seed</text>
+  <text x="34" y="100" class="txt">response (SSE): text deltas, and audio deltas carrying base64 24 kHz PCM16 with their sample offsets</text>
+  <path d="M290,108 L290,124" class="flow"/>
+  <path d="M310,124 L310,108" class="flow"/>
+
+  <!-- engine process -->
+  <rect x="20" y="126" width="540" height="420" rx="8" class="proc"/>
+  <text x="34" y="148" class="title">Engine process (one GPU-owner thread)</text>
+
+  <rect x="36" y="160" width="508" height="48" rx="5" class="mod"/>
+  <text x="48" y="178" class="name">HTTP API · engine/server.py</text>
+  <text x="48" y="196" class="txt">aiohttp validation, streaming, disconnect cancellation, /health /info /metrics</text>
+
+  <rect x="36" y="218" width="508" height="62" rx="5" class="mod"/>
+  <text x="48" y="236" class="name">Scheduler tick · runtime/backend_s.py, runtime/t2w_sched.py</text>
+  <text x="48" y="254" class="txt">every decoding row runs every tick; prefills oldest first, 2048 tokens a tick;</text>
+  <text x="48" y="270" class="txt">Thinker and Talker KV committed for a request's lifetime (backpressure)</text>
+
+  <rect x="36" y="290" width="508" height="48" rx="5" class="mod"/>
+  <text x="48" y="308" class="name">Multimodal front end · models/multimodal.py</text>
+  <text x="48" y="326" class="txt">checkpoint processor, SigLIP + resampler, Whisper + projection; IDs equal to HF</text>
+
+  <rect x="36" y="350" width="246" height="130" rx="5" class="mod"/>
+  <text x="48" y="369" class="name">Thinker · Qwen3-8B</text>
+  <text x="48" y="388" class="txt">paged FlashInfer KV (64-token</text>
+  <text x="48" y="404" class="txt">pages), CUDA-graph decode</text>
+  <text x="48" y="420" class="txt">buckets, Triton fused add+norm,</text>
+  <text x="48" y="436" class="txt">q/k norm + RoPE and SiLU-mul</text>
+  <text x="48" y="452" class="txt">with the reference rounding</text>
+  <text x="48" y="470" class="note">greedy text in 10-token chunks</text>
+
+  <rect x="298" y="350" width="246" height="130" rx="5" class="mod"/>
+  <text x="310" y="369" class="name">Talker · 20-layer Llama TTS</text>
+  <text x="310" y="388" class="txt">conditioned in place on the</text>
+  <text x="310" y="404" class="txt">Thinker's hidden states each</text>
+  <text x="310" y="420" class="txt">chunk (Track S); K=4-frame and</text>
+  <text x="310" y="436" class="txt">chunk-prefill CUDA graphs,</text>
+  <text x="310" y="452" class="txt">GPU sampler, per-request RNG</text>
+  <text x="310" y="470" class="note">25 Hz codec tokens</text>
+  <path d="M282,415 L296,415" class="flow"/>
+
+  <text x="36" y="504" class="note">Text deltas go straight to the client. Codec tokens go to the worker in 25-token</text>
+  <text x="36" y="521" class="note">windows; the first window is sent after 8 frames (first-chunk ramp).</text>
+
+  <!-- worker process -->
+  <rect x="620" y="126" width="400" height="420" rx="8" class="proc"/>
+  <text x="634" y="148" class="title">Token2Wav worker process</text>
+
+  <rect x="636" y="160" width="368" height="62" rx="5" class="mod"/>
+  <text x="648" y="178" class="name">Window scheduler · runtime/t2w_worker.py</text>
+  <text x="648" y="196" class="txt">earliest playback deadline first; new voices'</text>
+  <text x="648" y="212" class="txt">setups first while continuations keep 100 ms</text>
+
+  <rect x="636" y="232" width="368" height="48" rx="5" class="mod"/>
+  <text x="648" y="250" class="name">Voice prompt setup</text>
+  <text x="648" y="268" class="txt">one batched flow encoder per call (option)</text>
+
+  <rect x="636" y="290" width="368" height="62" rx="5" class="mod"/>
+  <text x="648" y="308" class="name">Flow · fast DiT solve (FP16, 10 Euler steps)</text>
+  <text x="648" y="326" class="txt">packed ragged rows, page-size-1 slot caches,</text>
+  <text x="648" y="342" class="txt">CUDA graphs per (rows, tokens) bucket</text>
+
+  <rect x="636" y="362" width="368" height="62" rx="5" class="mod"/>
+  <text x="648" y="380" class="name">HiFT vocoder</text>
+  <text x="648" y="398" class="txt">CUDA graphs per row bucket;</text>
+  <text x="648" y="414" class="txt">upsampling stages in TF32 (option)</text>
+
+  <rect x="636" y="434" width="368" height="62" rx="5" class="mod"/>
+  <text x="648" y="452" class="name">4 feature processes</text>
+  <text x="648" y="470" class="txt">CAMPPlus speaker embedding (CPU ONNX)</text>
+  <text x="648" y="486" class="txt">and S3 speech tokens (GPU) per voice</text>
+
+  <text x="636" y="521" class="note">batched decode equals per-stream decode</text>
+
+  <!-- process boundary: engine -> worker windows, worker -> engine audio -->
+  <path d="M544,415 H600 V196 H634" class="ipc"/>
+  <path d="M636,172 H572 V184 H546" class="ipc"/>
+
+  <text x="20" y="572" class="note"><tspan fill="#9a6700">- - →</tspan>  engine → worker: codec windows as integer lists (multiprocessing queue); worker → engine: 24 kHz PCM16 audio chunks, which the API streams on</text>
+
+  <!-- MPS bar -->
+  <rect x="20" y="590" width="1000" height="52" rx="6" class="gpu"/>
+  <text x="34" y="611" class="name">One GPU with a private CUDA MPS daemon per launch</text>
+  <text x="34" y="629" class="txt">engine and worker kernels run concurrently · 7 GPU processes: engine, worker, 4 feature processes, MPS server</text>
+</svg>

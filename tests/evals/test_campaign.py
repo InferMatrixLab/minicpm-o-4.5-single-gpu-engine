@@ -1,10 +1,11 @@
 """Campaign tooling: generated specs, candidate grouping and evidence-derived rows."""
 
-import json
 import sys
+import json
 from pathlib import Path
 
 import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -12,12 +13,17 @@ from evals import campaign  # noqa: E402
 
 
 def test_committed_specs_match_generator():
-    assert campaign.main(["specs", "--check"]) == 0
     specs = [campaign.sweep_spec(s) for s in campaign.SEEDS]
     assert len({s["gpu"] for s in specs}) == 3 and [s["seed_index"] for s in specs] == [0, 1, 2]
     cands = specs[0]["configs"]
     assert sum(c["mps"] == "on" for c in cands) == 4 and sum(c["mps"] == "off" for c in cands) == 5
     assert all(Path(c["config"]).exists() for c in cands if c["mps"] == "on" and c["adapter"] == "vllm-omni")
+    # The committed specs are the executed ones; they name the overlays of the checkout they ran from.
+    recorded = {c["config"] for p in campaign.SPEC_DIR.glob("tune_gpu*.json") for c in json.loads(p.read_text())["configs"]
+                if c["adapter"] == "vllm-omni" and c["mps"] == "on"}
+    if not all(r.startswith(str(campaign.VLLM_MPS_DIR)) for r in recorded):
+        pytest.skip(f"committed specs were recorded in another checkout ({sorted(recorded)[0]})")
+    assert campaign.main(["specs", "--check"]) == 0
 
 
 def test_generated_stages_cover_every_concurrency_once():

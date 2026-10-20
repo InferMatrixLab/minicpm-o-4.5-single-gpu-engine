@@ -17,7 +17,8 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path.cwd()))
-MODEL = Path("/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582")
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = MODEL_PATH
 
 
 @torch.inference_mode()

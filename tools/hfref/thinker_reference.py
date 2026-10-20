@@ -14,7 +14,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-MODEL = "/workspace/models/hub/models--openbmb--MiniCPM-o-4_5/snapshots/503e754207c94da6bb26850b4469f367c9ea3582"
+from bench.paths import MODEL_PATH  # noqa: E402
+MODEL = str(MODEL_PATH)
 GENERAL = ["What is the capital of France?", "Explain photosynthesis in two sentences.", "Write a haiku about rain.",
            "List three prime numbers greater than 100.", "Translate 'good morning' into German.", "Who wrote Pride and Prejudice?",
            "Give me a one-line summary of the theory of relativity.", "What is 17 times 23?", "Name a famous painting by Van Gogh.",

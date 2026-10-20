@@ -21,6 +21,7 @@ from pathlib import Path
 
 import yaml
 
+from bench import paths
 from bench.adapters import get_adapter
 from bench.adapters.vllm_omni import stage_sampling
 from bench.client import make_session, send_request
@@ -44,8 +45,8 @@ from bench.workload import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-VLLM_OMNI = Path("/workspace/cgzheng/cgzheng/vllm-omni")
-SGLANG_OMNI = Path("/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main")
+VLLM_OMNI = paths.VLLM_OMNI_REPO
+SGLANG_OMNI = paths.SGLANG_OMNI_REPO
 DEFAULT_REPOS = {"qwen3_omni": ROOT, "vllm-omni": VLLM_OMNI, "sglang-omni": SGLANG_OMNI}
 DEFAULT_PYTHONS = {
     "bench": sys.executable,
@@ -192,7 +193,7 @@ def make_cell(cand: Candidate, concurrency: int, k: int, id_set: str, seed_index
     return CellSpec(cand, concurrency, k, id_set, seed_index, timeout_s, gpu, workload)
 
 
-ENGINE_PYTHON = "/workspace/cgzheng/cgzheng/qwen3_omni/.venv-engine/bin/python"
+ENGINE_PYTHON = str(paths.ENGINE_PYTHON)
 ADAPTER_PYTHON = {"vllm-omni": DEFAULT_PYTHONS["vllm-omni"], "sglang-omni": DEFAULT_PYTHONS["sglang-omni"],
                   "engine": ENGINE_PYTHON if Path(ENGINE_PYTHON).exists() else sys.executable}
 SERVE_SCRIPTS = {"vllm-omni": "serve_vllm_omni.sh", "sglang-omni": "serve_sglang_omni.sh", "engine": "serve_engine.sh"}

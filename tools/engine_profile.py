@@ -125,7 +125,7 @@ def mps_clients(pipe: str, server_pid: int) -> dict:
 
 def inventory(uuid: str, server_pid: int, mps_pipe: str | None) -> dict:
     """The GPU's compute processes now and whether any is foreign. Owned: the server's process tree, and the MPS server
-    whose control daemon serves this run's own pipe directory (``scripts/serve_engine.sh``: /tmp/cgz-engine-mps-<port>);
+    whose control daemon serves this run's own pipe directory (``scripts/serve_engine.sh``: /tmp/minicpmo-engine-mps-<port>);
     an MPS server of another daemon is foreign even under the same user."""
     try:
         tree = process_tree(server_pid)
@@ -481,7 +481,7 @@ def cmd_run(a) -> int:
                 tmp.replace(tr / "kernel_windows.json")
 
             res = asyncio.run(_load(url, c, a.warm_s, a.measure_s, on_window, client_rows,
-                                    lambda: inventory(ident["gpu_uuid"], proc.pid, f"/tmp/cgz-engine-mps-{a.port}/pipe")))
+                                    lambda: inventory(ident["gpu_uuid"], proc.pid, f"/tmp/minicpmo-engine-mps-{a.port}/pipe")))
             res["inventory"] = {"foreign": [f for smp in res["inventory_samples"] for f in smp["foreign"]], "samples": len(res["inventory_samples"])}
             if not (a.no_trace or a.spans_only):
                 res["kernel"] = kwin[-1]

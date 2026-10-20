@@ -15,11 +15,13 @@ import json
 import subprocess
 from pathlib import Path
 
+from bench import paths
+
 ROOT = Path(__file__).resolve().parents[1]
-SGLANG_DIR = Path("/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main")
+SGLANG_DIR = paths.SGLANG_OMNI_REPO
 SGLANG_COMMIT = "22d4ace88f9547777b819a69d7691204bb9ce847"
-EVAL_PYTHON = "/workspace/cgzheng/cgzheng/omni-baselines/eval-env/bin/python"
-ASR_PYTHON = "/workspace/cgzheng/cgzheng/omni-baselines/asr-env/bin/python"
+EVAL_PYTHON = str(paths.EVAL_ENV / "bin" / "python")
+ASR_PYTHON = str(paths.ASR_ENV / "bin" / "python")
 LOCKS = {"eval-env": (EVAL_PYTHON, ROOT / "evals" / "eval-env.lock"), "asr-env": (ASR_PYTHON, ROOT / "evals" / "asr-env.lock")}
 ASSETS_LOCK = ROOT / "evals" / "assets.lock.json"
 SOURCES = ("evals/speech/asr_worker.py", "evals/speech/scorer_worker.py", "evals/speech/wavlm_blocked.py", "evals/speech/detectors.py",

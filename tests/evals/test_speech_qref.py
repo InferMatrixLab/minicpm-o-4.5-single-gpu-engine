@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from bench.paths import VLLM_OMNI_REPO  # noqa: E402
 from bench.semantics import SemanticsUnknown, class_r  # noqa: E402
 from bench.workload import load_seed_tts_rows, make_id_sets  # noqa: E402
 from evals.speech.detectors import RowQuality  # noqa: E402
@@ -159,8 +160,9 @@ def test_foreign_duration_reference_rejected(tmp_path):
 
 
 # --- class R and qualification (B10) -----------------------------------------------------
-TURN = "/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn.yaml"
-MRV2 = "/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5_turn_mrv2.yaml"
+DEPLOY = VLLM_OMNI_REPO / "vllm_omni" / "deploy"
+TURN = str(DEPLOY / "minicpmo_4_5_turn.yaml")
+MRV2 = str(DEPLOY / "minicpmo_4_5_turn_mrv2.yaml")
 OVERLAYS = {
     "steps8": (MRV2, "connectors:\n  connector_of_shared_memory:\n    extra:\n      token2wav_n_timesteps: 8\n"),
     "flow_fp16": (MRV2, "connectors:\n  connector_of_shared_memory:\n    extra:\n      token2wav_float16: true\n"),
@@ -185,10 +187,10 @@ def test_class_r_from_resolved_semantics(tmp_path):
         paths[name] = tmp_path / f"{name}.yaml"
         paths[name].write_text(f"base_config: {base}\n{body}")
     renamed = tmp_path / "my_turn_profile.yaml"
-    shutil.copy("/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5.yaml", renamed)
+    shutil.copy(DEPLOY / "minicpmo_4_5.yaml", renamed)
     stage_env = tmp_path / "stage_env.yaml"
     stage_env.write_text(f"base_config: {TURN}\nstages:\n  - stage_id: 2\n    env:\n      MINICPMO_CODE2WAV_TF32: \"0\"\n")
-    absolute = "/workspace/cgzheng/cgzheng/vllm-omni/vllm_omni/deploy/minicpmo_4_5.yaml"
+    absolute = str(DEPLOY / "minicpmo_4_5.yaml")
     resolve_vllm_configs(["minicpmo_4_5_turn_mrv2.yaml", absolute, str(renamed), str(stage_env)] + [str(p) for p in paths.values()])
     assert class_r(ident("minicpmo_4_5_turn_mrv2.yaml"), True).is_class_r
     assert not class_r(ident(absolute), True).is_class_r  # default duplex by absolute path

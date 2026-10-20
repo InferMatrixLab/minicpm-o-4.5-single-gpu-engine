@@ -12,13 +12,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 case "$CFG" in /*|*.json) ;; *) CFG="$ROOT/configs/engine/$CFG.json" ;; esac
 cd "$ROOT"
 PY="${ENGINE_PYTHON:-$ROOT/.venv-engine/bin/python}"
-[ -x "$PY" ] || PY=/workspace/cgzheng/cgzheng/qwen3_omni/.venv-engine/bin/python  # frozen worktrees share the engine environment
+[ -x "$PY" ] || PY=python3
 if [ "${ENGINE_MPS:-0}" != 1 ]; then
   exec "$PY" -m engine.server --host 127.0.0.1 --port "$PORT" --config "$CFG" "$@"
 fi
 GPU="${CUDA_VISIBLE_DEVICES:?ENGINE_MPS=1 needs CUDA_VISIBLE_DEVICES}"
 case "$GPU" in GPU-*) UUID=$GPU ;; *) UUID=$(nvidia-smi -i "$GPU" --query-gpu=uuid --format=csv,noheader | tr -d ' ') ;; esac
-D="/tmp/cgz-engine-mps-$PORT"
+D="/tmp/minicpmo-engine-mps-$PORT"
 rm -rf "$D"
 mkdir -p "$D/pipe" "$D/log"
 export CUDA_MPS_PIPE_DIRECTORY="$D/pipe" CUDA_MPS_LOG_DIRECTORY="$D/log"

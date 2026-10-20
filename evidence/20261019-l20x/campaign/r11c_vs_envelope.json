@@ -1,0 +1,242 @@
+[
+  {
+    "C": 1,
+    "metric": "rtf_mean",
+    "point": 1.466,
+    "lcb95": 1.46,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mm32k:4ebf4e2bdd31"
+  },
+  {
+    "C": 1,
+    "metric": "throughput",
+    "point": 1.426,
+    "lcb95": 1.42,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mm32k:4ebf4e2bdd31"
+  },
+  {
+    "C": 1,
+    "metric": "ttfa_p50",
+    "point": 2.34,
+    "lcb95": 2.327,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d"
+  },
+  {
+    "C": 1,
+    "metric": "ttfa_p95",
+    "point": 2.551,
+    "lcb95": 2.497,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d"
+  },
+  {
+    "C": 2,
+    "metric": "rtf_mean",
+    "point": 1.181,
+    "lcb95": 1.169,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 2,
+    "metric": "throughput",
+    "point": 1.157,
+    "lcb95": 1.147,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 2,
+    "metric": "ttfa_p50",
+    "point": 1.997,
+    "lcb95": 1.951,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d"
+  },
+  {
+    "C": 2,
+    "metric": "ttfa_p95",
+    "point": 2.09,
+    "lcb95": 2.043,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d"
+  },
+  {
+    "C": 4,
+    "metric": "rtf_mean",
+    "point": 1.096,
+    "lcb95": 1.083,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 4,
+    "metric": "throughput",
+    "point": 1.074,
+    "lcb95": 1.061,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 4,
+    "metric": "ttfa_p50",
+    "point": 2.237,
+    "lcb95": 2.216,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 4,
+    "metric": "ttfa_p95",
+    "point": 2.678,
+    "lcb95": 2.633,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 8,
+    "metric": "rtf_mean",
+    "point": 1.158,
+    "lcb95": 1.145,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mm32k:4ebf4e2bdd31"
+  },
+  {
+    "C": 8,
+    "metric": "throughput",
+    "point": 1.136,
+    "lcb95": 1.124,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mm32k:4ebf4e2bdd31"
+  },
+  {
+    "C": 8,
+    "metric": "ttfa_p50",
+    "point": 2.362,
+    "lcb95": 2.331,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 8,
+    "metric": "ttfa_p95",
+    "point": 2.75,
+    "lcb95": 2.673,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mm32k:4ebf4e2bdd31"
+  },
+  {
+    "C": 16,
+    "metric": "rtf_mean",
+    "point": 1.168,
+    "lcb95": 1.146,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 10,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 16,
+    "metric": "throughput",
+    "point": 1.15,
+    "lcb95": 1.13,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 10,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 16,
+    "metric": "ttfa_p50",
+    "point": 2.187,
+    "lcb95": 2.141,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1"
+  },
+  {
+    "C": 16,
+    "metric": "ttfa_p95",
+    "point": 2.96,
+    "lcb95": 2.853,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 10,
+    "baseline": "sglang-omni:speech-mps-on:ac0e44a46d2d"
+  },
+  {
+    "C": 32,
+    "metric": "rtf_mean",
+    "point": 1.237,
+    "lcb95": 1.225,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-off:748941674fb6"
+  },
+  {
+    "C": 32,
+    "metric": "throughput",
+    "point": 1.221,
+    "lcb95": 1.21,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-off:748941674fb6"
+  },
+  {
+    "C": 32,
+    "metric": "ttfa_p50",
+    "point": 1.59,
+    "lcb95": 1.55,
+    "verdict": "fail",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1"
+  },
+  {
+    "C": 32,
+    "metric": "ttfa_p95",
+    "point": 2.988,
+    "lcb95": 2.923,
+    "verdict": "pass",
+    "k_engine": 5,
+    "k_baseline": 5,
+    "baseline": "sglang-omni:speech-mps-off:748941674fb6"
+  }
+]
