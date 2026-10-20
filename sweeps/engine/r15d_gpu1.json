@@ -1,0 +1,26 @@
+{
+ "description": "Round-15 measurement on GPU1: track_s_fast_r15d (r15b with ticks above 16 live requests serial), K=5, eval IDs, C=32 only; r15c's gate at 24 fired on 17% of C=32 ticks (thinker.wait 34.5 of 41.6 ticks/s, results/engine_profile/r15_pair4_r15c)",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 1,
+ "port": 18997,
+ "run_order_seed": 20261054,
+ "concurrencies": [
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r15d",
+   "label": "r15d",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
