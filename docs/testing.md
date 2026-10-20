@@ -6,8 +6,8 @@ idle GPU). Commands are in [reproduce-benchmark.md](reproduce-benchmark.md#tests
 | Suite | Environment | Result |
 |---|---|---|
 | `tests/bench`, `tests/evals` (harness, statistics, artifact verification, evaluators, campaign) | `.venv` | 148 passed, 19 skipped |
-| `tests/engine_api` (API, scheduler tick, KV commitments, worker loop, attribution, robustness checker) | `.venv-engine` | 132 passed, 1 skipped |
-| `tests/engine` with `ENGINE_GPU_TESTS=1` (parity, graphs, kernels, Token2Wav) | `.venv-engine`, 1 GPU | 126 passed, 5 failed, 1 expected failure |
+| `tests/engine_api` (API, scheduler tick, KV commitments, worker loop, attribution, robustness checker) | `.venv-engine` | 132 passed, 1 skipped (round 15, df485cf: 135 passed) |
+| `tests/engine` with `ENGINE_GPU_TESTS=1` (parity, graphs, kernels, Token2Wav) | `.venv-engine`, 1 GPU | 126 passed, 5 failed, 1 expected failure (round 15 with per-lane capture streams, df485cf: the same) |
 
 Skips: tests that need the vLLM-Omni environment, generated reference artifacts (`results/...`) or specs recorded in
 the same checkout skip when those are absent.

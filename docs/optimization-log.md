@@ -1,6 +1,6 @@
 # Optimization log
 
-Chronological record of the engine's development, 2026-10-14 to 2026-10-19, on L20X GPUs. "Envelope" is the best
+Chronological record of the engine's development, 2026-10-14 to 2026-10-20, on L20X GPUs. "Envelope" is the best
 baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% lower bound reaches 2.0 (24 cells:
 6 concurrencies × 4 metrics). Full measurements: [engine.md](engine.md).
 
@@ -21,6 +21,7 @@ baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% 
 | 12 | Clean attribution of the unperturbed server; asynchronous Token2Wav results | Negative (C=8 −3.6%, TTFA p50 +40 ms); not adopted | 10 |
 | 13 | HiFT graph buckets above 16 rows | Neutral; not adopted | 10 |
 | 14 | Whole-K Talker capture (one graph per K-frame block); matched HiFT comparison | Neutral; not adopted. Found that TF32 HiFT with the batched setup encoder exceeds the HiFT bound on 1 of 190 chunks | 10 |
+| 15 | Overlapped engine tick: the Thinker step on its own stream beside the Talker step; first-chunk ticks and ticks above 16 live requests serial (`track_s_fast_r15d`); per-lane graph capture streams | Throughput +1.6 to +7.3% at C=1–16, C=32 unchanged; C=2 TTFA p50 −7%. First speech-quality scoring of `track_s_fast_r11`: UTMOS 0.001–0.003 below the floor (r15 unchanged at C=1) | 11 |
 
 ## Lessons recorded on the way
 
@@ -34,3 +35,11 @@ baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% 
 - **Justify every process by measurement.** 12 feature processes were no faster than 4; 15 GPU processes became 7.
 - **Combined options need their own numerical check.** TF32 HiFT and the batched setup encoder each pass the HiFT bound
   and fail it together.
+- **Concurrent graph replays need separate capture streams.** cuBLAS keeps a workspace per (handle, stream) and a
+  captured GEMM keeps its capture stream's. Two lanes captured on torch's shared capture stream share one workspace;
+  replaying them concurrently hung the GPU.
+- **Overlap helps only where the GPU has room.** The overlapped tick gained 2–7% up to C=16 and lost 3% at C=32, where
+  the Token2Wav worker is GPU bound and the extra, smaller engine steps take GPU time from it. A paired profile gave
+  the gate's real firing rate (17% at 24 live requests), which the K=5 cell alone did not.
+- **Score every candidate's quality, including the earlier headline.** `track_s_fast_r11` had performance evidence but
+  had never been scored; its first scoring misses the UTMOS floor.

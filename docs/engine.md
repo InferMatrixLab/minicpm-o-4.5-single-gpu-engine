@@ -194,6 +194,43 @@ audio.
     The extended-vs-current difference exceeds the repeat spread (TF32 algorithm choice depends on batch shape); it lies within the original AC-3.4 bound, which is what that option was measured against.
   - With the batched setup encoder, the TF32 HiFT upsampling fails the AC-3.4 chunk bound on one of 190 chunks: 1.062e-2 for both bucket sets (utterance 9, chunk 4; next highest 8.3e-3; strict-FP32 run to run 3.9e-6). Without the batched setup the same workload's maximum is 5.34e-3.
   - The r11c candidate (`track_s_fast_r11`) combines both options, so its HiFT component does not meet AC-3.4 as measured. `tests/engine/test_hift_tf32.py[rows_to_16_batched_setup]` records it as a strict expected failure (B24) until repaired; the r11c performance numbers stand, its numerical qualification does not.
+- **Round 15: overlapped engine tick (`tick_overlap`, candidates `track_s_fast_r15`, `r15b`, `r15c`; 0fae85c-7c29c85).**
+  - One engine thread queues the Thinker step on its own CUDA stream before the Talker step and collects its tokens after it (pinned host copy, one event), so the tick's two GPU waits overlap. A text chunk passed by the Thinker reaches the Talker on the Talker stream through an event and `record_stream`, one tick later than in the serial tick.
+  - Isolated bound (`tools/spike/tick_overlap_bound.py`, fixed layouts, no worker): serial vs two-stream replay of one Thinker step and K=4 Talker frames saves 12.1-16.9% of the tick's GPU time (8/16 rows 10.40 -> 8.65 ms, 16/32 rows 10.95 -> 9.62 ms).
+  - **cuBLAS workspace hazard.** cuBLAS keeps one workspace per (handle, stream), and a captured GEMM keeps the workspace of its capture stream. Captured on torch's shared default capture stream, the Thinker and Talker graphs shared one workspace; replayed concurrently they corrupted each other's split-K semaphores and the GPU hung (served C=8: 8 invalid requests, the bench stuck in `synchronize`). Graphs of lanes that may replay concurrently are now captured on per-lane streams (`paged.capture_stream`, used by the Thinker/Talker decoders and both prefill graph sets).
+  - `r15` (overlap everywhere). Paired spans-only, tuning IDs, same worktree (`results/engine_profile/r15_pair_{r11,r15}`): C=1 385 / 396 fps, C=4 743 / 806, C=8 1110 / 1180, C=16 1662 / 1736, C=32 2448 / 2435. The one-tick chunk hand-off delays first audio: in its K=5 cells at C=4/8 throughput was +5.4-5.8% and TTFA 3-9% later.
+  - `r15b` (`tick_overlap_first_chunks=False`): a tick whose Thinker step yields some audio request's 11th reply token (`_first_chunk_due`) runs serially, so that chunk starts in the same tick's Talker. Paired (`r15_pair3_{r15b,r11}`): C=1 396 / 387 fps, C=4 816 / 738, C=8 1196 / 1110, C=16 1765 / 1655, C=32 2469 / 2461; TTFA p50 equal or lower at every C.
+  - `r15b` K=5 on evaluation IDs (`sweeps/engine/r15b_gpu{0,1}.json`, `results/engine_sweeps/r15b_gpu{0,1}`, 560f4e4; 30 runs valid, no failed request). Against r11c:
+
+    | C | throughput (fps) | TTFA p50 | TTFA p95 | RTF mean |
+    |---:|---|---|---|---|
+    | 1 | 403.8 vs 397.4 (+1.6%) | 127 vs 126 ms | 139 vs 133 ms | 0.0627 vs 0.0635 |
+    | 2 | 559.2 vs 521.1 (+7.3%) | 178 vs 190 ms | 212 vs 223 ms | 0.0912 vs 0.0975 |
+    | 4 | 802.2 vs 761.9 (+5.3%) | 275 vs 267 ms | 328 vs 308 ms | 0.127 vs 0.134 |
+    | 8 | 1178 vs 1119 (+5.3%) | 366 vs 361 ms | 436 vs 426 ms | 0.173 vs 0.182 |
+    | 16 | 1702 vs 1674 (+1.7%) | 485 vs 484 ms | 586 vs 570 ms | 0.240 vs 0.242 |
+    | 32 | 2358 vs 2437 (−3.3%) | 640 vs 655 ms | 816 vs 795 ms | 0.346 vs 0.335 |
+
+    11 of 24 envelope ratios reach LCB 2.0 (r11c: 10); new is C=2 TTFA p50, 2.140 / LCB 2.092.
+  - Same-day r11 control (`sweeps/engine/r11ctl_gpu1.json`, K=5, C=16/32): 1670 and 2433 fps, within 0.3% of r11c, so the C=32 deficit is the change, not drift. r15b's five C=32 runs are 2342-2376 fps, r11's 2320-2494 (four of five above 2440).
+  - Why C=32 loses: the Token2Wav worker is GPU bound there (decode 5.3 calls/s x ~150 ms, setups 8.2/s). The overlapped tick runs more often (43.6 vs 34 ticks/s in the r15 profile) with smaller Talker batches (13.4 vs 17.4 rows a tick), and the extra engine GPU work is taken from the worker under MPS. HiFT buckets to 32 rows on top (`r15h`, `r15_pair2_*`) stayed neutral.
+  - `tick_overlap_max_live`: a tick with more live requests (Thinker or Talker not done) runs serially. With at most C requests in flight the gate cannot fire at C <= the threshold, where the candidate runs r15b's path.
+    - `r15c` (24): K=5 C=32 (`sweeps/engine/r15c_gpu0.json`, 7c29c85) 2366 fps, still 2.7% below the control. The paired profile (`results/engine_profile/r15_pair4_{r15c,r11}`) shows why: 34.5 of 41.6 ticks/s still overlapped (`engine.thinker.wait`), because most of the 32 requests are in Token2Wav, not in the Thinker or Talker.
+    - **`r15d` (16)**: K=5 C=32 on both GPUs (`sweeps/engine/r15d_gpu{0,1}.json`, df485cf; 10 runs valid, no failed request): 2421 and 2425 fps (runs 2394-2457) against 2433 for the same-day r11 control, TTFA p50 0.656 / 0.663 s (control 0.658), p95 0.794 / 0.811 s (0.813). C=32 is back at r11; C <= 16 keeps r15b's gains.
+  - Round-15 candidate: `track_s_fast_r15d`, throughput against r11c +1.6 / +7.3 / +5.3 / +5.3 / +1.7% at C=1/2/4/8/16 (r15b's cells, the same code path) and −0.4% at C=32 against the same-day control. Envelope at C=32 (`r15d_gpu0`): throughput 1.212 / LCB 1.202, RTF 1.228 / 1.217, TTFA p50 1.588 / 1.544 (fail), TTFA p95 2.989 / 2.915 (pass); with r15b's cells for C <= 16 that is 11 of 24 passes (r11c: 10). Not yet a headline: the evidence snapshot combines two candidates' cells, and the profile is not quality-qualified (B24).
+  - Speech quality, development scope (1088 rows, seed 0, absolute floors). `track_s_fast_r11` is scored here for the first time (`sweeps/engine/r11_quality_gpu1.json`), beside `r15b` (`r15b_quality_gpu0.json`) and a repeat of `r15b` at C=1 (`r15b_quality2_gpu0.json`); `results/engine_sweeps/{r11,r15b,r15b2}_quality_dev_c*.json`.
+
+    | | WER (filtered) | SIM | UTMOS | catastrophic |
+    |---|---:|---:|---:|---:|
+    | `track_s_fast`, C=1 / C=32 (round 8) | 1.40% / 1.37% | 48.93 / 48.88 | 4.1657 / 4.1657 | 2 / 2 |
+    | `r11`, C=1 / C=32 | 1.49% / 1.52% | 49.00 / 48.54 | **4.1625 / 4.1606** | 2 / 1 |
+    | `r15b`, C=1 / C=32 | 1.47% / 1.48% | 49.00 / 48.73 | **4.1625** / 4.1713 | 2 / 3 |
+    | `r15b` repeat, C=1 | 1.48% | 49.00 | 4.1625 | 2 |
+    | absolute floors | ≤ 2.69% | ≥ 41.58 | ≥ 4.1634 | |
+
+    - At C=1 `r15b` equals `r11`: all 1088 durations equal, per-row UTMOS differences sd 1.6e-4 (the r15b repeat: also 1088 equal durations, sd 1.7e-4). The overlap does not change the C=1 output.
+    - At C=32 batch composition changes the audio (209 of 1088 durations equal, per-row UTMOS difference sd 0.23, so the standard error of a mean difference is ~0.007); r11 and r15b are within that noise of each other.
+    - **`track_s_fast_r11` misses the UTMOS floor** at C=1 by 0.0009 (deterministic) and at C=32 by 0.003 (within run noise). Its options over `track_s_fast` are TF32 HiFT, the batched setup encoder and Talker chunk-prefill graphs; the first two are the combination that misses the AC-3.4 HiFT bound (B24). The r11c and r15 performance numbers stand; neither profile is quality-qualified until B24 is repaired.
 - **Remaining levers, by the round-11 measurements:**
   - The worker idles during that wait. Overlapping it with setups and the next call's host work, as implemented in round 12 (asynchronous results, at most two calls in flight), does not help: it produced more, smaller calls queueing on the GPU. Other overlap designs remain possible. The measured worker levers are its GPU work (the DiT solve, the setup solve, HiFT) and fewer, larger calls.
   - About half of the engine tick is still host gaps (engine kernel-active 0.46 at C=32 in the CUPTI run): the Talker's per-row bookkeeping (~4 ms a tick at C=32), the K-step decode (3 ms), multi-row Thinker prefills run eagerly (22 ms host vs 12 ms of kernels), and the tick serializes the Thinker's and the Talker's synchronizations.
