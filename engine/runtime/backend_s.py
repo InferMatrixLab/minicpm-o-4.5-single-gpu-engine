@@ -133,7 +133,7 @@ class TrackSBackend:
                  prefill_slack_floor_ms: float | None = 300.0, talker_start_budget: int | None = 1024, feature_gpu_tokens: bool = True,
                  feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
                  t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False,
-                 t2w_hift_rows: list | None = None, talker_whole_k: bool = False):
+                 t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -267,6 +267,13 @@ class TrackSBackend:
         self.t2w_wake = threading.Event()
         self.t2w_stream = torch.cuda.Stream(device=device)
         self.split_threads = split_threads
+        # tick_overlap: one engine thread, the Thinker step queued on its own stream before the Talker step and collected
+        # after it, so the two GPU waits of a tick overlap (text chunks reach the Talker one tick later)
+        if tick_overlap and split_threads:
+            raise ValueError("tick_overlap and split_threads are alternatives")
+        self.tick_overlap = tick_overlap
+        if tick_overlap:
+            self.thinker_stream, self.talker_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
         if split_threads:  # Thinker and Talker loops on their own threads and CUDA streams (graph replays overlap)
             self.talker_wake = threading.Event()
             self.thinker_stream, self.talker_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
@@ -435,7 +442,7 @@ class TrackSBackend:
             except queue.Empty:
                 pass
             try:
-                with torch.inference_mode():
+                with torch.inference_mode(), torch.cuda.stream(self.talker_stream if self.tick_overlap else torch.cuda.current_stream()):
                     self._tick()
             except Exception as e:  # a failing tick fails its requests, never the engine thread
                 import traceback
@@ -636,7 +643,9 @@ class TrackSBackend:
         rows, urgent = self._prefill_lane([x for x in self.live.values() if not x.thinker_done])
         if self.thinker_lazy and rows and not any(self._thinker_urgent(x) for x in rows):
             rows = []  # every Talker already holds a chunk beyond the one it decodes: give this tick to the Talker
-        if urgent:  # a continuing stream is short of playback: its next frames first, then the aged prefill slice
+        if self.tick_overlap:
+            self._tick_overlapped(rows, urgent)
+        elif urgent:  # a continuing stream is short of playback: its next frames first, then the aged prefill slice
             self._timed("thinker", self._thinker_step, [x for x in rows if not x.pending_prefill])
             self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
             self._timed("prefill", self._thinker_step, [x for x in rows if x.pending_prefill])
@@ -650,6 +659,19 @@ class TrackSBackend:
             self.live.pop(lv.seq, None)
             if self.t2wp is None:
                 self.t2w_wake.set()
+
+    def _tick_overlapped(self, rows: list, urgent: bool) -> None:
+        """``_tick``'s Thinker and Talker steps with their GPU work overlapped: the Thinker step (prefill included unless
+        a continuing stream is short of playback) is queued on the Thinker stream, the Talker step runs on the Talker
+        stream meanwhile, then the Thinker's tokens are collected.  Chunks passed now start in the next tick's Talker."""
+        first = [x for x in rows if not x.pending_prefill] if urgent else rows
+        with torch.cuda.stream(self.thinker_stream):
+            pending = self._timed_ret("thinker", self._thinker_launch, first)
+        self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
+        with torch.cuda.stream(self.thinker_stream):
+            self._timed("thinker.wait", self._thinker_finish, first, pending)
+            if urgent:
+                self._timed("prefill", self._thinker_step, [x for x in rows if x.pending_prefill])
 
     def _min_slack(self, now: float) -> float | None:
         """The least buffered playback among the continuing audio streams (None if none)."""
@@ -703,24 +725,48 @@ class TrackSBackend:
         return lv.pending_prefill or not lv.wants_audio or lv.chunk_index == 0 or len(lv.chunks) <= 1
 
     def _thinker_step(self, rows: list[LiveS]) -> None:
+        if rows:
+            self._thinker_finish(rows, self._thinker_launch(rows))
+
+    def _thinker_launch(self, rows: list[LiveS]) -> list:
+        """Queue the Thinker step of ``rows`` on the current stream: [(rows, next tokens in a host tensor filled
+        asynchronously, hidden states of the fed tokens or None)], valid once the event recorded last is reached."""
         if not rows:
-            return
+            return []
         pre = [lv for lv in rows if lv.pending_prefill]
         dec = [lv for lv in rows if not lv.pending_prefill]
-        results = []  # (lv, next token, hidden of the fed token or None)
+        out = []
         if pre:
             with span(self.trace, "thinker.prefill", len(pre)):
-                toks = self._prefill_forward(pre)
-            for lv, tok in zip(pre, toks):
-                if tok is None:
-                    continue  # a chunk of a long prompt: the rest in later ticks
-                lv.pending_prefill = False
-                lv.mark("prefilled")
-                results.append((lv, tok, None))
+                done, toks = self._prefill_forward(pre)
+            if done:
+                out.append(([pre[i] for i in done], toks, None))
         if dec:
             with span(self.trace, "thinker.decode", len(dec)):
-                nxt, hid = self.tdec.step([lv.seq for lv in dec], [lv.generated[-1] for lv in dec])
-            results += [(lv, tok, hid[i]) for i, (lv, tok) in enumerate(zip(dec, nxt))]
+                nxt, hid = self.tdec.step_async([lv.seq for lv in dec], [lv.generated[-1] for lv in dec])
+            out.append((dec, nxt, hid))
+        if out:
+            ev = None
+            if torch.device(self.device).type == "cuda":
+                ev = torch.cuda.Event()
+                ev.record()
+            out.append(ev)
+        return out
+
+    def _thinker_finish(self, rows: list[LiveS], pending: list) -> None:
+        """The tokens of a launched Thinker step: text deltas, Track S chunks and closes, as in the reference."""
+        if not pending:
+            return
+        ev = pending.pop()
+        if ev is not None:
+            ev.synchronize()
+        results = []  # (lv, next token, hidden of the fed token or None)
+        for lvs, toks, hid in pending:
+            for i, (lv, tok) in enumerate(zip(lvs, toks.tolist())):
+                if hid is None:  # its prompt is complete: the first reply token
+                    lv.pending_prefill = False
+                    lv.mark("prefilled")
+                results.append((lv, tok, None if hid is None else hid[i]))
         for lv, tok, h in results:
             if h is not None:
                 lv.hidden.append(h)  # hidden state of the reply token just fed
@@ -743,9 +789,10 @@ class TrackSBackend:
             return lv.prompt_embeds[a:b].to(self.thinker.dtype)
         return self.thinker.embed(to_device(lv.prompt_ids[a:b], torch.int64, self.device))
 
-    def _prefill_forward(self, pre: list[LiveS]) -> list:
+    def _prefill_forward(self, pre: list[LiveS]) -> tuple[list[int], torch.Tensor | None]:
         """Prefill each row's granted share of its prompt (``prefill_now``; the whole rest when not set) in one ragged
-        batch; returns each row's first reply token (greedy), or None while its prompt is not complete."""
+        batch; returns the indices of the rows whose prompt is now complete and their first reply tokens (greedy), in a
+        host tensor filled once the current stream reaches this point."""
         ns = [lv.prefill_now or len(lv.prompt_ids) - lv.prefilled for lv in pre]
         whole = all(lv.prefilled == 0 and n == len(lv.prompt_ids) for lv, n in zip(pre, ns))
         if len(pre) == 1 and whole and self.tprefill is not None and self.tprefill.supports(ns[0]):
@@ -758,12 +805,13 @@ class TrackSBackend:
             lv.prefilled += n
             lv.prefill_now = 0
         done = [i for i, lv in enumerate(pre) if lv.prefilled >= len(lv.prompt_ids)]
-        out = [None] * len(pre)
-        if done:
-            sel = last if len(done) == len(pre) else last[to_device(done, torch.int64, last.device)]
-            for i, tok in zip(done, torch.nn.functional.linear(sel, self.thinker.w["lm_head.weight"]).float().argmax(-1).tolist()):
-                out[i] = tok
-        return out
+        if not done:
+            return done, None
+        sel = last if len(done) == len(pre) else last[to_device(done, torch.int64, last.device)]
+        ids = torch.nn.functional.linear(sel, self.thinker.w["lm_head.weight"]).float().argmax(-1)
+        host = torch.empty(ids.shape, dtype=ids.dtype, pin_memory=True)
+        host.copy_(ids, non_blocking=True)
+        return done, host
 
     def _close_thinker(self, lv: LiveS, passed_final: bool = False) -> None:
         if not passed_final:
@@ -785,7 +833,7 @@ class TrackSBackend:
         if lv.wants_audio:
             h = torch.stack(hs) if hs else torch.zeros(0, self.tspec.hidden_size, device=self.device, dtype=self.thinker.dtype)
             ev = None
-            if self.split_threads:
+            if self.split_threads or self.tick_overlap:
                 ev = torch.cuda.Event()
                 ev.record(torch.cuda.current_stream())
                 h.record_stream(self.talker_stream)  # read on the Talker stream: not reused before that work is done

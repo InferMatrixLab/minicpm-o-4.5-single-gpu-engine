@@ -158,14 +158,27 @@ class ThinkerDecoder:
 
     @torch.inference_mode()
     def step(self, seqs: list[int], tokens: list[int]) -> tuple[list[int], torch.Tensor]:
+        nxt, hid = self.step_async(seqs, tokens)
+        torch.cuda.current_stream().synchronize()
+        return nxt.tolist(), hid
+
+    @torch.inference_mode()
+    def step_async(self, seqs: list[int], tokens: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        """``step`` without the host wait: (greedy next tokens in a page-locked host tensor, hidden states [n, H]), both
+        valid once the current stream has run past the call."""
         top = max(self.buckets)
         if len(seqs) > top:  # more rows than the largest bucket: consecutive slices
             parts = [self._step_rows(seqs[a:a + top], tokens[a:a + top]) for a in range(0, len(seqs), top)]
-            return [t for p in parts for t in p[0]], torch.cat([p[1] for p in parts])
-        return self._step_rows(seqs, tokens)
+            nxt, hid = torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
+        else:
+            nxt, hid = self._step_rows(seqs, tokens)
+        host = torch.empty(nxt.shape, dtype=nxt.dtype, pin_memory=True)
+        host.copy_(nxt, non_blocking=True)
+        return host, hid
 
-    def _step_rows(self, seqs: list[int], tokens: list[int]) -> tuple[list[int], torch.Tensor]:
-        """Feed ``tokens[i]`` to sequence ``seqs[i]``; returns (greedy next tokens, hidden states of the fed tokens [n, H]).
+    def _step_rows(self, seqs: list[int], tokens: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Feed ``tokens[i]`` to sequence ``seqs[i]``; returns (greedy next tokens, hidden states of the fed tokens [n, H])
+        on the device.
 
         The FlashInfer plan is redone only when the rows change or a row starts a new KV page (graph mode); otherwise the
         graph's own last-page increment carries the layout forward.  Padding rows are persistent scratch sequences.
@@ -200,4 +213,4 @@ class ThinkerDecoder:
         for other in self.buckets.values():  # another bucket may have planned rows these pads share
             if other is not bk:
                 other.rows = None
-        return bk.next[:n].tolist(), bk.hidden[:n].clone()
+        return bk.next[:n].clone(), bk.hidden[:n].clone()

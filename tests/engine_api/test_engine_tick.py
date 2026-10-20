@@ -70,14 +70,14 @@ class FakeTDec:
     def release_pads(self):
         pass
 
-    def step(self, seqs, toks):
+    def step_async(self, seqs, toks):
         self.be.tkv.layout(seqs, [1] * len(seqs), device="cpu")
         self.clock.t += DECODE_S
         out = []
         for s in seqs:
             lv = self.be.live[s]
             out.append(B.IM_END if len(lv.generated) >= lv.reply else 7)
-        return out, torch.zeros(len(seqs), 8)
+        return torch.tensor(out), torch.zeros(len(seqs), 8)
 
 
 def make(policy: PrefillPolicy, pages=1024, page_size=64):
@@ -93,7 +93,7 @@ def make(policy: PrefillPolicy, pages=1024, page_size=64):
     be.sched = {"prefill_token_budget": policy.token_budget, "prefill_tokens_tick_max": 0, "prefill_chunked_ticks": 0,
                 "prefill_kv_wait_ticks": 0, "talker_starts_deferred_ticks": 0, "talker_kv_wait_ticks": 0}
     be.live, be.audio_live = {}, {}
-    be.thinker_lazy, be.profile, be.split_threads = False, False, False
+    be.thinker_lazy, be.profile, be.split_threads, be.tick_overlap = False, False, False, False
     be.t2wp = SimpleNamespace(send=lambda *a: None)
     be.tspec = SimpleNamespace(hidden_size=8)
     be.thinker = SimpleNamespace(dtype=torch.float32)
@@ -106,12 +106,11 @@ def make(policy: PrefillPolicy, pages=1024, page_size=64):
         be.tkv.layout([lv.seq for lv in pre], ns, device="cpu")
         be.ticks[-1][0] += sum(ns)
         clock.t += PREFILL_S_PER_TOKEN * sum(ns)
-        out = []
         for lv, n in zip(pre, ns):
             lv.prefilled += n
             lv.prefill_now = 0
-            out.append(7 if lv.prefilled >= len(lv.prompt_ids) else None)
-        return out
+        done = [i for i, lv in enumerate(pre) if lv.prefilled >= len(lv.prompt_ids)]
+        return done, torch.tensor([7] * len(done))
 
     def talker_step(rows):
         for lv in be._talker_starts([lv for lv in rows if not lv.talking and lv.chunks]):

@@ -88,7 +88,7 @@ def make(pages=512, page_size=128, max_live=64):
     be.sched = {"prefill_token_budget": None, "prefill_tokens_tick_max": 0, "prefill_chunked_ticks": 0, "prefill_kv_wait_ticks": 0,
                 "talker_starts_deferred_ticks": 0, "talker_kv_wait_ticks": 0}
     be.live, be.audio_live, be.inbox = {}, {}, queue.Queue()
-    be.thinker_lazy, be.profile, be.split_threads = False, False, False
+    be.thinker_lazy, be.profile, be.split_threads, be.tick_overlap = False, False, False, False
     be.t2wp = SimpleNamespace(send=lambda *a: None)
     be.device, be.max_live, be.talker_k, be.talker_k_max = "cpu", max_live, 4, 4
     be.cfg = TS.TalkerSampling(min_new_tokens=0, max_new_tokens=1 << 30)
