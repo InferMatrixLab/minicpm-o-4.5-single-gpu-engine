@@ -1,0 +1,28 @@
+{
+ "description": "Round-15 measurement on GPU1: track_s_fast_r15b (overlapped engine tick, first-chunk ticks serial), K=5, eval IDs; compared with r11c",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 1,
+ "port": 18991,
+ "run_order_seed": 20261051,
+ "concurrencies": [
+  2,
+  8,
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r15b",
+   "label": "r15b",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
