@@ -11,3 +11,12 @@ Engine `track_s_fast_r11` (six cells, K=5, measured 2026-10-18/19) and the froze
 All 17 cells pass `bench.verify` on their full artifacts (audio, wire dumps and traces included), rechecked on the
 recording host on 2026-10-20; `campaign/r11c_verify.log` is the original engine check. No measured run has a failed
 request.
+
+Also here:
+
+- `tuning/`: the 42 tuning cells (7 qualified baseline configurations × 6 concurrencies, K=2) that selected the
+  envelope, with their own `manifest.json`; summarized in [docs/baselines.md](../../docs/baselines.md).
+- `traces/`: per-stage trace summaries of both baselines at C = 1/8/16/32 (`tools/trace_baselines.py`).
+- `quality/`: the engine's development speech-quality reports (`track_s_fast`, 1088 rows, seed 0, C=1 and C=32) with
+  per-row records, the nine baseline qualification records and the frozen speech reference.
+- `robustness_track_s_fast_8338bda/`: the 30-minute C=32 robustness acceptance report and its replay.

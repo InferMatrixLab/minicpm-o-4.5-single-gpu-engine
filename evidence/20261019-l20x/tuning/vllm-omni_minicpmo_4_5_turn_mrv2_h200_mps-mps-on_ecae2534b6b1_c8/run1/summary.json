@@ -1,0 +1,307 @@
+{
+ "label": "run1",
+ "concurrency": 8,
+ "measured": true,
+ "gpu": "L20X",
+ "engine": "vllm-omni",
+ "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mrv2_h200_mps.yaml",
+ "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+ "config_digest": "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6",
+ "cell_digest": "384f01228f1615eb5bc632f18d4e7747a39349188efc461f553b7b24e0c6b1fb",
+ "experiment_base_digest": "43fb8c037829b9a8d5fc5527be23328c172c9bef6e967ae362359d8ccd68a945",
+ "mps_policy": "on",
+ "id_set": "tuning",
+ "ids_sha256": "aca688b5ff41189f617e1ed6461f39d16e74c2febbb3467c87ef82457fc0e4c3",
+ "expected_ids_sha256": "aca688b5ff41189f617e1ed6461f39d16e74c2febbb3467c87ef82457fc0e4c3",
+ "seed_index": 0,
+ "timeout_s": 180.0,
+ "strict": true,
+ "cache_policy": "restart",
+ "cache_evidence": {
+  "fresh_server": true,
+  "server_pid": 937126,
+  "server_pgid": 937126,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/16e60ae/scripts/serve_vllm_omni.sh",
+   "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mrv2_h200_mps.yaml",
+   "18530"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "3",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 3,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 312.16910979896784,
+  "process_tree": [
+   937126,
+   959011,
+   959013,
+   1000966,
+   1034387
+  ],
+  "gpu_workers": [
+   {
+    "pid": 959013,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage0_replica0_DP0"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/pipe",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 1000966,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage1_replica0_DP0"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/pipe",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 1034387,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage2_replica0_DP0"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/pipe",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_OMNI_CODEC_FIRST_CHUNK_EXPRESS": "1",
+     "VLLM_OMNI_CODEC_FIRST_CHUNK_EXPRESS_SLACK_S": "0.5",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "on",
+   "workers": [
+    {
+     "pid": 959013,
+     "type": "M+C",
+     "process_name": "VLLM::StageEngineCoreProc_stage0_replica0_DP0",
+     "used_memory": "65484 MiB"
+    },
+    {
+     "pid": 1000966,
+     "type": "M+C",
+     "process_name": "VLLM::StageEngineCoreProc_stage1_replica0_DP0",
+     "used_memory": "5722 MiB"
+    },
+    {
+     "pid": 1034387,
+     "type": "M+C",
+     "process_name": "VLLM::StageEngineCoreProc_stage2_replica0_DP0",
+     "used_memory": "4138 MiB"
+    }
+   ],
+   "foreign": [
+    {
+     "pid": 973128,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ],
+   "mps_servers_on_gpu": [
+    {
+     "pid": 973128,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ]
+  }
+ },
+ "runtime_evidence": {
+  "server_pid": 937126,
+  "server_pgid": 937126,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/16e60ae/scripts/serve_vllm_omni.sh",
+   "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mrv2_h200_mps.yaml",
+   "18530"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "3",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 3,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 312.16910979896784,
+  "process_tree": [
+   937126,
+   959011,
+   959013,
+   1000966,
+   1034387
+  ],
+  "gpu_workers": [
+   {
+    "pid": 959013,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage0_replica0_DP0"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/pipe",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 1000966,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage1_replica0_DP0"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/pipe",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 1034387,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage2_replica0_DP0"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/vllm-omni-mps-qyqvnqcs/pipe",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_OMNI_CODEC_FIRST_CHUNK_EXPRESS": "1",
+     "VLLM_OMNI_CODEC_FIRST_CHUNK_EXPRESS_SLACK_S": "0.5",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "on",
+   "workers": [
+    {
+     "pid": 959013,
+     "type": "M+C",
+     "process_name": "VLLM::StageEngineCoreProc_stage0_replica0_DP0",
+     "used_memory": "65484 MiB"
+    },
+    {
+     "pid": 1000966,
+     "type": "M+C",
+     "process_name": "VLLM::StageEngineCoreProc_stage1_replica0_DP0",
+     "used_memory": "5722 MiB"
+    },
+    {
+     "pid": 1034387,
+     "type": "M+C",
+     "process_name": "VLLM::StageEngineCoreProc_stage2_replica0_DP0",
+     "used_memory": "4138 MiB"
+    }
+   ],
+   "foreign": [
+    {
+     "pid": 973128,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ],
+   "mps_servers_on_gpu": [
+    {
+     "pid": 973128,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ]
+  }
+ },
+ "server_startup_s": 312.16910979896784,
+ "n_requests": 320,
+ "n_failed": 0,
+ "valid": true,
+ "invalid_reasons": {},
+ "makespan_s": 81.60956478863955,
+ "throughput_frames_s": 384.58727333354295,
+ "ttfa_p50_s": 0.9089690819382668,
+ "ttfa_p95_s": 1.6071412295103074,
+ "rtf_mean": 0.5290733655075736,
+ "rtf_duration_weighted": 0.5160223764345977,
+ "req_s": 3.921109012513023,
+ "audio_s_per_s": 15.383490933341719,
+ "e2e_p50_s": 1.9719801507890224,
+ "e2e_p95_s": 2.820281775668264,
+ "total_audio_s": 1255.44,
+ "first_chunk_mean_s": 0.8400000000000001,
+ "stall_mean_s": 0.005976974149234593,
+ "stall_max_s": 0.4055175557732582,
+ "inter_chunk_gap_p50_s": 0.25941014289855957,
+ "inter_chunk_gap_p95_s": 0.6604623384773731,
+ "inter_chunk_gap_max_s": 1.2455175556242466
+}

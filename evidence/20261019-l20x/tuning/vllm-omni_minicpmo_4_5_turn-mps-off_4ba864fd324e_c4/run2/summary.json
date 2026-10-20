@@ -1,0 +1,263 @@
+{
+ "label": "run2",
+ "concurrency": 4,
+ "measured": true,
+ "gpu": "L20X",
+ "engine": "vllm-omni",
+ "config": "minicpmo_4_5_turn.yaml",
+ "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+ "config_digest": "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252",
+ "cell_digest": "bc7e450d008c98c83a02927de2fbb4cebf3e1eecc9d03aa2f688035c1fe153c4",
+ "experiment_base_digest": "afcebb4d09bbb45c755e53d0cbf0e61efdf5239908b0aab078d07e94925564c6",
+ "mps_policy": "off",
+ "id_set": "tuning",
+ "ids_sha256": "aca688b5ff41189f617e1ed6461f39d16e74c2febbb3467c87ef82457fc0e4c3",
+ "expected_ids_sha256": "aca688b5ff41189f617e1ed6461f39d16e74c2febbb3467c87ef82457fc0e4c3",
+ "seed_index": 0,
+ "timeout_s": 180.0,
+ "strict": true,
+ "cache_policy": "restart",
+ "cache_evidence": {
+  "fresh_server": true,
+  "server_pid": 2022897,
+  "server_pgid": 2022897,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/16e60ae/scripts/serve_vllm_omni.sh",
+   "minicpmo_4_5_turn.yaml",
+   "18530"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "3",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 3,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 357.1487155929208,
+  "process_tree": [
+   2022897,
+   2033909,
+   2033910,
+   2052348,
+   2085345
+  ],
+  "gpu_workers": [
+   {
+    "pid": 2033910,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage0_replica0_DP0"
+    ],
+    "env": {
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 2052348,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage1_replica0_DP0"
+    ],
+    "env": {
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 2085345,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage2_replica0_DP0"
+    ],
+    "env": {
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "off",
+   "workers": [
+    {
+     "pid": 2033910,
+     "type": "C",
+     "process_name": "VLLM::StageEngineCoreProc_stage0_replica0_DP0",
+     "used_memory": "65502 MiB"
+    },
+    {
+     "pid": 2052348,
+     "type": "C",
+     "process_name": "VLLM::StageEngineCoreProc_stage1_replica0_DP0",
+     "used_memory": "5710 MiB"
+    },
+    {
+     "pid": 2085345,
+     "type": "C",
+     "process_name": "VLLM::StageEngineCoreProc_stage2_replica0_DP0",
+     "used_memory": "19454 MiB"
+    }
+   ],
+   "foreign": [],
+   "mps_servers_on_gpu": []
+  }
+ },
+ "runtime_evidence": {
+  "server_pid": 2022897,
+  "server_pgid": 2022897,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/16e60ae/scripts/serve_vllm_omni.sh",
+   "minicpmo_4_5_turn.yaml",
+   "18530"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "3",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 3,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 357.1487155929208,
+  "process_tree": [
+   2022897,
+   2033909,
+   2033910,
+   2052348,
+   2085345
+  ],
+  "gpu_workers": [
+   {
+    "pid": 2033910,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage0_replica0_DP0"
+    ],
+    "env": {
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 2052348,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage1_replica0_DP0"
+    ],
+    "env": {
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   },
+   {
+    "pid": 2085345,
+    "cmdline": [
+     "VLLM::StageEngineCoreProc_stage2_replica0_DP0"
+    ],
+    "env": {
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+     "TORCHINDUCTOR_COMPILE_THREADS": "1",
+     "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+     "VLLM_DISABLE_LOG_LOGO": "1",
+     "VLLM_LOGGING_COLOR": "1",
+     "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "off",
+   "workers": [
+    {
+     "pid": 2033910,
+     "type": "C",
+     "process_name": "VLLM::StageEngineCoreProc_stage0_replica0_DP0",
+     "used_memory": "65502 MiB"
+    },
+    {
+     "pid": 2052348,
+     "type": "C",
+     "process_name": "VLLM::StageEngineCoreProc_stage1_replica0_DP0",
+     "used_memory": "5710 MiB"
+    },
+    {
+     "pid": 2085345,
+     "type": "C",
+     "process_name": "VLLM::StageEngineCoreProc_stage2_replica0_DP0",
+     "used_memory": "19454 MiB"
+    }
+   ],
+   "foreign": [],
+   "mps_servers_on_gpu": []
+  }
+ },
+ "server_startup_s": 357.1487155929208,
+ "n_requests": 320,
+ "n_failed": 0,
+ "valid": true,
+ "invalid_reasons": {},
+ "makespan_s": 98.94229948148131,
+ "throughput_frames_s": 355.5001266832635,
+ "ttfa_p50_s": 0.9020401909947395,
+ "ttfa_p95_s": 1.049856095202267,
+ "rtf_mean": 0.2932150836031354,
+ "rtf_duration_weighted": 0.2809174887655084,
+ "req_s": 3.2342082372958525,
+ "audio_s_per_s": 14.22000506733054,
+ "e2e_p50_s": 1.229515701532364,
+ "e2e_p95_s": 1.4949545266106725,
+ "total_audio_s": 1406.96,
+ "first_chunk_mean_s": 0.8400000000000001,
+ "stall_mean_s": 0.0,
+ "stall_max_s": 0.0,
+ "inter_chunk_gap_p50_s": 0.08158769831061363,
+ "inter_chunk_gap_p95_s": 0.1285911686718464,
+ "inter_chunk_gap_max_s": 0.6019367799162865
+}

@@ -1,0 +1,500 @@
+{
+ "stack": "vllm",
+ "concurrency": 8,
+ "client_timing_window": {
+  "ttfa_s": {
+   "n": 32,
+   "mean": 1.5217289718566462,
+   "p50": 1.5640840530395508,
+   "p95": 1.8605523450300097
+  },
+  "e2e_s": {
+   "n": 32,
+   "mean": 2.105745875975117,
+   "p50": 2.0892399083822966,
+   "p95": 2.681186669692397
+  },
+  "rtf": {
+   "n": 32,
+   "mean": 0.5338383428498642,
+   "p50": 0.5199256129193903,
+   "p95": 0.710714641664665
+  },
+  "duration_s": {
+   "n": 32,
+   "mean": 4.1175,
+   "p50": 3.76,
+   "p95": 6.279999999999999
+  }
+ },
+ "timing_window_frames_s": 375.63830434122264,
+ "stages": {
+  "audio_s": {
+   "n": 30,
+   "mean": 4.16,
+   "p50": 3.76,
+   "p95": 6.359999999999998
+  },
+  "client_ttfa_s": {
+   "n": 32,
+   "mean": 1.5217289718566462,
+   "p50": 1.5640840530395508,
+   "p95": 1.8605523450300097
+  },
+  "code2wav_first_output_ms": {
+   "n": 30,
+   "mean": 1518.72714360555,
+   "p50": 1555.1846027374268,
+   "p95": 1846.5652585029602
+  },
+  "code2wav_gen_ms": {
+   "n": 30,
+   "mean": 2101.6659259796143,
+   "p50": 2112.4725341796875,
+   "p95": 2652.7137756347656
+  },
+  "talker_first_output_ms": {
+   "n": 32,
+   "mean": 322.73980230093,
+   "p50": 295.3758239746094,
+   "p95": 476.8471717834472
+  },
+  "talker_gen_ms": {
+   "n": 32,
+   "mean": 782.3518216609955,
+   "p50": 767.7772045135498,
+   "p95": 1093.4884071350098
+  },
+  "thinker_gen_ms": {
+   "n": 32,
+   "mean": 167.11685806512833,
+   "p50": 160.35544872283936,
+   "p95": 272.11633920669556
+  },
+  "thinker_tpot_ms": {
+   "n": 32,
+   "mean": 9.146960174926091,
+   "p50": 8.831549694554674,
+   "p95": 13.691515828595383
+  },
+  "thinker_ttft_ms": {
+   "n": 32,
+   "mean": 52.79149115085602,
+   "p50": 48.94423484802246,
+   "p95": 69.23075914382935
+  }
+ },
+ "per_request": [
+  {
+   "request_id": "common_voice_en_19724242-common_voice_en_19724243",
+   "thinker_ttft_ms": 70.62959671020508,
+   "thinker_gen_ms": 122.62725830078125,
+   "thinker_tpot_ms": 5.230678675266413,
+   "talker_first_output_ms": 373.09813499450684,
+   "talker_gen_ms": 773.3643054962158,
+   "code2wav_first_output_ms": 1593.9967632293701,
+   "code2wav_gen_ms": 2287.384510040283,
+   "audio_s": 3.56,
+   "client_ttfa_s": 1.6105489060282707
+  },
+  {
+   "request_id": "common_voice_en_691043-common_voice_en_691044",
+   "thinker_ttft_ms": 66.72143936157227,
+   "thinker_gen_ms": 139.27125930786133,
+   "thinker_tpot_ms": 5.138140637427568,
+   "talker_first_output_ms": 372.269868850708,
+   "talker_gen_ms": 902.949333190918,
+   "code2wav_first_output_ms": 1593.1684970855713,
+   "code2wav_gen_ms": 2416.236400604248,
+   "audio_s": 4.76,
+   "client_ttfa_s": 1.6112649403512478
+  },
+  {
+   "request_id": "common_voice_en_568078-common_voice_en_568079",
+   "thinker_ttft_ms": 68.77493858337402,
+   "thinker_gen_ms": 150.19607543945312,
+   "thinker_tpot_ms": 5.235556306110488,
+   "talker_first_output_ms": 374.27449226379395,
+   "talker_gen_ms": 794.8226928710938,
+   "code2wav_first_output_ms": 1592.142105102539,
+   "code2wav_gen_ms": 2284.2912673950195,
+   "audio_s": 3.92,
+   "client_ttfa_s": 1.6077016927301884
+  },
+  {
+   "request_id": "common_voice_en_37360566-common_voice_en_37360564",
+   "thinker_ttft_ms": 68.6502456665039,
+   "thinker_gen_ms": 109.42292213439941,
+   "thinker_tpot_ms": 5.126481254895528,
+   "talker_first_output_ms": 371.11878395080566,
+   "talker_gen_ms": 732.7430248260498,
+   "code2wav_first_output_ms": 1592.017412185669,
+   "code2wav_gen_ms": 2282.480239868164,
+   "audio_s": 3.24,
+   "client_ttfa_s": 1.610158957540989
+  },
+  {
+   "request_id": "common_voice_en_20266775-common_voice_en_20266781",
+   "thinker_ttft_ms": 65.66190719604492,
+   "thinker_gen_ms": 98.78110885620117,
+   "thinker_tpot_ms": 5.142210220748728,
+   "talker_first_output_ms": 368.1304454803467,
+   "talker_gen_ms": 754.8739910125732,
+   "code2wav_first_output_ms": 1589.02907371521,
+   "code2wav_gen_ms": 2279.801845550537,
+   "audio_s": 3.32,
+   "client_ttfa_s": 1.6069569028913975
+  },
+  {
+   "request_id": "common_voice_en_19176854-common_voice_en_19176853",
+   "thinker_ttft_ms": 65.32144546508789,
+   "thinker_gen_ms": 122.19977378845215,
+   "thinker_tpot_ms": 5.230356539998736,
+   "talker_first_output_ms": 367.78998374938965,
+   "talker_gen_ms": 783.5016250610352,
+   "code2wav_first_output_ms": 1588.688611984253,
+   "code2wav_gen_ms": 2280.388593673706,
+   "audio_s": 3.68,
+   "client_ttfa_s": 1.6034633293747902
+  },
+  {
+   "request_id": "common_voice_en_25694807-common_voice_en_25694818",
+   "thinker_ttft_ms": 65.22345542907715,
+   "thinker_gen_ms": 137.72273063659668,
+   "thinker_tpot_ms": 5.185008925550124,
+   "talker_first_output_ms": 370.72300910949707,
+   "talker_gen_ms": 1095.2565670013428,
+   "code2wav_first_output_ms": 1588.5906219482422,
+   "code2wav_gen_ms": 2554.0060997009277,
+   "audio_s": 6.72,
+   "client_ttfa_s": 1.6053374223411083
+  },
+  {
+   "request_id": "common_voice_en_19867710-common_voice_en_19867713",
+   "thinker_ttft_ms": 65.13524055480957,
+   "thinker_gen_ms": 80.4758071899414,
+   "thinker_tpot_ms": 5.34380812730108,
+   "talker_first_output_ms": 304.2185306549072,
+   "talker_gen_ms": 652.8029441833496,
+   "code2wav_first_output_ms": 1554.4524192810059,
+   "code2wav_gen_ms": 1733.5402965545654,
+   "audio_s": 2.56,
+   "client_ttfa_s": 1.563386481255293
+  },
+  {
+   "request_id": "common_voice_en_21802531-common_voice_en_21802534",
+   "thinker_ttft_ms": 28.340816497802734,
+   "thinker_gen_ms": 172.00684547424316,
+   "thinker_tpot_ms": 12.298279131452242,
+   "talker_first_output_ms": 230.43489456176758,
+   "talker_gen_ms": 404.57653999328613,
+   "code2wav_first_output_ms": 594.8328971862793,
+   "code2wav_gen_ms": 850.9635925292969,
+   "audio_s": 3.68,
+   "client_ttfa_s": 0.5979037135839462
+  },
+  {
+   "request_id": "common_voice_en_25257658-common_voice_en_25257662",
+   "thinker_ttft_ms": 62.27850914001465,
+   "thinker_gen_ms": 258.04686546325684,
+   "thinker_tpot_ms": 13.052553869783878,
+   "talker_first_output_ms": 441.3948059082031,
+   "talker_gen_ms": 1087.6426696777344,
+   "code2wav_first_output_ms": 1848.567247390747,
+   "code2wav_gen_ms": 2653.778076171875,
+   "audio_s": 5.64,
+   "client_ttfa_s": 1.8649418093264103
+  },
+  {
+   "request_id": "common_voice_en_17255102-common_voice_en_17255101",
+   "thinker_ttft_ms": 69.30065155029297,
+   "thinker_gen_ms": 231.4622402191162,
+   "thinker_tpot_ms": 13.747660873027948,
+   "talker_first_output_ms": 363.3286952972412,
+   "talker_gen_ms": 800.065279006958,
+   "code2wav_first_output_ms": 1814.2337799072266,
+   "code2wav_gen_ms": 2245.7666397094727,
+   "audio_s": 3.36,
+   "client_ttfa_s": 1.8237837105989456
+  },
+  {
+   "request_id": "common_voice_en_93674-common_voice_en_93672",
+   "thinker_ttft_ms": 69.17357444763184,
+   "thinker_gen_ms": 289.31236267089844,
+   "thinker_tpot_ms": 13.750784318236743,
+   "talker_first_output_ms": 520.1778411865234,
+   "talker_gen_ms": 1092.0417308807373,
+   "code2wav_first_output_ms": 1847.8260040283203,
+   "code2wav_gen_ms": 2651.4129638671875,
+   "audio_s": 5.92,
+   "client_ttfa_s": 1.863402597606182
+  },
+  {
+   "request_id": "common_voice_en_20791751-common_voice_en_20791750",
+   "thinker_ttft_ms": 66.37191772460938,
+   "thinker_gen_ms": 244.6920871734619,
+   "thinker_tpot_ms": 13.64557897405965,
+   "talker_first_output_ms": 437.8519058227539,
+   "talker_gen_ms": 797.5263595581055,
+   "code2wav_first_output_ms": 1845.0243473052979,
+   "code2wav_gen_ms": 2336.6127014160156,
+   "audio_s": 3.36,
+   "client_ttfa_s": 1.8582203201949596
+  },
+  {
+   "request_id": "common_voice_en_64065-common_voice_en_64062",
+   "thinker_ttft_ms": 66.23697280883789,
+   "thinker_gen_ms": 347.86438941955566,
+   "thinker_tpot_ms": 10.697515149201665,
+   "talker_first_output_ms": 524.256706237793,
+   "talker_gen_ms": 1189.9704933166504,
+   "code2wav_first_output_ms": 1844.8894023895264,
+   "code2wav_gen_ms": 2740.791082382202,
+   "audio_s": 7.44,
+   "client_ttfa_s": 1.857235997915268
+  },
+  {
+   "request_id": "common_voice_en_21293493-common_voice_en_21293494",
+   "thinker_ttft_ms": 63.09390068054199,
+   "thinker_gen_ms": 224.08723831176758,
+   "thinker_tpot_ms": 10.25423500686884,
+   "talker_first_output_ms": 408.8006019592285,
+   "talker_gen_ms": 982.6831817626953,
+   "code2wav_first_output_ms": 1736.4487648010254,
+   "code2wav_gen_ms": 2550.953149795532,
+   "audio_s": 5.32,
+   "client_ttfa_s": 1.7469023391604424
+  },
+  {
+   "request_id": "common_voice_en_18944281-common_voice_en_18944280",
+   "thinker_ttft_ms": 52.31881141662598,
+   "thinker_gen_ms": 109.95697975158691,
+   "thinker_tpot_ms": 5.911503918468952,
+   "talker_first_output_ms": 267.86255836486816,
+   "talker_gen_ms": 712.6059532165527,
+   "code2wav_first_output_ms": 1588.4952545166016,
+   "code2wav_gen_ms": 2086.3070487976074,
+   "audio_s": 3.52,
+   "client_ttfa_s": 1.5984960608184338
+  },
+  {
+   "request_id": "common_voice_en_20461046-common_voice_en_20461051",
+   "thinker_ttft_ms": 30.92670440673828,
+   "thinker_gen_ms": 86.9300365447998,
+   "thinker_tpot_ms": 5.334512330591679,
+   "talker_first_output_ms": 226.09376907348633,
+   "talker_gen_ms": 749.0129470825195,
+   "code2wav_first_output_ms": 1546.7264652252197,
+   "code2wav_gen_ms": 2044.3506240844727,
+   "audio_s": 3.92,
+   "client_ttfa_s": 1.553714793175459
+  },
+  {
+   "request_id": "common_voice_en_19629167-common_voice_en_19629165",
+   "thinker_ttft_ms": 27.144193649291992,
+   "thinker_gen_ms": 177.53028869628906,
+   "thinker_tpot_ms": 11.929467893563784,
+   "talker_first_output_ms": 234.21287536621094,
+   "talker_gen_ms": 851.177453994751,
+   "code2wav_first_output_ms": 1056.288480758667,
+   "code2wav_gen_ms": 2204.0300369262695,
+   "audio_s": 4.2,
+   "client_ttfa_s": 1.0595001578330994
+  },
+  {
+   "request_id": "common_voice_en_19294198-common_voice_en_19294199",
+   "thinker_ttft_ms": 45.44997215270996,
+   "thinker_gen_ms": 201.70831680297852,
+   "thinker_tpot_ms": 12.782583443018106,
+   "talker_first_output_ms": 295.99857330322266,
+   "talker_gen_ms": 762.1901035308838,
+   "code2wav_first_output_ms": 1555.80735206604,
+   "code2wav_gen_ms": 1984.7147464752197,
+   "audio_s": 3.76,
+   "client_ttfa_s": 1.5647816248238087
+  },
+  {
+   "request_id": "common_voice_en_19972684-common_voice_en_19972725",
+   "thinker_ttft_ms": 44.2044734954834,
+   "thinker_gen_ms": 210.3745937347412,
+   "thinker_tpot_ms": 12.752280703612737,
+   "talker_first_output_ms": 294.7530746459961,
+   "talker_gen_ms": 841.2706851959229,
+   "code2wav_first_output_ms": 1554.5618534088135,
+   "code2wav_gen_ms": 2138.6380195617676,
+   "audio_s": 4.48,
+   "client_ttfa_s": 1.562445916235447
+  },
+  {
+   "request_id": "common_voice_en_203357-common_voice_en_203358",
+   "thinker_ttft_ms": 44.05713081359863,
+   "thinker_gen_ms": 184.44514274597168,
+   "thinker_tpot_ms": 12.579813599586487,
+   "talker_first_output_ms": 290.46154022216797,
+   "talker_gen_ms": 706.2914371490479,
+   "code2wav_first_output_ms": 1554.4145107269287,
+   "code2wav_gen_ms": 1982.7194213867188,
+   "audio_s": 3.32,
+   "client_ttfa_s": 1.5623329170048237
+  },
+  {
+   "request_id": "common_voice_en_590785-common_voice_en_590794",
+   "thinker_ttft_ms": 47.733306884765625,
+   "thinker_gen_ms": 122.73478507995605,
+   "thinker_tpot_ms": 9.238907032542759,
+   "talker_first_output_ms": 275.1493453979492,
+   "talker_gen_ms": 472.25356101989746,
+   "code2wav_first_output_ms": 1281.9960117340088,
+   "code2wav_gen_ms": 1583.4808349609375,
+   "audio_s": 2.24,
+   "client_ttfa_s": 1.2925796993076801
+  },
+  {
+   "request_id": "common_voice_en_25346256-common_voice_en_25346259",
+   "thinker_ttft_ms": 49.67212677001953,
+   "thinker_gen_ms": 170.5148220062256,
+   "thinker_tpot_ms": 7.486594731316847,
+   "talker_first_output_ms": 282.21940994262695,
+   "talker_gen_ms": 674.7548580169678,
+   "code2wav_first_output_ms": 1281.6033363342285,
+   "code2wav_gen_ms": 1880.4352283477783,
+   "audio_s": 4.2,
+   "client_ttfa_s": 1.2911305204033852
+  },
+  {
+   "request_id": "common_voice_en_581024-common_voice_en_581028",
+   "thinker_ttft_ms": 48.08187484741211,
+   "thinker_gen_ms": 139.32228088378906,
+   "thinker_tpot_ms": 8.424192356566587,
+   "talker_first_output_ms": 273.1664180755615,
+   "talker_gen_ms": 672.8692054748535,
+   "code2wav_first_output_ms": 1280.013084411621,
+   "code2wav_gen_ms": 1787.912368774414,
+   "audio_s": 3.96,
+   "client_ttfa_s": 1.2878791689872742
+  },
+  {
+   "request_id": "common_voice_en_17861489-common_voice_en_17861487",
+   "thinker_ttft_ms": 31.261920928955078,
+   "thinker_gen_ms": 84.32626724243164,
+   "thinker_tpot_ms": 5.564134195446968,
+   "talker_first_output_ms": 196.42090797424316,
+   "talker_gen_ms": 464.98918533325195,
+   "code2wav_first_output_ms": null,
+   "code2wav_gen_ms": null,
+   "audio_s": null,
+   "client_ttfa_s": 1.2017627283930779
+  },
+  {
+   "request_id": "common_voice_en_23640041-common_voice_en_23640040",
+   "thinker_ttft_ms": 39.49689865112305,
+   "thinker_gen_ms": 196.97093963623047,
+   "thinker_tpot_ms": 12.425166483108814,
+   "talker_first_output_ms": 257.1711540222168,
+   "talker_gen_ms": 858.0329418182373,
+   "code2wav_first_output_ms": null,
+   "code2wav_gen_ms": null,
+   "audio_s": null,
+   "client_ttfa_s": 1.5965631753206253
+  },
+  {
+   "request_id": "common_voice_en_27794266-common_voice_en_27794264",
+   "thinker_ttft_ms": 40.53330421447754,
+   "thinker_gen_ms": 182.97839164733887,
+   "thinker_tpot_ms": 13.1751417436383,
+   "talker_first_output_ms": 250.04816055297852,
+   "talker_gen_ms": 709.4991207122803,
+   "code2wav_first_output_ms": 1551.0015487670898,
+   "code2wav_gen_ms": 1929.7361373901367,
+   "audio_s": 3.4,
+   "client_ttfa_s": 1.5554215237498283
+  },
+  {
+   "request_id": "common_voice_en_20303932-common_voice_en_20303930",
+   "thinker_ttft_ms": 48.21634292602539,
+   "thinker_gen_ms": 199.1267204284668,
+   "thinker_tpot_ms": 12.183742740979561,
+   "talker_first_output_ms": 342.9076671600342,
+   "talker_gen_ms": 840.618371963501,
+   "code2wav_first_output_ms": 1494.001865386963,
+   "code2wav_gen_ms": 1964.3633365631104,
+   "audio_s": 4.84,
+   "client_ttfa_s": 1.5043489299714565
+  },
+  {
+   "request_id": "common_voice_en_599060-common_voice_en_599064",
+   "thinker_ttft_ms": 47.61838912963867,
+   "thinker_gen_ms": 186.11764907836914,
+   "thinker_tpot_ms": 13.039871034297077,
+   "talker_first_output_ms": 271.06189727783203,
+   "talker_gen_ms": 718.4548377990723,
+   "code2wav_first_output_ms": 1493.4039115905762,
+   "code2wav_gen_ms": 1900.378704071045,
+   "audio_s": 3.76,
+   "client_ttfa_s": 1.50152138620615
+  },
+  {
+   "request_id": "common_voice_en_23982302-common_voice_en_23982305",
+   "thinker_ttft_ms": 46.10395431518555,
+   "thinker_gen_ms": 115.9505844116211,
+   "thinker_tpot_ms": 7.933297008275986,
+   "talker_first_output_ms": 257.42316246032715,
+   "talker_gen_ms": 669.4872379302979,
+   "code2wav_first_output_ms": 1378.903865814209,
+   "code2wav_gen_ms": 1782.7057838439941,
+   "audio_s": 3.68,
+   "client_ttfa_s": 1.3920532129704952
+  },
+  {
+   "request_id": "common_voice_en_25271639-common_voice_en_25271686",
+   "thinker_ttft_ms": 45.51196098327637,
+   "thinker_gen_ms": 145.31493186950684,
+   "thinker_tpot_ms": 7.12590292096138,
+   "talker_first_output_ms": 263.958215713501,
+   "talker_gen_ms": 856.5268516540527,
+   "code2wav_first_output_ms": 1378.3118724822998,
+   "code2wav_gen_ms": 1880.3210258483887,
+   "audio_s": 5.52,
+   "client_ttfa_s": 1.3868975564837456
+  },
+  {
+   "request_id": "common_voice_en_175348-common_voice_en_175349",
+   "thinker_ttft_ms": 40.08173942565918,
+   "thinker_gen_ms": 105.26776313781738,
+   "thinker_tpot_ms": 5.736765451729298,
+   "talker_first_output_ms": 220.89624404907227,
+   "talker_gen_ms": 630.4028034210205,
+   "code2wav_first_output_ms": 1342.376947402954,
+   "code2wav_gen_ms": 1751.4770030975342,
+   "audio_s": 3.52,
+   "client_ttfa_s": 1.3526886068284512
+  }
+ ],
+ "kernel_window": {
+  "audio_s": 80.72,
+  "processes": {
+   "20261016-051145_stage0_rank0_1792098705/trace_rank0.json.gz": {
+    "gpu_kernel_s": 0.763165032,
+    "cpu_launch_s": 0.09672838800000001,
+    "kernel_span_s": 4.627540045898438,
+    "gpu_s_per_audio_s": 0.00945447264618434,
+    "kernels": 47625
+   },
+   "20261016-051145_stage1_rank0_1792098705/trace_rank0.json.gz": {
+    "gpu_kernel_s": 0.468781457,
+    "cpu_launch_s": 0.38028118800000005,
+    "kernel_span_s": 5.224846740966797,
+    "gpu_s_per_audio_s": 0.0058075007061446976,
+    "kernels": 156220
+   },
+   "20261016-051145_stage2_rank0_1792098705/trace_rank0.json.gz": {
+    "gpu_kernel_s": 2.758115385,
+    "cpu_launch_s": 1.3924797979999999,
+    "kernel_span_s": 4.7997365600585935,
+    "gpu_s_per_audio_s": 0.03416892201437066,
+    "kernels": 431052
+   }
+  },
+  "gpu_s_per_audio_s_total": 0.0494308953666997
+ }
+}

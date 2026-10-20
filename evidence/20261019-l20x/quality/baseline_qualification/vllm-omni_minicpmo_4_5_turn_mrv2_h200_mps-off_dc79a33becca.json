@@ -1,0 +1,81 @@
+{
+ "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200-mps-off:dc79a33becca",
+ "candidate_digest": "dc79a33becca57bbc4f060a5893db219c5b46139a092e43e1b975fa0337f5ef4",
+ "gpu_sku": "L20X",
+ "gpu_driver": "570.133.20",
+ "gpu_memory_mib": "143771",
+ "gpu_uuids": {
+  "0": "GPU-8adca4c3-0cee-c825-e344-70b082f0aa56",
+  "1": "GPU-e7921766-67c6-bc17-6df1-eca427957832",
+  "2": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1"
+ },
+ "concurrency": 8,
+ "evaluator_digest": "bcbb5924d964e7bb21c69ba88ade74eac16b647638cdb18ce6b06601d10870e8",
+ "floors": {
+  "passed": false,
+  "checks": {
+   "wer_filtered_corpus": {
+    "value": 0.02489157080897605,
+    "floor": 0.026874999999999996,
+    "passed": true
+   },
+   "sim_mean": {
+    "value": 49.027511503299074,
+    "floor": 41.58098999999999,
+    "passed": true
+   },
+   "utmos_mean": {
+    "value": 4.161499217897654,
+    "floor": 4.1634340000000005,
+    "passed": false
+   }
+  }
+ },
+ "per_seed_floors": {
+  "0": false,
+  "1": false,
+  "2": true
+ },
+ "effective_inputs_eligible": true,
+ "effective_inputs_problems": [],
+ "class_r": {
+  "engine": "vllm-omni",
+  "config": "minicpmo_4_5_turn_mrv2_h200.yaml",
+  "track": "T",
+  "audio_output": "stream",
+  "chunk_tokens": 25,
+  "precision": {
+   "thinker": "bf16",
+   "talker": "bf16",
+   "flow": "tf32",
+   "hift": "fp32"
+  },
+  "euler_steps": 10,
+  "session_mode": "turn",
+  "canonical_inputs": true,
+  "mps": false,
+  "documented_differences": [],
+  "class_r": true,
+  "class_r_violations": []
+ },
+ "class_r_unknown_reason": null,
+ "qualified": false,
+ "inputs": {
+  "quality": {
+   "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-off_dc79a33becca/speech_quality.json",
+   "sha256": "e6dec6b4d596fda4fc05c08e79e0427b8a339b8417d1811d136be1612f04776c"
+  },
+  "sidecar": {
+   "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-off_dc79a33becca/speech_quality.rows.jsonl",
+   "sha256": "1a25889bda6ba54422f4b1c3cbb50414174c6bad743042b26ce7efa574000904"
+  },
+  "canonical_dumps": {
+   "path": "/workspace/cgzheng/cgzheng/qwen3_omni/results/effective_inputs/canonical.jsonl",
+   "sha256": "47bdbc93111a8d5a238fb6ee944596522e3c698d3b5f7ccf4088513737ced98e"
+  },
+  "candidate_dumps": {
+   "path": "/workspace/cgzheng/cgzheng/qwen3_omni/results/effective_inputs/vllm-omni.jsonl",
+   "sha256": "cbc1732e431c745b93c89801dd5f6a58bd33d81b47a30b6342c598f312172d43"
+  }
+ }
+}

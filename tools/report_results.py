@@ -14,6 +14,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 METRICS = ("throughput_frames_s", "ttfa_p50_s", "ttfa_p95_s", "rtf_mean")
+#: streaming-quality metrics reported beside the headline ones (means over runs; the max stall is the max over runs)
+STREAM = ("e2e_p50_s", "e2e_p95_s", "stall_mean_s", "inter_chunk_gap_p95_s", "total_audio_s", "req_s")
 FRAMEWORKS = ("engine", "vllm-omni", "sglang-omni")
 LABEL = {"engine": "minicpm-o-4.5-single-gpu-engine", "vllm-omni": "vllm-omni", "sglang-omni": "sglang-omni"}
 COLOR = {"engine": "#d1495b", "vllm-omni": "#2e86ab", "sglang-omni": "#3b9b5a"}
@@ -34,9 +36,24 @@ def load_cells(ev: Path) -> list[dict]:
         cells.append({"dir": d.name, "framework": runs[0]["engine"], "candidate_id": cand, "config": runs[0]["config"],
                       "mps": runs[0]["mps_policy"], "C": exp["concurrency"], "k": len(runs), "n_requests": runs[0]["n_requests"],
                       "failed_requests": sum(r["n_failed"] for r in runs),
-                      **{m: statistics.fmean(r[m] for r in runs) for m in METRICS},
+                      "id_set": runs[0]["id_set"],
+                      **{m: statistics.fmean(r[m] for r in runs) for m in METRICS + STREAM},
+                      "stall_max_s": max(r["stall_max_s"] for r in runs),
                       "runs": {m: [r[m] for r in runs] for m in METRICS}})
     return cells
+
+
+def trace_rows(ev: Path) -> list[dict]:
+    """Per-stage p50 times of the traced baseline runs (``tools/trace_baselines.py``; vLLM-Omni records its stages)."""
+    rows = []
+    for d in sorted((ev / "traces").glob("*_c*"), key=lambda d: (d.name.split("_c")[0], int(d.name.split("_c")[1]))):
+        t = json.loads((d / "trace_summary.json").read_text())
+        st = {k: v["p50"] for k, v in t.get("stages", {}).items() if isinstance(v, dict) and "p50" in v}
+        kw = t.get("kernel_window", {})
+        rows.append({"trace": d.name, "C": t["concurrency"], "frames_s": t["timing_window_frames_s"], "stages_p50": st,
+                     "gpu_s_per_audio_s": kw.get("gpu_s_per_audio_s_total"),
+                     "processes": {k.split("/")[0]: v for k, v in kw.get("processes", {}).items()}})
+    return rows
 
 
 def best_per_framework(cells: list[dict]) -> dict:
@@ -90,10 +107,13 @@ def svg_chart(rows: dict, cs: list[int]) -> str:
 def main():
     ev = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / "evidence" / "20261019-l20x").resolve()
     cells = load_cells(ev)
+    tuning = load_cells(ev / "tuning") if (ev / "tuning").exists() else []
+    traces = trace_rows(ev) if (ev / "traces").exists() else []
     ratios = json.loads((ev / "campaign" / "r11c_vs_envelope.json").read_text())
     rows = best_per_framework(cells)
     cs = sorted({c["C"] for c in cells})
     (ROOT / "docs" / "current-results.json").write_text(json.dumps({"evidence": str(ev.relative_to(ROOT)), "cells": cells,
+                                                                    "tuning_cells": tuning, "traces": traces,
                                                                     "engine_vs_envelope": ratios}, indent=1) + "\n")
     (ROOT / "docs" / "figures").mkdir(parents=True, exist_ok=True)
     (ROOT / "docs" / "figures" / "full-comparison.svg").write_text(svg_chart(rows, cs))
@@ -110,6 +130,34 @@ def main():
             print(f"| {c} | {LABEL[f]} | `{cfg}` | {r['throughput_frames_s']:.2f} | "
                   f"{r['throughput_frames_s'] / sg['throughput_frames_s']:.2f}× | {r['ttfa_p50_s'] * 1e3:.1f} | "
                   f"{r['ttfa_p95_s'] * 1e3:.1f} | {r['rtf_mean']:.4f} |")
+    print()
+    print("Streaming metrics, evaluation cells (means over runs; max stall over runs)")
+    print("| C | Framework | Config | E2E p50 (s) | E2E p95 (s) | Stall mean (ms) | Stall max (s) | Chunk gap p95 (ms) | Audio per run (s) | Requests/s |")
+    print("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    for c in sorted(cells, key=lambda c: (c["C"], FRAMEWORKS.index(c["framework"]), c["candidate_id"])):
+        print(f"| {c['C']} | {LABEL[c['framework']]} | `{c['candidate_id'].split(':')[1].removesuffix('-r11c')}` | {c['e2e_p50_s']:.2f} | "
+              f"{c['e2e_p95_s']:.2f} | {c['stall_mean_s'] * 1e3:.1f} | {c['stall_max_s']:.2f} | {c['inter_chunk_gap_p95_s'] * 1e3:.0f} | "
+              f"{c['total_audio_s']:.0f} | {c['req_s']:.2f} |")
+    if tuning:
+        print()
+        print("Every eligible baseline configuration on the tuning requests (K=2; selection data)")
+        print("| C | Framework | Config | Throughput (frames/s) | TTFA p50 (ms) | TTFA p95 (ms) | RTF (mean) | Stall mean (ms) | Stall max (s) |")
+        print("|---:|---|---|---:|---:|---:|---:|---:|---:|")
+        for c in sorted(tuning, key=lambda c: (c["C"], FRAMEWORKS.index(c["framework"]), c["candidate_id"])):
+            print(f"| {c['C']} | {LABEL[c['framework']]} | `{c['candidate_id'].split(':')[1]}` | {c['throughput_frames_s']:.1f} | "
+                  f"{c['ttfa_p50_s'] * 1e3:.1f} | {c['ttfa_p95_s'] * 1e3:.1f} | {c['rtf_mean']:.4f} | {c['stall_mean_s'] * 1e3:.1f} | {c['stall_max_s']:.2f} |")
+    if traces:
+        print()
+        print("vLLM-Omni stage timings (p50 ms from arrival; traced with minicpmo_4_5_turn.yaml)")
+        print("| C | frames/s | Thinker TTFT | Thinker done | Talker first | Talker done | Code2Wav first | Code2Wav done | GPU s per audio s (stage 0 / 1 / 2) |")
+        print("|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+        for t in traces:
+            if not t["trace"].startswith("vllm"):
+                continue
+            st, pr = t["stages_p50"], list(t["processes"].values())
+            g = " / ".join(f"{p['gpu_s_per_audio_s']:.4f}" for p in pr)
+            print(f"| {t['C']} | {t['frames_s']:.0f} | {st['thinker_ttft_ms']:.0f} | {st['thinker_gen_ms']:.0f} | {st['talker_first_output_ms']:.0f} | "
+                  f"{st['talker_gen_ms']:.0f} | {st['code2wav_first_output_ms']:.0f} | {st['code2wav_gen_ms']:.0f} | {g} |")
     print()
     print("| C | Throughput | TTFA p50 | TTFA p95 | RTF (mean) |")
     print("|---:|---:|---:|---:|---:|")

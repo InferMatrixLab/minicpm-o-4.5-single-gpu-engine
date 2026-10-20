@@ -1,0 +1,365 @@
+{
+ "scope": "development",
+ "id_set": "tuning",
+ "sweeps": [
+  "results/l20x/campaign/qualify_seed0",
+  "results/l20x/campaign/qualify_seed1",
+  "results/l20x/campaign/qualify_seed2",
+  "results/l20x/campaign/qualify_seed1_rerun1"
+ ],
+ "effective_dir": "/workspace/cgzheng/cgzheng/qwen3_omni/results/effective_inputs",
+ "candidates": [
+  {
+   "candidate_id": "sglang-omni:speech-mm32k:4ebf4e2bdd31",
+   "digest": "4ebf4e2bdd316862242abd66f5509940277b06929f4e16fbeb7974e7e2bcd2ac",
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mm32k",
+   "mps": "off",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/07_sglang-omni_speech-mm32k_4ebf4e2bdd31_c8",
+    "1": "results/l20x/campaign/qualify_seed1/05_sglang-omni_speech-mm32k_4ebf4e2bdd31_c8",
+    "2": "results/l20x/campaign/qualify_seed2/00_sglang-omni_speech-mm32k_4ebf4e2bdd31_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/sglang-omni_speech_mm32k_4ebf4e2bdd31/speech_quality.json",
+    "sha256": "ad5a5ed054421394dab61186cd3c8256558edba80ac8c47b3c36d32ca6608e19",
+    "rows": 960,
+    "wer_corpus": 0.01569946733950098,
+    "wer_filtered_corpus": 0.013944782405240993,
+    "sim_mean": 49.127972980340324,
+    "utmos_mean": 4.309778989851475,
+    "catastrophic_count": 3
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/sglang-omni_speech_mm32k_4ebf4e2bdd31/qualification.json",
+    "sha256": "10c09989f6ef77f4617815bcc373f7cfe4c2b8049b7f88eb9ddd2cb1107f605a",
+    "floors_passed": true,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": true,
+     "1": true,
+     "2": true
+    }
+   },
+   "status": "qualified",
+   "failed_attempts": []
+  },
+  {
+   "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+   "digest": "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68",
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-off",
+   "mps": "off",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/05_sglang-omni_speech-mps-off_748941674fb6_c8",
+    "1": "results/l20x/campaign/qualify_seed1/07_sglang-omni_speech-mps-off_748941674fb6_c8",
+    "2": "results/l20x/campaign/qualify_seed2/03_sglang-omni_speech-mps-off_748941674fb6_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/sglang-omni_speech_mps-off_748941674fb6/speech_quality.json",
+    "sha256": "27e9a5a92863ba0be0d83bcc9e0b868271eb986e6d926922e6a80604e1d48164",
+    "rows": 960,
+    "wer_corpus": 0.015419119708438464,
+    "wer_filtered_corpus": 0.01403180542563143,
+    "sim_mean": 48.76106261014938,
+    "utmos_mean": 4.303973046441873,
+    "catastrophic_count": 2
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/sglang-omni_speech_mps-off_748941674fb6/qualification.json",
+    "sha256": "15d1451c4673db7229e14bd9ce1591b0d8443a1496d7c5027a9b52db7fd19314",
+    "floors_passed": true,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": true,
+     "1": true,
+     "2": true
+    }
+   },
+   "status": "qualified",
+   "failed_attempts": []
+  },
+  {
+   "candidate_id": "sglang-omni:speech-mps-on:ac0e44a46d2d",
+   "digest": "ac0e44a46d2d760d879b9b9c51f562297d74d69818734b4913c7649bd7c3bd9f",
+   "adapter": "sglang-omni",
+   "config": "speech",
+   "label": "mps-on",
+   "mps": "on",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/06_sglang-omni_speech-mps-on_ac0e44a46d2d_c8",
+    "1": "results/l20x/campaign/qualify_seed1_rerun1/00_sglang-omni_speech-mps-on_ac0e44a46d2d_c8",
+    "2": "results/l20x/campaign/qualify_seed2/04_sglang-omni_speech-mps-on_ac0e44a46d2d_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/sglang-omni_speech_mps-on_ac0e44a46d2d/speech_quality.json",
+    "sha256": "40c2b92bd964bcdba5f8f2951d475426799905782a9053827a82e126aed243dd",
+    "rows": 960,
+    "wer_corpus": 0.016914307074105225,
+    "wer_filtered_corpus": 0.013314580403187998,
+    "sim_mean": 49.17004350920518,
+    "utmos_mean": 4.3057576850056645,
+    "catastrophic_count": 5
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/sglang-omni_speech_mps-on_ac0e44a46d2d/qualification.json",
+    "sha256": "11d56588248a66eefbc150ece9a3e3a0042803819fc6966375bb23deebe4c8e7",
+    "floors_passed": true,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": true,
+     "1": true,
+     "2": true
+    }
+   },
+   "status": "qualified",
+   "failed_attempts": [
+    {
+     "cell": "results/l20x/campaign/qualify_seed1/00_sglang-omni_speech-mps-on_ac0e44a46d2d_c8",
+     "archived": false,
+     "seed_index": 1,
+     "concurrency": 8,
+     "reasons": [
+      "result.json unreadable: [Errno 2] No such file or directory: 'results/l20x/campaign/qualify_seed1/00_sglang-omni_speech-mps-on_ac0e44a46d2d_c8/result.json'"
+     ]
+    }
+   ]
+  },
+  {
+   "candidate_id": "vllm-omni:minicpmo_4_5_turn-mps-off:4ba864fd324e",
+   "digest": "4ba864fd324efb6eb58b81249a7e2779196cdf1b622f750f06245796b1dcd252",
+   "adapter": "vllm-omni",
+   "config": "minicpmo_4_5_turn.yaml",
+   "label": "mps-off",
+   "mps": "off",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/04_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c8",
+    "1": "results/l20x/campaign/qualify_seed1/02_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c8",
+    "2": "results/l20x/campaign/qualify_seed2/07_vllm-omni_minicpmo_4_5_turn-mps-off_4ba864fd324e_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mps-off_4ba864fd324e/speech_quality.json",
+    "sha256": "974595efe1f366838fba42a0baafd46c206d629bbe0b2a26de52c50e560a699b",
+    "rows": 960,
+    "wer_corpus": 0.01682085786375105,
+    "wer_filtered_corpus": 0.013858975559509318,
+    "sim_mean": 48.9022707382838,
+    "utmos_mean": 4.201303860296806,
+    "catastrophic_count": 4
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mps-off_4ba864fd324e/qualification.json",
+    "sha256": "1fc0011bfb60249095540fd08687544b9f5fd305f72c429672b8f193565dd9b7",
+    "floors_passed": true,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": true,
+     "1": true,
+     "2": true
+    }
+   },
+   "status": "qualified",
+   "failed_attempts": []
+  },
+  {
+   "candidate_id": "vllm-omni:minicpmo_4_5_turn_mps-mps-on:9901f000524d",
+   "digest": "9901f000524d54449f763df3be7e7830468a4fedee764a22c3aeaf93b7a58792",
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mps.yaml",
+   "label": "mps-on",
+   "mps": "on",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/00_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c8",
+    "1": "results/l20x/campaign/qualify_seed1/03_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c8",
+    "2": "results/l20x/campaign/qualify_seed2/05_vllm-omni_minicpmo_4_5_turn_mps-mps-on_9901f000524d_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mps_mps-on_9901f000524d/speech_quality.json",
+    "sha256": "b42de2de77c7fe35e13b32f2f6036a397aa7c0266c623c7efb12dda4ca6a3f81",
+    "rows": 960,
+    "wer_corpus": 0.017007756284459396,
+    "wer_filtered_corpus": 0.013123359580052493,
+    "sim_mean": 48.925742660959564,
+    "utmos_mean": 4.199994861831268,
+    "catastrophic_count": 6
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mps_mps-on_9901f000524d/qualification.json",
+    "sha256": "e4f2bc2b8deca965188bdb2fcaa69d71ba7a606b5c1c3983c4d9da5bf42c23e2",
+    "floors_passed": true,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": true,
+     "1": true,
+     "2": true
+    }
+   },
+   "status": "qualified",
+   "failed_attempts": []
+  },
+  {
+   "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2-mps-off:b85b1a2728b4",
+   "digest": "b85b1a2728b48ccc658c4311c39ddd148e8711bdf7708d686ccac4a3d7414d72",
+   "adapter": "vllm-omni",
+   "config": "minicpmo_4_5_turn_mrv2.yaml",
+   "label": "mps-off",
+   "mps": "off",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/01_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c8",
+    "1": "results/l20x/campaign/qualify_seed1/08_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c8",
+    "2": "results/l20x/campaign/qualify_seed2/02_vllm-omni_minicpmo_4_5_turn_mrv2-mps-off_b85b1a2728b4_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_mps-off_b85b1a2728b4/speech_quality.json",
+    "sha256": "df8a157dbb732e70e2265de0027c7acf300fccf47ac2b764c32ce02e4aa08875",
+    "rows": 960,
+    "wer_corpus": 0.03579104756564807,
+    "wer_filtered_corpus": 0.023225075528700907,
+    "sim_mean": 49.04249419470628,
+    "utmos_mean": 4.165352753053109,
+    "catastrophic_count": 16
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_mps-off_b85b1a2728b4/qualification.json",
+    "sha256": "42df33b0c9ccf8efd387c6843308ee942b2d4b11169282793552d5f83be89ecf",
+    "floors_passed": true,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": false,
+     "1": false,
+     "2": true
+    }
+   },
+   "status": "qualified",
+   "failed_attempts": []
+  },
+  {
+   "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200-mps-off:dc79a33becca",
+   "digest": "dc79a33becca57bbc4f060a5893db219c5b46139a092e43e1b975fa0337f5ef4",
+   "adapter": "vllm-omni",
+   "config": "minicpmo_4_5_turn_mrv2_h200.yaml",
+   "label": "mps-off",
+   "mps": "off",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/03_vllm-omni_minicpmo_4_5_turn_mrv2_h200-mps-off_dc79a33becca_c8",
+    "1": "results/l20x/campaign/qualify_seed1/06_vllm-omni_minicpmo_4_5_turn_mrv2_h200-mps-off_dc79a33becca_c8",
+    "2": "results/l20x/campaign/qualify_seed2/08_vllm-omni_minicpmo_4_5_turn_mrv2_h200-mps-off_dc79a33becca_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-off_dc79a33becca/speech_quality.json",
+    "sha256": "e6dec6b4d596fda4fc05c08e79e0427b8a339b8417d1811d136be1612f04776c",
+    "rows": 960,
+    "wer_corpus": 0.03438930941033548,
+    "wer_filtered_corpus": 0.02489157080897605,
+    "sim_mean": 49.027511503299074,
+    "utmos_mean": 4.161499217897654,
+    "catastrophic_count": 13
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-off_dc79a33becca/qualification.json",
+    "sha256": "b55160890802800fffe59d7d001eafd5ce2371915e6f7ef0d762caee8d6eb108",
+    "floors_passed": false,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": false,
+     "1": false,
+     "2": true
+    }
+   },
+   "status": "not-qualified",
+   "failed_attempts": []
+  },
+  {
+   "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_h200_mps-mps-on:ecae2534b6b1",
+   "digest": "ecae2534b6b19b40716501cfac366f3ee13b6ec1b7f4ffc4e3a47451a5d981e6",
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mrv2_h200_mps.yaml",
+   "label": "mps-on",
+   "mps": "on",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/02_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c8",
+    "1": "results/l20x/campaign/qualify_seed1/01_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c8",
+    "2": "results/l20x/campaign/qualify_seed2/01_vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps-mps-on_ecae2534b6b1_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps_mps-on_ecae2534b6b1/speech_quality.json",
+    "sha256": "08adfa2fd0ab8b35e8dc2e466b1904fad94e8faad5c6e75545915c2b88ce2b7f",
+    "rows": 960,
+    "wer_corpus": 0.029623399682272684,
+    "wer_filtered_corpus": 0.023887896172293803,
+    "sim_mean": 48.94332484304905,
+    "utmos_mean": 4.163521357501547,
+    "catastrophic_count": 11
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_h200_mps_mps-on_ecae2534b6b1/qualification.json",
+    "sha256": "60b004c26257ef08bf698de4dca6daba265843fd2421b8fc69fc85f03792a331",
+    "floors_passed": true,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": false,
+     "1": false,
+     "2": true
+    }
+   },
+   "status": "qualified",
+   "failed_attempts": []
+  },
+  {
+   "candidate_id": "vllm-omni:minicpmo_4_5_turn_mrv2_mps-mps-on:6fa348f474ac",
+   "digest": "6fa348f474ac2cda59b7e85e60998aef0f3cdfdc35fb2a049456ecf5ff64009a",
+   "adapter": "vllm-omni",
+   "config": "/workspace/cgzheng/cgzheng/qwen3_omni/configs/vllm/minicpmo_4_5_turn_mrv2_mps.yaml",
+   "label": "mps-on",
+   "mps": "on",
+   "cells": {
+    "0": "results/l20x/campaign/qualify_seed0/08_vllm-omni_minicpmo_4_5_turn_mrv2_mps-mps-on_6fa348f474ac_c8",
+    "1": "results/l20x/campaign/qualify_seed1/04_vllm-omni_minicpmo_4_5_turn_mrv2_mps-mps-on_6fa348f474ac_c8",
+    "2": "results/l20x/campaign/qualify_seed2/06_vllm-omni_minicpmo_4_5_turn_mrv2_mps-mps-on_6fa348f474ac_c8"
+   },
+   "quality": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_mps_mps-on_6fa348f474ac/speech_quality.json",
+    "sha256": "e56903bdca4ddfeed1aa8576120b1d97bfcbb9bdddebed0c6789a02e6b8d3792",
+    "rows": 960,
+    "wer_corpus": 0.03560414914493973,
+    "wer_filtered_corpus": 0.024346513164103047,
+    "sim_mean": 48.8833622088035,
+    "utmos_mean": 4.153750809530417,
+    "catastrophic_count": 15
+   },
+   "qualification": {
+    "path": "results/l20x/campaign/qualification_v3/vllm-omni_minicpmo_4_5_turn_mrv2_mps_mps-on_6fa348f474ac/qualification.json",
+    "sha256": "0c668b2fd2df8be8fba629194d3ad94f897fb4fb2dd4c1c47bbc379eb0b5f30e",
+    "floors_passed": false,
+    "effective_inputs_eligible": true,
+    "class_r": true,
+    "class_r_unknown_reason": null,
+    "per_seed_floors": {
+     "0": false,
+     "1": false,
+     "2": true
+    }
+   },
+   "status": "not-qualified",
+   "failed_attempts": []
+  }
+ ]
+}

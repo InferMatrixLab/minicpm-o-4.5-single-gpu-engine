@@ -1,0 +1,323 @@
+{
+ "label": "run2",
+ "concurrency": 8,
+ "measured": true,
+ "gpu": "L20X",
+ "engine": "sglang-omni",
+ "config": "speech",
+ "candidate_id": "sglang-omni:speech-mps-off:748941674fb6",
+ "config_digest": "748941674fb69003540f1ef8c5e9e7e4a7fc958b6b3ee569be75bb787c019d68",
+ "cell_digest": "2841d45b99c5b675401c047e9c10e4cca98f13db8c2d6b99a7756d7e7e90b8cb",
+ "experiment_base_digest": "4d920198e6c2653f222b37ca7c93b6620e17306b420ce7fac80e5cf4de01620e",
+ "mps_policy": "off",
+ "id_set": "tuning",
+ "ids_sha256": "aca688b5ff41189f617e1ed6461f39d16e74c2febbb3467c87ef82457fc0e4c3",
+ "expected_ids_sha256": "aca688b5ff41189f617e1ed6461f39d16e74c2febbb3467c87ef82457fc0e4c3",
+ "seed_index": 0,
+ "timeout_s": 180.0,
+ "strict": true,
+ "cache_policy": "restart",
+ "cache_evidence": {
+  "fresh_server": true,
+  "server_pid": 1698397,
+  "server_pgid": 1698397,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/16e60ae/scripts/serve_sglang_omni.sh",
+   "18530"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "3",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 3,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 210.10156824812293,
+  "process_tree": [
+   1698397,
+   1706691,
+   1706692,
+   1706693,
+   1725785,
+   1741937,
+   1741939,
+   1741941,
+   1741943,
+   1741945,
+   1741947,
+   1741949,
+   1741951,
+   1741953,
+   1741955,
+   1741957,
+   1741959,
+   1741961,
+   1741963,
+   1741965,
+   1741967,
+   1741969,
+   1741971,
+   1741975,
+   1741977,
+   1741979,
+   1741981,
+   1741983,
+   1741985,
+   1741987,
+   1741989,
+   1741991,
+   1741993,
+   1741995,
+   1741997,
+   1741999,
+   1742001
+  ],
+  "gpu_workers": [
+   {
+    "pid": 1706692,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=48, pipe_handle=52)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_CACHE_PATH": "/home/cgzheng/.cache/sglang/nv",
+     "CUDA_VISIBLE_DEVICES": "3",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "SGLANG_OMNI_ALLOWED_LOCAL_MEDIA_PATH": "",
+     "SGLANG_OMNI_ALLOWED_MEDIA_DOMAINS": "",
+     "SGLANG_OMNI_OMP_FROM_CPU_PLAN": "1",
+     "SGLANG_OMNI_PLATFORM_SPEC": "sglang_omni.platforms.cuda.CUDAOmniPlatform",
+     "SGLANG_OMNI_STARTUP_TIMEOUT": "1800",
+     "SGLANG_OMNI_STRICT_PORT": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/home/cgzheng/.cache/sglang/inductor"
+    }
+   },
+   {
+    "pid": 1706693,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=48, pipe_handle=56)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_CACHE_PATH": "/home/cgzheng/.cache/sglang/nv",
+     "CUDA_VISIBLE_DEVICES": "3",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "SGLANG_OMNI_ALLOWED_LOCAL_MEDIA_PATH": "",
+     "SGLANG_OMNI_ALLOWED_MEDIA_DOMAINS": "",
+     "SGLANG_OMNI_OMP_FROM_CPU_PLAN": "1",
+     "SGLANG_OMNI_PLATFORM_SPEC": "sglang_omni.platforms.cuda.CUDAOmniPlatform",
+     "SGLANG_OMNI_STARTUP_TIMEOUT": "1800",
+     "SGLANG_OMNI_STRICT_PORT": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/home/cgzheng/.cache/sglang/inductor"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "off",
+   "workers": [
+    {
+     "pid": 1706692,
+     "type": "C",
+     "process_name": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "used_memory": "75760 MiB"
+    },
+    {
+     "pid": 1706693,
+     "type": "C",
+     "process_name": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "used_memory": "11126 MiB"
+    }
+   ],
+   "foreign": [],
+   "mps_servers_on_gpu": []
+  }
+ },
+ "runtime_evidence": {
+  "server_pid": 1698397,
+  "server_pgid": 1698397,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/16e60ae/scripts/serve_sglang_omni.sh",
+   "18530"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "3",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 3,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 210.10156824812293,
+  "process_tree": [
+   1698397,
+   1706691,
+   1706692,
+   1706693,
+   1725785,
+   1741937,
+   1741939,
+   1741941,
+   1741943,
+   1741945,
+   1741947,
+   1741949,
+   1741951,
+   1741953,
+   1741955,
+   1741957,
+   1741959,
+   1741961,
+   1741963,
+   1741965,
+   1741967,
+   1741969,
+   1741971,
+   1741975,
+   1741977,
+   1741979,
+   1741981,
+   1741983,
+   1741985,
+   1741987,
+   1741989,
+   1741991,
+   1741993,
+   1741995,
+   1741997,
+   1741999,
+   1742001
+  ],
+  "gpu_workers": [
+   {
+    "pid": 1706692,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=48, pipe_handle=52)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_CACHE_PATH": "/home/cgzheng/.cache/sglang/nv",
+     "CUDA_VISIBLE_DEVICES": "3",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "SGLANG_OMNI_ALLOWED_LOCAL_MEDIA_PATH": "",
+     "SGLANG_OMNI_ALLOWED_MEDIA_DOMAINS": "",
+     "SGLANG_OMNI_OMP_FROM_CPU_PLAN": "1",
+     "SGLANG_OMNI_PLATFORM_SPEC": "sglang_omni.platforms.cuda.CUDAOmniPlatform",
+     "SGLANG_OMNI_STARTUP_TIMEOUT": "1800",
+     "SGLANG_OMNI_STRICT_PORT": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/home/cgzheng/.cache/sglang/inductor"
+    }
+   },
+   {
+    "pid": 1706693,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=48, pipe_handle=56)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_CACHE_PATH": "/home/cgzheng/.cache/sglang/nv",
+     "CUDA_VISIBLE_DEVICES": "3",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "SGLANG_OMNI_ALLOWED_LOCAL_MEDIA_PATH": "",
+     "SGLANG_OMNI_ALLOWED_MEDIA_DOMAINS": "",
+     "SGLANG_OMNI_OMP_FROM_CPU_PLAN": "1",
+     "SGLANG_OMNI_PLATFORM_SPEC": "sglang_omni.platforms.cuda.CUDAOmniPlatform",
+     "SGLANG_OMNI_STARTUP_TIMEOUT": "1800",
+     "SGLANG_OMNI_STRICT_PORT": "1",
+     "TORCHINDUCTOR_CACHE_DIR": "/home/cgzheng/.cache/sglang/inductor"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "off",
+   "workers": [
+    {
+     "pid": 1706692,
+     "type": "C",
+     "process_name": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "used_memory": "75760 MiB"
+    },
+    {
+     "pid": 1706693,
+     "type": "C",
+     "process_name": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main/.venv/bin/python",
+     "used_memory": "11126 MiB"
+    }
+   ],
+   "foreign": [],
+   "mps_servers_on_gpu": []
+  }
+ },
+ "server_startup_s": 210.10156824812293,
+ "n_requests": 320,
+ "n_failed": 0,
+ "valid": true,
+ "invalid_reasons": {},
+ "makespan_s": 35.62694524973631,
+ "throughput_frames_s": 955.6250125107762,
+ "ttfa_p50_s": 0.941390011459589,
+ "ttfa_p95_s": 1.159718008711934,
+ "rtf_mean": 0.21857439896162578,
+ "rtf_duration_weighted": 0.20875535517579094,
+ "req_s": 8.981965693574821,
+ "audio_s_per_s": 38.225000500431044,
+ "e2e_p50_s": 0.941390011459589,
+ "e2e_p95_s": 1.159718008711934,
+ "total_audio_s": 1361.84,
+ "first_chunk_mean_s": 4.25575,
+ "stall_mean_s": 0.0,
+ "stall_max_s": 0.0,
+ "inter_chunk_gap_p50_s": NaN,
+ "inter_chunk_gap_p95_s": NaN,
+ "inter_chunk_gap_max_s": NaN
+}

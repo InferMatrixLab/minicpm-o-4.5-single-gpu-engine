@@ -1,0 +1,122 @@
+{
+  "stack": "vllm",
+  "concurrency": 1,
+  "gpu": 2,
+  "server_evidence": {
+    "server_pid": 1274146,
+    "server_pgid": 1274146,
+    "launch_argv": [
+      "bash",
+      "/workspace/cgzheng/cgzheng/qwen3_omni/scripts/serve_vllm_omni.sh",
+      "minicpmo_4_5_turn.yaml",
+      "18801",
+      "--stage-overrides",
+      "{\"0\": {\"profiler_config\": {\"profiler\": \"torch\", \"torch_profiler_with_stack\": false, \"torch_profiler_record_shapes\": false, \"torch_profiler_use_gzip\": true, \"torch_profiler_dump_cuda_time_total\": true, \"torch_profiler_dir\": \"/workspace/cgzheng/cgzheng/qwen3_omni/results/l20x/traces/vllm_c1/torch\"}}, \"1\": {\"profiler_config\": {\"profiler\": \"torch\", \"torch_profiler_with_stack\": false, \"torch_profiler_record_shapes\": false, \"torch_profiler_use_gzip\": true, \"torch_profiler_dump_cuda_time_total\": true, \"torch_profiler_dir\": \"/workspace/cgzheng/cgzheng/qwen3_omni/results/l20x/traces/vllm_c1/torch\"}}, \"2\": {\"profiler_config\": {\"profiler\": \"torch\", \"torch_profiler_with_stack\": false, \"torch_profiler_record_shapes\": false, \"torch_profiler_use_gzip\": true, \"torch_profiler_dump_cuda_time_total\": true, \"torch_profiler_dir\": \"/workspace/cgzheng/cgzheng/qwen3_omni/results/l20x/traces/vllm_c1/torch\"}}}"
+    ],
+    "launch_env": {
+      "CUDA_VISIBLE_DEVICES": "2",
+      "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+      "HF_HOME": "/workspace/models",
+      "HF_HUB_CACHE": "/workspace/models/hub",
+      "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+      "VLLM_CUSTOM_SCOPES_FOR_PROFILING": "1"
+    },
+    "gpu": {
+      "gpu_index": 2,
+      "gpu_sku": "L20X",
+      "gpu_uuid": "GPU-e7921766-67c6-bc17-6df1-eca427957832",
+      "driver": "570.133.20",
+      "memory_mib": "143771"
+    },
+    "startup_s": 321.120023753494,
+    "process_tree": [
+      1274146,
+      1275146,
+      1275147,
+      1276993,
+      1279175
+    ],
+    "gpu_workers": [
+      {
+        "pid": 1275147,
+        "cmdline": [
+          "VLLM::StageEngineCoreProc_stage0_replica0_DP0"
+        ],
+        "env": {
+          "HF_HUB_OFFLINE": "1",
+          "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+          "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+          "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+          "TORCHINDUCTOR_COMPILE_THREADS": "1",
+          "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+          "VLLM_DISABLE_LOG_LOGO": "1",
+          "VLLM_LOGGING_COLOR": "1",
+          "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        }
+      },
+      {
+        "pid": 1276993,
+        "cmdline": [
+          "VLLM::StageEngineCoreProc_stage1_replica0_DP0"
+        ],
+        "env": {
+          "HF_HUB_OFFLINE": "1",
+          "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+          "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+          "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+          "TORCHINDUCTOR_COMPILE_THREADS": "1",
+          "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+          "VLLM_DISABLE_LOG_LOGO": "1",
+          "VLLM_LOGGING_COLOR": "1",
+          "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        }
+      },
+      {
+        "pid": 1279175,
+        "cmdline": [
+          "VLLM::StageEngineCoreProc_stage2_replica0_DP0"
+        ],
+        "env": {
+          "HF_HUB_OFFLINE": "1",
+          "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+          "PYTORCH_NVML_BASED_CUDA_CHECK": "1",
+          "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng",
+          "TORCHINDUCTOR_COMPILE_THREADS": "1",
+          "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
+          "VLLM_DISABLE_LOG_LOGO": "1",
+          "VLLM_LOGGING_COLOR": "1",
+          "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        }
+      }
+    ],
+    "mps": {
+      "observed": "off",
+      "workers": [
+        {
+          "pid": 1275147,
+          "type": "C",
+          "process_name": "VLLM::StageEngineCoreProc_stage0_replica0_DP0",
+          "used_memory": "65502 MiB"
+        },
+        {
+          "pid": 1276993,
+          "type": "C",
+          "process_name": "VLLM::StageEngineCoreProc_stage1_replica0_DP0",
+          "used_memory": "5710 MiB"
+        },
+        {
+          "pid": 1279175,
+          "type": "C",
+          "process_name": "VLLM::StageEngineCoreProc_stage2_replica0_DP0",
+          "used_memory": "19454 MiB"
+        }
+      ],
+      "foreign": [],
+      "mps_servers_on_gpu": []
+    }
+  },
+  "kernel_window_unix": [
+    1792102356.3450408,
+    1792102358.1943314
+  ]
+}

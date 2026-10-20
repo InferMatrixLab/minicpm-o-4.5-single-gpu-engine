@@ -12,7 +12,8 @@ OpenAI-compatible `/v1/chat/completions` API with streamed text and 24 kHz audio
 
 [Module details and configurations](docs/architecture.md) ·
 [Implemented optimizations and experiment results](docs/optimizations.md) ·
-[Why the target is not met yet](docs/performance-gap.md)
+[Why the target is not met yet](docs/performance-gap.md) ·
+[Test results](docs/testing.md)
 
 ## Quickstart
 
@@ -96,16 +97,25 @@ SGLang-Omni [`22d4ace`](https://github.com/sgl-project/sglang-omni/commit/22d4ac
 `C` is the number of concurrent requests. Throughput counts returned audio as 25 Hz codec frames
 (25 × delivered seconds / wall time); TTFA is the time to the first audio sample; RTF is each request's time to its
 last audio sample divided by its audio duration. Baseline configurations were chosen per concurrency on separate
-tuning requests and then measured on the evaluation requests. vLLM-Omni won no metric at C=4 and C=8 during tuning, so
-it was not measured there. Where two SGLang-Omni configurations were measured at one C, the faster one is shown; the
-target ratios use the configuration selected on the tuning requests for each metric.
+tuning requests and then measured on the evaluation requests. Where two SGLang-Omni configurations were measured at
+one C, the faster one is shown; the target ratios use the configuration selected on the tuning requests for each metric.
+
+- **Missing vLLM-Omni rows.** Only tuning winners were carried into the evaluation. At C=4 and C=8 SGLang-Omni won every
+  metric, so vLLM-Omni has no evaluation cell there. It was measured there on the tuning requests: 331–405 frames/s,
+  TTFA p50 0.63–1.19 s ([all 42 tuning cells](docs/baselines.md#every-qualified-configuration-on-the-tuning-requests)).
+- **vLLM-Omni stops at ~400 frames/s.** Every configuration plateaus from C=4 upward (about 16 s of audio per second), so
+  RTF reaches 1 at C=16 and 2 at C=32 and streams stall. Its stage trace puts the limit in the eager, launch-bound
+  Code2Wav stage ([analysis](docs/baselines.md#why-vllm-omni-stops-scaling-at-about-400-framess)).
+- **SGLang-Omni does not stream audio.** It returns one waveform per request, so its TTFA is its end-to-end latency
+  ([details](docs/baselines.md#sglang-omni-does-not-stream-audio)).
 
 **Target status: not met.** The goal is 2× the better baseline on every metric at every C, with the one-sided 95%
 bootstrap lower bound (LCB) at or above 2.0. TTFA reaches it in 10 of 12 cells. Throughput and RTF reach 1.07–1.47×
 (LCB 1.06–1.46).
 The `track_s_fast_r11` profile also exceeds the Token2Wav HiFT error bound on 1 of 190 chunks (1.06e-2 against
 1e-2) and has not yet passed the speech quality gates, so it is a measured profile, not a qualified headline.
-[Ratios, quality status, run ranges and raw evidence](docs/current-results.md).
+[Ratios, streaming metrics, quality, run ranges and raw evidence](docs/current-results.md) ·
+[Baseline selection and analysis](docs/baselines.md) · [Test results](docs/testing.md).
 <!-- latest-performance:end -->
 
 ## References

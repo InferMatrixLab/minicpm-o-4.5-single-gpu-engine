@@ -56,6 +56,39 @@ Baseline configurations:
 - Each baseline was tuned per concurrency and metric on the tuning requests among the class-R configurations (same
   prompt token IDs and reference audio bytes as the reference path). The winners were then measured on the evaluation
   requests. At C=4 and C=8 every metric was won by SGLang-Omni, so vLLM-Omni has no evaluation cell there.
+- SGLang-Omni returns one waveform per request (no audio streaming), so its TTFA equals its end-to-end latency.
+- Every qualified baseline configuration at every C (tuning requests), the quality qualification and the vLLM-Omni
+  stage trace are in [baselines.md](baselines.md).
+
+## Streaming behaviour
+
+Means over the measured runs; the max stall is the largest over all runs. E2E is the time to the last audio sample. Chunk gaps
+are the times between audio events of one request; SGLang-Omni sends one event, so it has none.
+
+| C | Framework | Config | E2E p50 (s) | E2E p95 (s) | Stall mean (ms) | Stall max (s) | Chunk gap p95 (ms) | Audio per run (s) | Requests/s |
+|---:|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 0.29 | 0.39 | 0.0 | 0.00 | 54 | 1461 | 3.48 |
+| 1 | vllm-omni | `minicpmo_4_5_turn_mps-mps-on` | 0.55 | 0.80 | 3.6 | 1.57 | 91 | 1409 | 1.70 |
+| 1 | sglang-omni | `speech-mm32k` | 0.38 | 0.50 | 0.0 | 0.00 | — | 1389 | 2.57 |
+| 2 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 0.44 | 0.58 | 0.0 | 0.00 | 88 | 1461 | 4.56 |
+| 2 | vllm-omni | `minicpmo_4_5_turn_mps-mps-on` | 0.68 | 0.97 | 0.0 | 0.00 | 186 | 1411 | 2.89 |
+| 2 | sglang-omni | `speech-mps-on` | 0.47 | 0.64 | 0.0 | 0.00 | — | 1388 | 4.15 |
+| 4 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 0.59 | 0.80 | 0.0 | 0.00 | 134 | 1461 | 6.68 |
+| 4 | sglang-omni | `speech-mps-on` | 0.60 | 0.83 | 0.0 | 0.00 | — | 1396 | 6.51 |
+| 8 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 0.82 | 1.06 | 0.0 | 0.00 | 198 | 1466 | 9.77 |
+| 8 | sglang-omni | `speech-mm32k` | 0.89 | 1.17 | 0.0 | 0.00 | — | 1381 | 9.13 |
+| 8 | sglang-omni | `speech-mps-on` | 0.85 | 1.15 | 0.0 | 0.00 | — | 1385 | 9.55 |
+| 16 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 1.09 | 1.41 | 0.0 | 0.03 | 251 | 1471 | 14.57 |
+| 16 | vllm-omni | `minicpmo_4_5_turn_mrv2_h200_mps-mps-on` | 3.40 | 6.97 | 579.7 | 14.14 | 1796 | 1314 | 4.01 |
+| 16 | sglang-omni | `speech-mps-on` | 1.18 | 1.69 | 0.0 | 0.00 | — | 1385 | 13.45 |
+| 32 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 1.47 | 1.88 | 0.4 | 0.09 | 261 | 2906 | 21.47 |
+| 32 | vllm-omni | `minicpmo_4_5_turn_mrv2_h200_mps-mps-on` | 3.79 | 26.94 | 4219.3 | 93.53 | 9295 | 2581 | 4.04 |
+| 32 | sglang-omni | `speech-mps-off` | 1.61 | 2.37 | 0.0 | 0.00 | — | 2730 | 18.73 |
+
+The engine streams several audio events per request (5.4 on average at C=32). Its largest stall over all runs is 0 up
+to C=8, 0.03 s at C=16 and 0.09 s at C=32 (3200 requests). vLLM-Omni's MRv2 profile stalls for seconds at C ≥ 16 (see [baselines.md](baselines.md)). The
+frameworks generate slightly different amounts of audio for the same requests (Talker sampling), which throughput
+counts as delivered.
 
 ## Against the target
 
@@ -112,9 +145,29 @@ Minimum–maximum over the measured runs of each cell. No request failed in any 
 | Fast DiT, FP16 flow | Within the FP16 mel bound (5e-3) |
 | TF32 HiFT alone | Max chunk 5.3e-3 (bound 1e-2), 190 chunks |
 | TF32 HiFT + batched setup encoder (`track_s_fast_r11`) | **Fails on 1 of 190 chunks: 1.06e-2.** Strict expected failure in `tests/engine/test_hift_tf32.py` until repaired |
-| Speech quality gates (WER, SIM, UTMOS vs the frozen baseline reference, 1088 rows × 3 seeds at C=1 and C=32) | **Not run** for `track_s_fast_r11`. An earlier development candidate scored UTMOS 4.166 against 4.29–4.30 for SGLang-Omni (floor 4.163, seed 0) |
+| Speech quality gates (WER, SIM, UTMOS vs the frozen baseline reference, 1088 rows × 3 seeds at C=1 and C=32) | **Not run** for `track_s_fast_r11`. Development run of `track_s_fast` below: passes the absolute floors, UTMOS 0.13 below the reference |
 | Multimodal accuracy (MMMU, MMSU, Daily-Omni) | Evaluators and references frozen; engine gates not run |
 | Robustness (C=32, 30 min, cancellation, overload, long prefills, memory ±1%) | Passed on `track_s_fast` (33,291 requests, 0 invalid, max stall 0.18 s); not repeated on `track_s_fast_r11` |
+
+## Speech quality (development)
+
+`track_s_fast` (the profile without the three options of `track_s_fast_r11`), all 1088 rows, seed 0
+(`quality/engine_dev`), against the frozen reference: the best value over the qualified baselines' full-set runs
+(1088 rows × 3 seeds, `quality/speech_qref_final.json`).
+
+| | Rows | WER (filtered) | Catastrophic rows | SIM | UTMOS | Silence / repetition / truncation |
+|---|---:|---:|---:|---:|---:|---|
+| Engine `track_s_fast`, C=1 | 1088 | 1.40% | 2 | 48.93 | 4.166 | 0 / 0 / 0 |
+| Engine `track_s_fast`, C=32 | 1088 | 1.37% | 2 | 48.88 | 4.166 | 0 / 0 / 0 |
+| Baseline reference (best per metric) | 1088 × 3 | 1.56% (corpus) | 4 | 49.56 | 4.298 | 0 / 0 / 0 |
+| Absolute floors | | ≤ 2.69% | | ≥ 41.58 | ≥ 4.163 | |
+
+The engine passes the absolute floors; its UTMOS is 0.13 below SGLang-Omni's (4.30–4.31) and 0.03–0.04 below vLLM-Omni's
+turn profiles (4.20). The 8-frame first-chunk ramp accounts for about 0.025 of it (320-row ablation). Thinker greedy
+text equals the reference on 99.9% of rows. The comparative gates need all three seeds and run on the exact headline
+candidate; they have not been run.
+
+Test-suite results, the end-to-end smoke of this repository and the robustness acceptance are in [testing.md](testing.md).
 
 ## Evidence
 
@@ -125,5 +178,10 @@ Minimum–maximum over the measured runs of each cell. No request failed in any 
 - `evidence/20261019-l20x/campaign/`: the frozen baseline envelope (`envelope.json`), the tuning winners
   (`winners.json`), the engine-versus-envelope ratios computed on the raw cells (`r11c_vs_envelope.json`,
   `r11c_envelope.log`) and the cell verification log.
+- `evidence/20261019-l20x/tuning/`: the 42 tuning cells of the 7 qualified baseline configurations (no server logs).
+- `evidence/20261019-l20x/traces/`: baseline stage-trace summaries (`tools/trace_baselines.py`).
+- `evidence/20261019-l20x/quality/`: the engine development quality reports with per-row records, the baseline
+  qualification records and the frozen speech reference.
+- `evidence/20261019-l20x/robustness_track_s_fast_8338bda/`: the robustness acceptance report and its replay.
 - The engine cells ran from a frozen worktree at the commit recorded in each `experiment.json` (the code of this
   snapshot's `track_s_fast_r11` path, before the repository was extracted).

@@ -1,0 +1,455 @@
+{
+ "stack": "sglang",
+ "concurrency": 1,
+ "client_timing_window": {
+  "ttfa_s": {
+   "n": 32,
+   "mean": 0.4252495493274182,
+   "p50": 0.4183378331363201,
+   "p95": 0.49879475962370634
+  },
+  "e2e_s": {
+   "n": 32,
+   "mean": 0.4252495493274182,
+   "p50": 0.4183378331363201,
+   "p95": 0.49879475962370634
+  },
+  "rtf": {
+   "n": 32,
+   "mean": 0.10974954996253944,
+   "p50": 0.10663622574127736,
+   "p95": 0.1501423641057758
+  },
+  "duration_s": {
+   "n": 32,
+   "mean": 4.04625,
+   "p50": 3.78,
+   "p95": 5.858
+  }
+ },
+ "timing_window_frames_s": 236.17822273753782,
+ "stages": {
+  "admission_to_thinker_ms": {
+   "n": 32,
+   "mean": 3.6759033203125,
+   "p50": 3.3560791015625,
+   "p95": 3.6558349609375
+  },
+  "code2wav_ms": {
+   "n": 32,
+   "mean": 188.10814666748047,
+   "p50": 185.495849609375,
+   "p95": 218.81783447265624
+  },
+  "talker_decode_ms": {
+   "n": 32,
+   "mean": 100.143310546875,
+   "p50": 94.62744140625,
+   "p95": 143.68211669921874
+  },
+  "talker_prefill_ms": {
+   "n": 32,
+   "mean": 11.522087097167969,
+   "p50": 11.37939453125,
+   "p95": 12.29080810546875
+  },
+  "talker_to_code2wav_ms": {
+   "n": 32,
+   "mean": 0.03432464599609375,
+   "p50": 0.0301513671875,
+   "p95": 0.07020263671875
+  },
+  "thinker_decode_ms": {
+   "n": 32,
+   "mean": 84.81571960449219,
+   "p50": 81.4002685546875,
+   "p95": 107.71221923828125
+  },
+  "thinker_prefill_ms": {
+   "n": 32,
+   "mean": 22.589019775390625,
+   "p50": 22.198974609375,
+   "p95": 25.106201171875
+  },
+  "thinker_to_talker_ms": {
+   "n": 32,
+   "mean": 3.928863525390625,
+   "p50": 3.8319091796875,
+   "p95": 4.939440917968749
+  }
+ },
+ "per_request": [
+  {
+   "request_id": "5697295c-a0db-46b6-af68-6ac6639ed152",
+   "thinker_prefill_ms": 29.52099609375,
+   "thinker_decode_ms": 81.2001953125,
+   "thinker_to_talker_ms": 3.64404296875,
+   "talker_prefill_ms": 11.938232421875,
+   "talker_decode_ms": 84.5908203125,
+   "talker_to_code2wav_ms": 0.03125,
+   "code2wav_ms": 192.4267578125,
+   "admission_to_thinker_ms": 13.090576171875
+  },
+  {
+   "request_id": "9fea01c1-90b5-47d5-9ce7-1737328387e9",
+   "thinker_prefill_ms": 24.627197265625,
+   "thinker_decode_ms": 98.2021484375,
+   "thinker_to_talker_ms": 3.259765625,
+   "talker_prefill_ms": 11.846923828125,
+   "talker_decode_ms": 120.91064453125,
+   "talker_to_code2wav_ms": 0.031005859375,
+   "code2wav_ms": 182.404052734375,
+   "admission_to_thinker_ms": 3.4541015625
+  },
+  {
+   "request_id": "9b64bd3d-a0b7-4e4a-ab38-e0c59d993702",
+   "thinker_prefill_ms": 22.709716796875,
+   "thinker_decode_ms": 111.040283203125,
+   "thinker_to_talker_ms": 4.211181640625,
+   "talker_prefill_ms": 11.8642578125,
+   "talker_decode_ms": 110.39013671875,
+   "talker_to_code2wav_ms": 0.02978515625,
+   "code2wav_ms": 209.898193359375,
+   "admission_to_thinker_ms": 3.3916015625
+  },
+  {
+   "request_id": "5bf9ae9a-fcf1-4f9b-ae4f-c299fd01098e",
+   "thinker_prefill_ms": 22.973388671875,
+   "thinker_decode_ms": 76.251220703125,
+   "thinker_to_talker_ms": 3.435302734375,
+   "talker_prefill_ms": 11.99853515625,
+   "talker_decode_ms": 98.939208984375,
+   "talker_to_code2wav_ms": 0.031005859375,
+   "code2wav_ms": 176.1123046875,
+   "admission_to_thinker_ms": 3.36962890625
+  },
+  {
+   "request_id": "613011a4-6394-4678-aa20-13024ede05fb",
+   "thinker_prefill_ms": 21.79931640625,
+   "thinker_decode_ms": 71.703369140625,
+   "thinker_to_talker_ms": 3.898681640625,
+   "talker_prefill_ms": 12.270263671875,
+   "talker_decode_ms": 74.35498046875,
+   "talker_to_code2wav_ms": 0.0283203125,
+   "code2wav_ms": 212.23095703125,
+   "admission_to_thinker_ms": 3.329833984375
+  },
+  {
+   "request_id": "1d35c493-e2b3-4a7e-889d-482b8e16d2d7",
+   "thinker_prefill_ms": 22.421630859375,
+   "thinker_decode_ms": 87.1298828125,
+   "thinker_to_talker_ms": 3.45361328125,
+   "talker_prefill_ms": 11.968505859375,
+   "talker_decode_ms": 100.44921875,
+   "talker_to_code2wav_ms": 0.028564453125,
+   "code2wav_ms": 183.83740234375,
+   "admission_to_thinker_ms": 3.26123046875
+  },
+  {
+   "request_id": "b5811f34-3084-404e-802e-905b556f9e45",
+   "thinker_prefill_ms": 21.512451171875,
+   "thinker_decode_ms": 104.911865234375,
+   "thinker_to_talker_ms": 3.7685546875,
+   "talker_prefill_ms": 12.1923828125,
+   "talker_decode_ms": 128.957275390625,
+   "talker_to_code2wav_ms": 0.0283203125,
+   "code2wav_ms": 196.0751953125,
+   "admission_to_thinker_ms": 3.549560546875
+  },
+  {
+   "request_id": "b66153b8-aec2-4841-a1d0-c2f0e7e34bb1",
+   "thinker_prefill_ms": 22.65869140625,
+   "thinker_decode_ms": 47.3056640625,
+   "thinker_to_talker_ms": 3.698974609375,
+   "talker_prefill_ms": 12.31591796875,
+   "talker_decode_ms": 73.88916015625,
+   "talker_to_code2wav_ms": 0.027099609375,
+   "code2wav_ms": 221.4755859375,
+   "admission_to_thinker_ms": 3.35107421875
+  },
+  {
+   "request_id": "3015876c-26c3-4150-82e1-20806370c728",
+   "thinker_prefill_ms": 23.16064453125,
+   "thinker_decode_ms": 76.396728515625,
+   "thinker_to_talker_ms": 4.42578125,
+   "talker_prefill_ms": 11.95556640625,
+   "talker_decode_ms": 101.397705078125,
+   "talker_to_code2wav_ms": 0.027587890625,
+   "code2wav_ms": 216.643310546875,
+   "admission_to_thinker_ms": 3.59716796875
+  },
+  {
+   "request_id": "c53d4b00-1985-48b1-9f4f-1a28c472b050",
+   "thinker_prefill_ms": 21.08642578125,
+   "thinker_decode_ms": 100.114501953125,
+   "thinker_to_talker_ms": 4.775634765625,
+   "talker_prefill_ms": 11.121337890625,
+   "talker_decode_ms": 142.4921875,
+   "talker_to_code2wav_ms": 0.0869140625,
+   "code2wav_ms": 202.489013671875,
+   "admission_to_thinker_ms": 3.348388671875
+  },
+  {
+   "request_id": "d5b2d836-c6ff-4ecc-aec9-dbee5f50ba67",
+   "thinker_prefill_ms": 23.667236328125,
+   "thinker_decode_ms": 82.357666015625,
+   "thinker_to_talker_ms": 5.430419921875,
+   "talker_prefill_ms": 11.24462890625,
+   "talker_decode_ms": 80.993408203125,
+   "talker_to_code2wav_ms": 0.030517578125,
+   "code2wav_ms": 215.13525390625,
+   "admission_to_thinker_ms": 3.321533203125
+  },
+  {
+   "request_id": "3eeb2d67-6b60-4d0b-a911-d6311fbbaaed",
+   "thinker_prefill_ms": 24.28662109375,
+   "thinker_decode_ms": 104.9892578125,
+   "thinker_to_talker_ms": 4.332763671875,
+   "talker_prefill_ms": 11.0693359375,
+   "talker_decode_ms": 145.136474609375,
+   "talker_to_code2wav_ms": 0.02978515625,
+   "code2wav_ms": 197.480224609375,
+   "admission_to_thinker_ms": 3.406982421875
+  },
+  {
+   "request_id": "b003e973-21c7-4bdf-8a91-6b69d801f1c6",
+   "thinker_prefill_ms": 22.244140625,
+   "thinker_decode_ms": 86.868408203125,
+   "thinker_to_talker_ms": 4.44580078125,
+   "talker_prefill_ms": 11.51171875,
+   "talker_decode_ms": 96.237060546875,
+   "talker_to_code2wav_ms": 0.03125,
+   "code2wav_ms": 176.668212890625,
+   "admission_to_thinker_ms": 3.26025390625
+  },
+  {
+   "request_id": "6889b0ea-3784-47d4-acac-6356b68a87af",
+   "thinker_prefill_ms": 22.6533203125,
+   "thinker_decode_ms": 168.959228515625,
+   "thinker_to_talker_ms": 5.1396484375,
+   "talker_prefill_ms": 12.13330078125,
+   "talker_decode_ms": 174.684814453125,
+   "talker_to_code2wav_ms": 0.03173828125,
+   "code2wav_ms": 205.625732421875,
+   "admission_to_thinker_ms": 3.2919921875
+  },
+  {
+   "request_id": "09231970-1c78-43a4-be30-87f760ab34c0",
+   "thinker_prefill_ms": 21.581787109375,
+   "thinker_decode_ms": 98.791015625,
+   "thinker_to_talker_ms": 4.237548828125,
+   "talker_prefill_ms": 11.093017578125,
+   "talker_decode_ms": 124.84228515625,
+   "talker_to_code2wav_ms": 0.02880859375,
+   "code2wav_ms": 176.12353515625,
+   "admission_to_thinker_ms": 3.361083984375
+  },
+  {
+   "request_id": "4729636f-6666-4885-a076-ec3fa13886e6",
+   "thinker_prefill_ms": 21.314208984375,
+   "thinker_decode_ms": 75.604736328125,
+   "thinker_to_talker_ms": 4.306640625,
+   "talker_prefill_ms": 11.441650390625,
+   "talker_decode_ms": 85.825927734375,
+   "talker_to_code2wav_ms": 0.02978515625,
+   "code2wav_ms": 134.84716796875,
+   "admission_to_thinker_ms": 3.1513671875
+  },
+  {
+   "request_id": "36fb2896-bb1f-4c26-94ee-f1c040743c14",
+   "thinker_prefill_ms": 21.31982421875,
+   "thinker_decode_ms": 76.285400390625,
+   "thinker_to_talker_ms": 4.1806640625,
+   "talker_prefill_ms": 11.0966796875,
+   "talker_decode_ms": 92.998046875,
+   "talker_to_code2wav_ms": 0.028564453125,
+   "code2wav_ms": 175.661376953125,
+   "admission_to_thinker_ms": 3.307861328125
+  },
+  {
+   "request_id": "5b09631e-59bd-478f-907b-194eb4ec1686",
+   "thinker_prefill_ms": 22.71044921875,
+   "thinker_decode_ms": 81.600341796875,
+   "thinker_to_talker_ms": 4.203125,
+   "talker_prefill_ms": 11.374755859375,
+   "talker_decode_ms": 93.017822265625,
+   "talker_to_code2wav_ms": 0.028076171875,
+   "code2wav_ms": 172.300048828125,
+   "admission_to_thinker_ms": 3.512939453125
+  },
+  {
+   "request_id": "9a94a2db-31d0-4df3-8854-2461fd79a2f9",
+   "thinker_prefill_ms": 22.125732421875,
+   "thinker_decode_ms": 81.88623046875,
+   "thinker_to_talker_ms": 3.388427734375,
+   "talker_prefill_ms": 11.384033203125,
+   "talker_decode_ms": 92.01708984375,
+   "talker_to_code2wav_ms": 0.029052734375,
+   "code2wav_ms": 185.007568359375,
+   "admission_to_thinker_ms": 3.27685546875
+  },
+  {
+   "request_id": "82a500d3-d1c7-4b2b-9bb6-516d8a4f0d7c",
+   "thinker_prefill_ms": 21.75390625,
+   "thinker_decode_ms": 87.26123046875,
+   "thinker_to_talker_ms": 3.788330078125,
+   "talker_prefill_ms": 11.237060546875,
+   "talker_decode_ms": 100.982177734375,
+   "talker_to_code2wav_ms": 0.029296875,
+   "code2wav_ms": 203.134521484375,
+   "admission_to_thinker_ms": 3.417236328125
+  },
+  {
+   "request_id": "87e7a056-eff0-4b9f-980c-b74f72aba3e7",
+   "thinker_prefill_ms": 21.0859375,
+   "thinker_decode_ms": 75.44287109375,
+   "thinker_to_talker_ms": 3.4814453125,
+   "talker_prefill_ms": 11.767333984375,
+   "talker_decode_ms": 79.975830078125,
+   "talker_to_code2wav_ms": 0.03125,
+   "code2wav_ms": 185.984130859375,
+   "admission_to_thinker_ms": 3.33251953125
+  },
+  {
+   "request_id": "9db4f363-5cf0-4c60-afe6-be342c73a22a",
+   "thinker_prefill_ms": 23.508056640625,
+   "thinker_decode_ms": 58.6318359375,
+   "thinker_to_talker_ms": 3.415771484375,
+   "talker_prefill_ms": 12.03173828125,
+   "talker_decode_ms": 50.033447265625,
+   "talker_to_code2wav_ms": 0.028076171875,
+   "code2wav_ms": 207.6259765625,
+   "admission_to_thinker_ms": 3.3828125
+  },
+  {
+   "request_id": "9d666236-f875-4fdd-8e65-85b72ceeb0bf",
+   "thinker_prefill_ms": 22.15380859375,
+   "thinker_decode_ms": 104.659912109375,
+   "thinker_to_talker_ms": 3.87548828125,
+   "talker_prefill_ms": 10.90966796875,
+   "talker_decode_ms": 120.77978515625,
+   "talker_to_code2wav_ms": 0.03076171875,
+   "code2wav_ms": 145.93310546875,
+   "admission_to_thinker_ms": 3.33642578125
+  },
+  {
+   "request_id": "bc442d24-c965-4dad-947f-6453a52624b2",
+   "thinker_prefill_ms": 25.691650390625,
+   "thinker_decode_ms": 76.65966796875,
+   "thinker_to_talker_ms": 4.603515625,
+   "talker_prefill_ms": 10.821044921875,
+   "talker_decode_ms": 85.7841796875,
+   "talker_to_code2wav_ms": 0.068115234375,
+   "code2wav_ms": 197.21044921875,
+   "admission_to_thinker_ms": 3.595703125
+  },
+  {
+   "request_id": "5d5d6bcd-09f4-405d-a667-54b8e70631d0",
+   "thinker_prefill_ms": 21.99462890625,
+   "thinker_decode_ms": 64.1611328125,
+   "thinker_to_talker_ms": 3.062744140625,
+   "talker_prefill_ms": 11.36376953125,
+   "talker_decode_ms": 68.38037109375,
+   "talker_to_code2wav_ms": 0.031005859375,
+   "code2wav_ms": 165.7451171875,
+   "admission_to_thinker_ms": 3.7275390625
+  },
+  {
+   "request_id": "3fdf4ab6-7a61-4ef6-883e-add65ed100d2",
+   "thinker_prefill_ms": 21.089111328125,
+   "thinker_decode_ms": 80.9326171875,
+   "thinker_to_talker_ms": 3.11181640625,
+   "talker_prefill_ms": 10.86376953125,
+   "talker_decode_ms": 112.98291015625,
+   "talker_to_code2wav_ms": 0.03271484375,
+   "code2wav_ms": 169.10498046875,
+   "admission_to_thinker_ms": 3.36181640625
+  },
+  {
+   "request_id": "48c3ab0c-59a7-40c2-97b3-b4426945d802",
+   "thinker_prefill_ms": 21.1630859375,
+   "thinker_decode_ms": 69.69580078125,
+   "thinker_to_talker_ms": 3.27392578125,
+   "talker_prefill_ms": 11.06689453125,
+   "talker_decode_ms": 83.515869140625,
+   "talker_to_code2wav_ms": 0.029541015625,
+   "code2wav_ms": 174.131103515625,
+   "admission_to_thinker_ms": 3.2568359375
+  },
+  {
+   "request_id": "18ce8784-a542-42c1-956c-16e713421de5",
+   "thinker_prefill_ms": 23.339111328125,
+   "thinker_decode_ms": 82.171630859375,
+   "thinker_to_talker_ms": 4.056396484375,
+   "talker_prefill_ms": 11.22265625,
+   "talker_decode_ms": 111.60205078125,
+   "talker_to_code2wav_ms": 0.07275390625,
+   "code2wav_ms": 214.376220703125,
+   "admission_to_thinker_ms": 3.378173828125
+  },
+  {
+   "request_id": "8434e44a-109d-4865-bb64-11388e66cc41",
+   "thinker_prefill_ms": 21.710205078125,
+   "thinker_decode_ms": 69.9189453125,
+   "thinker_to_talker_ms": 3.07177734375,
+   "talker_prefill_ms": 10.948974609375,
+   "talker_decode_ms": 88.138671875,
+   "talker_to_code2wav_ms": 0.028564453125,
+   "code2wav_ms": 167.118408203125,
+   "admission_to_thinker_ms": 3.3076171875
+  },
+  {
+   "request_id": "93389ea0-97c7-45dc-966b-19dffb623e05",
+   "thinker_prefill_ms": 22.63671875,
+   "thinker_decode_ms": 64.82763671875,
+   "thinker_to_talker_ms": 4.725341796875,
+   "talker_prefill_ms": 10.9775390625,
+   "talker_decode_ms": 69.145263671875,
+   "talker_to_code2wav_ms": 0.03466796875,
+   "code2wav_ms": 248.04345703125,
+   "admission_to_thinker_ms": 3.4267578125
+  },
+  {
+   "request_id": "c953d134-100e-4fa2-bed7-40d5bf3632a5",
+   "thinker_prefill_ms": 21.290283203125,
+   "thinker_decode_ms": 92.822021484375,
+   "thinker_to_talker_ms": 3.68798828125,
+   "talker_prefill_ms": 12.4560546875,
+   "talker_decode_ms": 125.77734375,
+   "talker_to_code2wav_ms": 0.033447265625,
+   "code2wav_ms": 182.518798828125,
+   "admission_to_thinker_ms": 3.272216796875
+  },
+  {
+   "request_id": "e5b87b71-4501-41e2-9f9a-fbf30ca88533",
+   "thinker_prefill_ms": 21.058349609375,
+   "thinker_decode_ms": 75.319580078125,
+   "thinker_to_talker_ms": 3.33251953125,
+   "talker_prefill_ms": 11.21923828125,
+   "talker_decode_ms": 85.36376953125,
+   "talker_to_code2wav_ms": 0.03076171875,
+   "code2wav_ms": 126.092529296875,
+   "admission_to_thinker_ms": 3.19921875
+  }
+ ],
+ "kernel_window": {
+  "audio_s": 9.120000000000001,
+  "processes": {
+   "kernel/trace_pid1288800_rank0.trace.json.gz": {
+    "gpu_kernel_s": 0.133171153,
+    "cpu_launch_s": 0.026798786,
+    "kernel_span_s": 0.6422138349609375,
+    "gpu_s_per_audio_s": 0.01460210010964912,
+    "kernels": 14139
+   },
+   "kernel/trace_pid1288801_rank0.trace.json.gz": {
+    "gpu_kernel_s": 0.24829933499999998,
+    "cpu_launch_s": 0.15123904500000002,
+    "kernel_span_s": 0.9477225490722656,
+    "gpu_s_per_audio_s": 0.027225804276315786,
+    "kernels": 83839
+   }
+  },
+  "gpu_s_per_audio_s_total": 0.0418279043859649
+ }
+}

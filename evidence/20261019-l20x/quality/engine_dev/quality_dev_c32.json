@@ -1,0 +1,211 @@
+{
+  "scope": "development",
+  "generation": {
+    "candidate_id": "engine:track_s_fast-track-s-fast-mps:d9246788ed90",
+    "candidate_digest": "d9246788ed90242d9208d0a0e782c2e651cd74106376c3308b69863fead24008",
+    "candidate": {
+      "adapter": "engine",
+      "config": "track_s_fast",
+      "extra": [],
+      "env": [
+        [
+          "ENGINE_MPS",
+          "1"
+        ]
+      ],
+      "deploy_files_sha256": [
+        "ffefb7e5878fe274893565da289a502e539c0445e13a8b9e142cf3c58d2fd79d",
+        "d31ca594430aed10094d3c48825ec0f4212cef0dfacbbf9c715c0945a0a7d9a0",
+        "9da14671cb0a063ec1eb1f5257291e6e90ef4afb4d77d53adb165f597dd710a3"
+      ],
+      "mps": "on",
+      "candidate_id": "engine:track_s_fast-track-s-fast-mps:d9246788ed90",
+      "digest": "d9246788ed90242d9208d0a0e782c2e651cd74106376c3308b69863fead24008",
+      "label": "track-s-fast-mps"
+    },
+    "gpu_sku": "L20X",
+    "gpu_driver": "570.133.20",
+    "gpu_memory_mib": "143771",
+    "concurrency": 32,
+    "id_set": "full",
+    "measured_ids_sha256": "0580c8672cd7fbd32b57a0581cdbcdeb66d7deb193ee0eb66d8590a83eb3d384",
+    "dataset": {
+      "repo": "zhaochenyang20/seed-tts-eval",
+      "revision": "8f5e1aa2a35d42f42e940074c1983358b9491f89",
+      "locale": "en"
+    },
+    "model": {
+      "repo": "openbmb/MiniCPM-o-4_5",
+      "revision": "503e754207c94da6bb26850b4469f367c9ea3582"
+    },
+    "seed_policy": "sha256(row_id) + seed_index"
+  },
+  "seeds": {
+    "0": {
+      "cell": "/workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/quality_dev_gpu3/00_engine_track_s_fast-track-s-fast-mps_d9246788ed90_c32",
+      "run": "run1",
+      "experiment_digest": "38f8add9a0b36867d28de2bcf0544bdd6702c16cac5f5a8bdd6f4e59679e4c27",
+      "artifacts": {
+        "summary.json": "ab894fa0ede0a636f0fe2f7b69d2287456be5dbcf5b363845ca14e2f114fec2f",
+        "requests.jsonl": "324b671cdb702cd8a9fde718177263400ab9d7112c5467aeefe81f353138dd47",
+        "traces.jsonl": "2c730d0a8eb614a5d21979a1deeade47634cc605f1f6713a92f99625ab958602",
+        "wire.jsonl.gz": "7c8971541a886a23f3502bbec0f3c7fdb4e0a0cad69d2aed081819542daab206",
+        "wav_count": 1088,
+        "wav_manifest_sha256": "d11dfa3b73dd22810906b72fc79ac0101c739671275e1a4d433340168d071b4b"
+      },
+      "rows": 1088,
+      "gpu_uuid": "GPU-712b0057-e00a-8705-40e1-6ef88f1426c1"
+    }
+  },
+  "rows_per_seed": {
+    "0": 1088
+  },
+  "rows_sha256": "aab3ce502a6845a40d7551767e35870ee0ec909032a92bfa4c26f8083749f6f9",
+  "n_rows": 1088,
+  "evaluator": {
+    "scorer_checkout": {
+      "path": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+      "commit": "22d4ace88f9547777b819a69d7691204bb9ce847"
+    },
+    "envs": {
+      "eval-env": "681a4073ae3db2ec127c47e3421c3bae97f595a2c86bb0fa8949781da8d5da69",
+      "asr-env": "7a8456900fac1ba775281d97e53892a1876cbc936694f47fdc51ba9ce91ce612"
+    },
+    "checkpoints": {
+      "/home/cgzheng/.cache/sglang-omni/speaker_sim/wavlm_large.pt": "6fb4b3c3e6aa567f0a997b30855859cb81528ee8078802af439f7b2da0bf100f",
+      "/home/cgzheng/.cache/sglang-omni/speaker_sim/wavlm_large_finetune.pth": "51f07e3b94d9e0262a6a675ef5a087be3dd09e8c62e9d886827f44f82fe7f94b",
+      "/home/cgzheng/.cache/sglang-omni/utmos/utmos.jit": "3080923f49ee69eb81ad875491eef94e533bf329d70e0cc37fa23745c464669d"
+    },
+    "models": {
+      "qwen3-asr": {
+        "dir": "/workspace/models/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5",
+        "files_sha256": "1218f6b3829b2364ebe4c0426f743886eef09ed88b8448aec84967c5a865c6a3"
+      },
+      "whisper": {
+        "dir": "/workspace/models/hub/models--openai--whisper-large-v3/snapshots/06f233fe06e710322aca913c1bc4249a0d71fce1",
+        "files_sha256": "baedff9020179164d735e18ccb1479f5a62123934aa92eefce6d905e5aae0123"
+      }
+    },
+    "sources": {
+      "evals/speech/asr_worker.py": "985de6d1907877d6973ebe109af251b855465dc2ca1510f25b31eb72f7098a6d",
+      "evals/speech/scorer_worker.py": "fe6804a9cbf1352cb413802305029bac40451b185d44a9431482a8189cd6e2c5",
+      "evals/speech/detectors.py": "a94140de8d266e72d7e8058c7a73ce920999275e8db7e675026e0d96b6e59254",
+      "evals/speech/gates.py": "2acce9e7a7247bff227865f17aa688f72b0208512094b90436a9e2b1a6a335f3",
+      "evals/speech/suite.py": "7fd312d08b835ce229ae79226c9292943fcf48e393717af6678eef2b12b78fd2",
+      "evals/evaluator.py": "cc67e69692bee9f410cbe193e53bb38e80afe70132739bd9775876070d175c00"
+    },
+    "settings": {
+      "asr": {
+        "model": "Qwen/Qwen3-ASR-1.7B",
+        "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5",
+        "batch_size": 16,
+        "dtype": "bfloat16",
+        "decoding": "greedy",
+        "language": "English"
+      },
+      "whisper": {
+        "model": "openai/whisper-large-v3",
+        "revision": "06f233fe06e710322aca913c1bc4249a0d71fce1",
+        "batch_size": 16,
+        "dtype": "bfloat16",
+        "decoding": "greedy",
+        "language": "en"
+      },
+      "wer_normalizer": "sglang-omni benchmarks.tasks.asr.apply_wer (whisper EnglishTextNormalizer + jiwer)",
+      "sim": {
+        "scorer": "WavLMSpeakerSimilarity",
+        "scale": "x100",
+        "batch": 16
+      },
+      "utmos": {
+        "scorer": "UTMOSScorer"
+      }
+    },
+    "digest": "9d0b90fb2b22b3e656e3495288f1a50ba38003f0b756e62d64ad082d3c34f3c9"
+  },
+  "d_ref": {
+    "path": "results/l20x/campaign/dref/dref_truncation_c32.json",
+    "sha256": "99038d015578104c08073e2d4f97494a7cd362e4be3eb4d16f2ecda2d49249c7"
+  },
+  "truncation_evaluated": true,
+  "row_sidecar_sha256": "849e57b8875bd54df527f588c75b1af07c3343312a4db85fb290565ac87afcb7",
+  "summary": {
+    "seed_indices": [
+      0
+    ],
+    "per_seed": [
+      {
+        "rows": 1088,
+        "wer_corpus": 0.01456920371765888,
+        "wer_filtered_corpus": 0.01365959943015168,
+        "catastrophic_count": 2,
+        "sim_mean": 48.88030478182961,
+        "utmos_mean": 4.165655469412313,
+        "silence_rate": 0,
+        "repetition_rate": 0,
+        "truncation_rate": 0,
+        "silent_fraction_mean": 0.19143357966299468,
+        "thinker_exact_match_rate": 0.9990808823529411,
+        "duration_total_s": 4965.52,
+        "whisper_wer_mean": 0.01751579893704507,
+        "seed_index": 0,
+        "absolute_floors": {
+          "passed": true,
+          "checks": {
+            "wer_filtered_corpus": {
+              "value": 0.01365959943015168,
+              "floor": 0.026874999999999996,
+              "passed": true
+            },
+            "sim_mean": {
+              "value": 48.88030478182961,
+              "floor": 41.58098999999999,
+              "passed": true
+            },
+            "utmos_mean": {
+              "value": 4.165655469412313,
+              "floor": 4.1634340000000005,
+              "passed": true
+            }
+          }
+        }
+      }
+    ],
+    "pooled": {
+      "rows": 1088,
+      "wer_corpus": 0.01456920371765888,
+      "wer_filtered_corpus": 0.01365959943015168,
+      "catastrophic_count": 2,
+      "sim_mean": 48.88030478182961,
+      "utmos_mean": 4.165655469412313,
+      "silence_rate": 0,
+      "repetition_rate": 0,
+      "truncation_rate": 0,
+      "silent_fraction_mean": 0.19143357966299468,
+      "thinker_exact_match_rate": 0.9990808823529411,
+      "duration_total_s": 4965.52,
+      "whisper_wer_mean": 0.01751579893704507
+    },
+    "absolute_floors_pooled": {
+      "passed": true,
+      "checks": {
+        "wer_filtered_corpus": {
+          "value": 0.01365959943015168,
+          "floor": 0.026874999999999996,
+          "passed": true
+        },
+        "sim_mean": {
+          "value": 48.88030478182961,
+          "floor": 41.58098999999999,
+          "passed": true
+        },
+        "utmos_mean": {
+          "value": 4.165655469412313,
+          "floor": 4.1634340000000005,
+          "passed": true
+        }
+      }
+    }
+  },
+  "wall_s": 2044.283694267273
+}
