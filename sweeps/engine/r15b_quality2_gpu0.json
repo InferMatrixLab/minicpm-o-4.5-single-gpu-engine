@@ -1,0 +1,26 @@
+{
+ "description": "Engine (track_s_fast_r15b) full-set speech quality at C=1, seed 0, repeat run for the run-to-run spread (round 15)",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 0,
+ "port": 18995,
+ "k": 1,
+ "run_order_seed": 20261607,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r15b",
+   "label": "r15bq2-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

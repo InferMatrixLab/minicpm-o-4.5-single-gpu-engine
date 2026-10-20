@@ -1,0 +1,27 @@
+{
+ "description": "Engine (track_s_fast_r11) full-set speech quality at C=1 and C=32, seed 0, development evidence, same-day reference for round 15",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 1,
+ "port": 18994,
+ "k": 1,
+ "run_order_seed": 20261606,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1,
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r11",
+   "label": "r11q-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
