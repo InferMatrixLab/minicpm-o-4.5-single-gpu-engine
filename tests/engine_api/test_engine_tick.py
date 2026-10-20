@@ -285,3 +285,21 @@ def test_backend_constructor_validates_the_new_knobs():
     for bad in ({"talker_start_budget": 0}, {"t2w_first_lane_slack_ms": -1.0}, {"t2w_policy": "r7"}):
         with pytest.raises(ValueError):
             B.TrackSBackend(**bad)
+
+
+def test_first_chunk_due_marks_the_step_that_completes_a_first_chunk():
+    """tick_overlap without first-chunk overlap runs a tick serially exactly when its Thinker step yields some audio
+    request's 11th reply token (the first Track S chunk boundary)."""
+    def row(generated, chunk_index=0, audio=True, pending=False):
+        req = SimpleNamespace(max_tokens=256, ref_audio=b"voice" if audio else None, modalities=["text", "audio"], seed=0, talker_sampling={})
+        lv = B.LiveS(req=req, out=Out(), loop=Loop(), prompt_ids=[1] * 4, seq=0)
+        lv.generated, lv.chunk_index, lv.pending_prefill = [7] * generated, chunk_index, pending
+        return lv
+
+    due = B.TrackSBackend._first_chunk_due
+    assert due([row(B.THINKER_CHUNK)])
+    assert not due([row(B.THINKER_CHUNK - 1)]) and not due([row(B.THINKER_CHUNK + 1)])
+    assert not due([row(B.THINKER_CHUNK, chunk_index=1)])  # a continuation chunk
+    assert not due([row(B.THINKER_CHUNK, audio=False)])  # text only: no Talker waits for it
+    assert not due([row(0, pending=True)]) and not due([])
+    assert due([row(3), row(B.THINKER_CHUNK)])

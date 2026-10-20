@@ -133,7 +133,8 @@ class TrackSBackend:
                  prefill_slack_floor_ms: float | None = 300.0, talker_start_budget: int | None = 1024, feature_gpu_tokens: bool = True,
                  feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
                  t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False,
-                 t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False):
+                 t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False,
+                 tick_overlap_first_chunks: bool = True):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -272,6 +273,9 @@ class TrackSBackend:
         if tick_overlap and split_threads:
             raise ValueError("tick_overlap and split_threads are alternatives")
         self.tick_overlap = tick_overlap
+        # False: a tick whose Thinker step completes some request's first text chunk runs serially, so that chunk starts
+        # in the same tick's Talker (time to first audio); the other ticks overlap
+        self.tick_overlap_first_chunks = tick_overlap_first_chunks
         if tick_overlap:
             self.thinker_stream, self.talker_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
         if split_threads:  # Thinker and Talker loops on their own threads and CUDA streams (graph replays overlap)
@@ -663,8 +667,17 @@ class TrackSBackend:
     def _tick_overlapped(self, rows: list, urgent: bool) -> None:
         """``_tick``'s Thinker and Talker steps with their GPU work overlapped: the Thinker step (prefill included unless
         a continuing stream is short of playback) is queued on the Thinker stream, the Talker step runs on the Talker
-        stream meanwhile, then the Thinker's tokens are collected.  Chunks passed now start in the next tick's Talker."""
+        stream meanwhile, then the Thinker's tokens are collected.  Chunks passed now start in the next tick's Talker.
+        Without ``tick_overlap_first_chunks`` a tick that completes a first chunk runs serially (same streams)."""
         first = [x for x in rows if not x.pending_prefill] if urgent else rows
+        if not self.tick_overlap_first_chunks and self._first_chunk_due(first):
+            with torch.cuda.stream(self.thinker_stream):
+                self._timed("thinker", self._thinker_step, first)
+            self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
+            if urgent:
+                with torch.cuda.stream(self.thinker_stream):
+                    self._timed("prefill", self._thinker_step, [x for x in rows if x.pending_prefill])
+            return
         with torch.cuda.stream(self.thinker_stream):
             pending = self._timed_ret("thinker", self._thinker_launch, first)
         self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
@@ -672,6 +685,11 @@ class TrackSBackend:
             self._timed("thinker.wait", self._thinker_finish, first, pending)
             if urgent:
                 self._timed("prefill", self._thinker_step, [x for x in rows if x.pending_prefill])
+
+    @staticmethod
+    def _first_chunk_due(rows: list) -> bool:
+        """Does this Thinker step complete some audio request's first text chunk (its 11th reply token)?"""
+        return any(lv.wants_audio and not lv.pending_prefill and lv.chunk_index == 0 and len(lv.generated) == THINKER_CHUNK for lv in rows)
 
     def _min_slack(self, now: float) -> float | None:
         """The least buffered playback among the continuing audio streams (None if none)."""
