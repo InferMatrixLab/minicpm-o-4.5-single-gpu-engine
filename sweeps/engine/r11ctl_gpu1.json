@@ -1,0 +1,27 @@
+{
+ "description": "Round-15 same-day control on GPU1: track_s_fast_r11 at C=16/32, K=5, eval IDs (separates the r15b change from drift since the r11c cells)",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 1,
+ "port": 18993,
+ "run_order_seed": 20261052,
+ "concurrencies": [
+  16,
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r11",
+   "label": "r11ctl",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
