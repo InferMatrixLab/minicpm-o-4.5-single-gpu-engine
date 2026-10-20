@@ -1,0 +1,26 @@
+{
+ "description": "Round-15 measurement on GPU0: track_s_fast_r15c (r15b with ticks above 24 live requests serial), K=5, eval IDs, C=32 only (the gate cannot fire at C<=16, where r15c runs r15b's code path); compared with the same-day r11 control",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 0,
+ "port": 18996,
+ "run_order_seed": 20261052,
+ "concurrencies": [
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r15c",
+   "label": "r15c",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

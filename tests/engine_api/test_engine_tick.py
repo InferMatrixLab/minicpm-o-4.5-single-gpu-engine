@@ -303,3 +303,18 @@ def test_first_chunk_due_marks_the_step_that_completes_a_first_chunk():
     assert not due([row(B.THINKER_CHUNK, audio=False)])  # text only: no Talker waits for it
     assert not due([row(0, pending=True)]) and not due([])
     assert due([row(3), row(B.THINKER_CHUNK)])
+
+
+def test_tick_overlap_max_live_runs_busier_ticks_serially():
+    """Above tick_overlap_max_live live requests a tick takes the serial path (one Thinker step, then the Talker);
+    at or below it the Thinker step is launched before the Talker step and collected after it."""
+    calls = []
+    be = object.__new__(B.TrackSBackend)
+    be.thinker_stream, be.tick_overlap_first_chunks, be.tick_overlap_max_live = None, True, 2
+    be._timed = lambda name, fn, *a: calls.append(name)
+    be._timed_ret = lambda name, fn, *a: calls.append(name)
+    for n, want in ((2, ["thinker", "talker", "thinker.wait"]), (3, ["thinker", "talker"])):
+        calls.clear()
+        be.live = {i: SimpleNamespace(wants_audio=False, utterance_done=False) for i in range(n)}
+        be._tick_overlapped([], urgent=False)
+        assert calls == want, (n, calls)

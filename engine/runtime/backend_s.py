@@ -134,7 +134,7 @@ class TrackSBackend:
                  feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
                  t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False,
                  t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False,
-                 tick_overlap_first_chunks: bool = True):
+                 tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -276,6 +276,9 @@ class TrackSBackend:
         # False: a tick whose Thinker step completes some request's first text chunk runs serially, so that chunk starts
         # in the same tick's Talker (time to first audio); the other ticks overlap
         self.tick_overlap_first_chunks = tick_overlap_first_chunks
+        # a tick with more live requests runs serially: at C=32 the Token2Wav worker is GPU bound and the overlapped
+        # ticks' smaller Talker batches cost it GPU time (round 15: -3% throughput at C=32, +2-7% at C<=16)
+        self.tick_overlap_max_live = tick_overlap_max_live
         if tick_overlap:
             self.thinker_stream, self.talker_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
         if split_threads:  # Thinker and Talker loops on their own threads and CUDA streams (graph replays overlap)
@@ -668,9 +671,11 @@ class TrackSBackend:
         """``_tick``'s Thinker and Talker steps with their GPU work overlapped: the Thinker step (prefill included unless
         a continuing stream is short of playback) is queued on the Thinker stream, the Talker step runs on the Talker
         stream meanwhile, then the Thinker's tokens are collected.  Chunks passed now start in the next tick's Talker.
-        Without ``tick_overlap_first_chunks`` a tick that completes a first chunk runs serially (same streams)."""
+        Without ``tick_overlap_first_chunks`` a tick that completes a first chunk runs serially (same streams), and so
+        does a tick with more than ``tick_overlap_max_live`` live requests."""
         first = [x for x in rows if not x.pending_prefill] if urgent else rows
-        if not self.tick_overlap_first_chunks and self._first_chunk_due(first):
+        if ((not self.tick_overlap_first_chunks and self._first_chunk_due(first))
+                or (self.tick_overlap_max_live is not None and len(self.live) > self.tick_overlap_max_live)):
             with torch.cuda.stream(self.thinker_stream):
                 self._timed("thinker", self._thinker_step, first)
             self._timed("talker", self._talker_step, [x for x in self.live.values() if x.wants_audio and not x.utterance_done])
