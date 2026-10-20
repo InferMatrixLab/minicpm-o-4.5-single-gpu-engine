@@ -22,6 +22,20 @@ import torch.nn.functional as F
 from engine.runtime.fp8 import linear
 from engine.runtime.hostcopy import plan as fi_plan
 
+_CAPTURE_STREAMS: dict = {}
+
+
+def capture_stream(lane: str) -> torch.cuda.Stream:
+    """The stream the CUDA graphs of one lane (``thinker``, ``talker``) are captured on.
+
+    cuBLAS keeps a workspace per (handle, stream), and a captured GEMM keeps using the workspace of its capture stream.
+    Graphs captured on torch's shared default capture stream therefore share one workspace: replayed concurrently on two
+    streams (``tick_overlap``), split-K GEMMs of both write their partial sums and semaphores into the same memory and
+    the GPU can hang.  Graphs of lanes that may replay concurrently are captured on different streams."""
+    if lane not in _CAPTURE_STREAMS:
+        _CAPTURE_STREAMS[lane] = torch.cuda.Stream()
+    return _CAPTURE_STREAMS[lane]
+
 
 @dataclass(frozen=True)
 class DecoderSpec:

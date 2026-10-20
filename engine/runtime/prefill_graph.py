@@ -12,7 +12,7 @@ from __future__ import annotations
 import torch
 
 from engine.runtime.hostcopy import plan as fi_plan
-from engine.runtime.paged import DecoderRunner
+from engine.runtime.paged import DecoderRunner, capture_stream
 
 PAD_SEQ = (1 << 42) + 7
 BUCKETS = (32, 64, 128, 256, 512)
@@ -40,8 +40,8 @@ class _Bucket:
 
 
 class PrefillGraphs:
-    def __init__(self, run: DecoderRunner, buckets=BUCKETS, workspace_mb: int = 256):
-        self.run, self.kv = run, run.kv
+    def __init__(self, run: DecoderRunner, buckets=BUCKETS, workspace_mb: int = 256, lane: str = "thinker"):
+        self.run, self.kv, self.lane = run, run.kv, lane
         self.workspace = torch.empty(workspace_mb << 20, dtype=torch.uint8, device=run.kv.k.device)
         self.buckets = {b: _Bucket(run, b, self.workspace) for b in buckets}
         self.pool = torch.cuda.graph_pool_handle()
@@ -71,7 +71,7 @@ class PrefillGraphs:
         self._body(bk)  # warm-up
         torch.cuda.synchronize()
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g, pool=self.pool, capture_error_mode="thread_local"):
+        with torch.cuda.graph(g, pool=self.pool, stream=capture_stream(self.lane), capture_error_mode="thread_local"):
             bk.out = self._body(bk)
         torch.cuda.synchronize()
         bk.graph = g
@@ -132,8 +132,8 @@ class ChunkPrefillGraphs:
 
     PAD_PAGES = 1
 
-    def __init__(self, run: DecoderRunner, rows=(1, 2, 3, 4), buckets=(32, 64, 128), workspace_mb: int = 128):
-        self.run, self.kv = run, run.kv
+    def __init__(self, run: DecoderRunner, rows=(1, 2, 3, 4), buckets=(32, 64, 128), workspace_mb: int = 128, lane: str = "talker"):
+        self.run, self.kv, self.lane = run, run.kv, lane
         assert max(buckets) <= self.kv.page_size * self.PAD_PAGES, "the scratch sequence must fit its reserved pages"
         self.workspace = torch.empty(workspace_mb << 20, dtype=torch.uint8, device=run.kv.k.device)
         max_pages = self.kv.num_pages + self.PAD_PAGES
@@ -168,7 +168,7 @@ class ChunkPrefillGraphs:
         self._body(bk)  # warm-up
         torch.cuda.synchronize()
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g, pool=self.pool, capture_error_mode="thread_local"):
+        with torch.cuda.graph(g, pool=self.pool, stream=capture_stream(self.lane), capture_error_mode="thread_local"):
             bk.out = self._body(bk)
         torch.cuda.synchronize()
         bk.graph = g

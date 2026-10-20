@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from engine.runtime.hostcopy import plan as fi_plan
-from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights
+from engine.runtime.paged import DecoderSpec, PagedKV, capture_stream, fuse_weights
 from engine.talker_sampler import PAD, TalkerSampling, draw, repetition_penalty, top_p_top_k_filter
 
 PAD_SEQ_BASE = 1 << 40  # scratch sequence ids for bucket padding rows
@@ -178,7 +178,7 @@ class TalkerDecoder:
         torch.cuda.synchronize()
         bk.positions.zero_()
         bk.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(bk.graph, capture_error_mode="thread_local"):  # other threads' GPU work cannot invalidate it
+        with torch.cuda.graph(bk.graph, stream=capture_stream("talker"), capture_error_mode="thread_local"):  # other threads' GPU work cannot invalidate it
             self._frame(bk)
         torch.cuda.synchronize()
         for p in pads:
@@ -226,7 +226,7 @@ class TalkerDecoder:
         bk.positions.zero_()
         plan_all()  # the warm-up advanced the carried last-page fills
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g, capture_error_mode="thread_local"):
+        with torch.cuda.graph(g, stream=capture_stream("talker"), capture_error_mode="thread_local"):
             frames()
         torch.cuda.synchronize()
         bk.kgraphs[(k, crossings)] = g

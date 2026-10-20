@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from bench.paths import MODEL_PATH  # noqa: E402
 
 
-def _time(fn, n=40):
-    for _ in range(5):
+def _time(fn, n=8):
+    for _ in range(2):
         fn()
     torch.cuda.synchronize()
     t = time.perf_counter()
@@ -48,12 +48,14 @@ def main():
         tdec = ThinkerDecoder(th, tkv, tspec, buckets=(nt,))
         adec = TalkerDecoder(ta, akv, aspec, TalkerSampling(min_new_tokens=0, max_new_tokens=1 << 30), buckets=(na,))
         ts, as_ = list(range(nt)), list(range(1000, 1000 + na))
-        for s in ts:  # ~ prompt + some reply
-            tkv.reserve(s, 300)
-            tkv.lengths[s] = 260
+        # the graphs carry the layout forward without re-plans: start each row one token into a page so that the
+        # 30 Thinker and 120 Talker replays below stay inside the planned last page (64- and 128-token pages)
+        for s in ts:
+            tkv.reserve(s, 4 * 64)
+            tkv.lengths[s] = 3 * 64
         for s in as_:
-            akv.reserve(s, 400)
-            akv.lengths[s] = 200
+            akv.reserve(s, 3 * 128)
+            akv.lengths[s] = 2 * 128
         tdec.step(ts, [0] * nt)  # capture and plan
         st = {"codes": torch.zeros(na, dtype=torch.int64, device="cuda"), "seeds": torch.arange(na, device="cuda"),
               "steps": torch.ones(na, dtype=torch.int64, device="cuda"), "history": torch.full((na, 16), PAD, dtype=torch.int64, device="cuda"),

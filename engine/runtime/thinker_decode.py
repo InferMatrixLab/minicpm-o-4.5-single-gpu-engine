@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 from engine.runtime.fp8 import linear
 from engine.runtime.hostcopy import plan as fi_plan
-from engine.runtime.paged import DecoderSpec, PagedKV, fuse_weights, hf_rms_norm, hf_rope, hf_rope_tables
+from engine.runtime.paged import DecoderSpec, PagedKV, capture_stream, fuse_weights, hf_rms_norm, hf_rope, hf_rope_tables
 
 PAD_SEQ_BASE = 1 << 41
 
@@ -126,7 +126,7 @@ class ThinkerDecoder:
         self._step(bk)
         torch.cuda.synchronize()
         bk.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(bk.graph, capture_error_mode="thread_local"):  # other threads' GPU work cannot invalidate it
+        with torch.cuda.graph(bk.graph, stream=capture_stream("thinker"), capture_error_mode="thread_local"):  # other threads' GPU work cannot invalidate it
             self._step(bk)
         torch.cuda.synchronize()
         for p in pads:
