@@ -41,16 +41,18 @@ graph capture, Token2Wav compilation and the feature-process warmup):
 
 ## Robustness acceptance
 
-Recorded on `track_s_fast` (2026-10-18; `tools/robustness.py`, policy version 1): C=32 for 30 minutes with
-cancellations, EOS-length requests, a 48 s fallback, 128-request overload and 8 long prompts (≥ 5422 tokens) beside
-24 streaming clients.
+`tools/robustness.py`, policy version 1: C=32 for 30 minutes with cancellations, EOS-length requests, a 48 s fallback,
+128-request overload and 8 long prompts (≥ 5422 tokens) beside 24 streaming clients. `tools/robustness_replay.py`
+rebuilds the same verdict from the raw records in both runs.
 
-| Check | Result |
-|---|---|
-| Requests | 33,291, 0 invalid, 32 clients in flight throughout |
-| Playback | max stall 0.179 s, refill max 9.1 ms, first dispatch 34 ms |
-| Memory (max deviation from the 60 s reference, rule ±1%) | engine 0.133%, worker 0.265%, feature processes 0.064%, GPU 0 |
-| Long prompts | 8 of 8 long requests and 110 of 110 companion streams valid; per-tick prefill max 2048 (the budget) |
-| Replay | `tools/robustness_replay.py` rebuilds the same verdict from the raw records |
+| Check | `track_s_fast_r16` (2026-10-21, 28f8584, GPU2) | `track_s_fast` (2026-10-18, 8338bda) |
+|---|---|---|
+| Verdict | **PASS**, policy problems none, replay equal | PASS, replay equal |
+| Sustain requests | 38,990, 0 invalid, 32 clients in flight throughout | 33,291, 0 invalid, 32 clients |
+| Playback | max stall 0.469 s, refill max 33.5 ms, first dispatch 34 ms | max stall 0.179 s, refill max 9.1 ms, first dispatch 34 ms |
+| Memory (max deviation from the 60 s reference, rule ±1%) | engine 0.157%, worker 0.727%, feature processes 0.064% (each 0.044–0.105%), GPU 0.002% | engine 0.133%, worker 0.265%, feature processes 0.064%, GPU 0 |
+| Long prompts | 8 of 8 long requests and 129 of 129 companion streams valid; per-tick prefill max 2048 (the budget), stall max 0.309 s | 8 of 8 and 110 of 110; per-tick prefill max 2048 |
 
-Not repeated on `track_s_fast_r11` or `track_s_fast_r16`.
+The r16 run serves 17% more requests in the same 30 minutes. Its worst stall (0.47 s, rule 2 s) and the worker's memory
+deviation (0.73%, rule 1%) are larger than in the `track_s_fast` run and stay inside their rules. Reports:
+`evidence/20261021-l20x/robustness_track_s_fast_r16_28f8584/` and `evidence/20261019-l20x/robustness_track_s_fast_8338bda/`.

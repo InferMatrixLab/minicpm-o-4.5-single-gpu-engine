@@ -1304,6 +1304,67 @@
    "sha256": "a41db4fddc1ea68247e5a9d95a551441c10b59f87cc70c4e391999056a2979fb",
    "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/r16_gpu1/02_engine_track_s_fast_r16-r16_f7155c5306ae_c2/server_run5.log",
    "source_sha256": "6acf535760b38684c08eae8f6370a730fe991c30baf9e354887cabb4635e9973"
+  },
+  {
+   "path": "campaign/r16_vs_envelope.json",
+   "sha256": "6260a41882b5b7723bc2a0d10c42a9a84d89d0218be53cfdcee218ee45d77321",
+   "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/r16_gpu0/vs_envelope.json + /workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/r16_gpu1/vs_envelope.json (merged, sorted)"
+  },
+  {
+   "path": "campaign/r16_envelope.log",
+   "sha256": "15b844d9e0f33b18486a4b1f350a0d6c80019d50601a98dbcdcbb313fa8c0064",
+   "source": "tools/engine_vs_envelope.py output on the r16 sweeps"
+  },
+  {
+   "path": "campaign/r16_verify.log",
+   "sha256": "48c2880da8a5388eca9eb0338306df6711daf47311983739ab9e2c604d71de2d",
+   "source": "bench.verify.verify_cell on the six raw r16 cells"
+  },
+  {
+   "path": "baselines.json",
+   "sha256": "cfa3e761ef230909890e13fb112a2b6e4c4ee63da4b5c90d74b96ded137ee832",
+   "source": "written for this snapshot"
+  },
+  {
+   "path": "results.md",
+   "sha256": "8f560633484357537db70dfffdf0731315d60b92c39de864e3d6991934e9d159",
+   "source": "written for this snapshot"
+  },
+  {
+   "path": "quality/engine_final/quality_final_c1.json",
+   "sha256": "54a104373914de02cb5cde87761f14e7f6ec39ff1b239da88eedc38fd1fa1588",
+   "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/r16_quality_final_c1.json",
+   "source_sha256": "54a104373914de02cb5cde87761f14e7f6ec39ff1b239da88eedc38fd1fa1588"
+  },
+  {
+   "path": "quality/engine_final/quality_final_c32.json",
+   "sha256": "d4241bee2b9e6931e172006ef2b0e63c8e0ab51cd4749665680047605c43c389",
+   "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/r16_quality_final_c32.json",
+   "source_sha256": "d4241bee2b9e6931e172006ef2b0e63c8e0ab51cd4749665680047605c43c389"
+  },
+  {
+   "path": "quality/engine_final/quality_final_c1.rows.jsonl.gz",
+   "sha256": "b1af6ed5e1d3d396848ac52fc8ca7f4a4a498fbd5280c0cfa34ec2b502ec4d62",
+   "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/r16_quality_final_c1.rows.jsonl",
+   "source_sha256": "437cf68e9e9ac1078c197c828683d22a7047fb670d9f1a5668a2dd319290b03c"
+  },
+  {
+   "path": "quality/engine_final/quality_final_c32.rows.jsonl.gz",
+   "sha256": "eefada06c3ba4a48ed969dc4b7aba881dbff062447e6db781e51bc56dff9d438",
+   "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/engine_sweeps/r16_quality_final_c32.rows.jsonl",
+   "source_sha256": "9f91eb403163b1484be96af74e5fdd33c49788db697bbdcee63a80092f5267d9"
+  },
+  {
+   "path": "robustness_track_s_fast_r16_28f8584/robustness.json.gz",
+   "sha256": "232154c91c314a515368081bdf75eef23521a52af9db959073c708243912f686",
+   "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/l20x/robustness/r16_acceptance_28f8584/robustness.json",
+   "source_sha256": "165dd68273239aaaec59edab6d8ebe9732f56ae5f452c6b0293121fabec2336b"
+  },
+  {
+   "path": "robustness_track_s_fast_r16_28f8584/replay.json.gz",
+   "sha256": "f6a7946a380cd1d9165863999dfef939fca0ffd8038f93e703dee67b021d0607",
+   "source": "/workspace/cgzheng/cgzheng/qwen3_omni/results/l20x/robustness/r16_acceptance_28f8584/replay.json",
+   "source_sha256": "5b6c292f438a92cc705f0450165c310b1dbcd22822b7710e7cc37084abe60100"
   }
  ]
 }

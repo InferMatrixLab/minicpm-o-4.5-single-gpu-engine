@@ -13,4 +13,6 @@ envelope of [20261019-l20x](../20261019-l20x/results.md) (named in [baselines.js
 - Speech quality, three seeds at C=1 and C=32: [quality/engine_final](quality/engine_final). The absolute floors pass
   at both C (UTMOS 4.166 / 4.167 against 4.163); the comparative UTMOS gate is reported and fails against the
   non-streaming reference, which by the 2026-10-21 decision does not decide acceptance.
+- Robustness acceptance (policy v1, C=32, 30 minutes, 28f8584 on GPU2): PASS, replay equal
+  ([robustness_track_s_fast_r16_28f8584](robustness_track_s_fast_r16_28f8584)).
 - Every file and its source: [manifest.json](manifest.json).

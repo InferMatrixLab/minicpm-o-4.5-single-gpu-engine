@@ -150,7 +150,7 @@ Minimum–maximum over the measured runs of each cell. No request failed in any 
 | TF32 HiFT without stage 0's transposed convolution + batched setup encoder (`track_s_fast_r16`) | Max chunk 3.2e-3 (bound 1e-2), 190 chunks: B24 repaired |
 | Speech quality gates (WER, SIM, UTMOS vs the frozen baseline reference, 1088 rows × 3 seeds at C=1 and C=32) | `track_s_fast_r16` (round 16): absolute floors **pass** at C=1 and C=32 over three seeds (UTMOS 4.1658 / 4.1670); the comparative UTMOS gate **fails** (4.17 vs the non-streaming 4.30, margin 0.05), computed with the gate formula on cells not declared against the frozen Q_ref ([engine.md](engine.md), round 16). `track_s_fast_r11`'s single seed-0 scoring missed the UTMOS floor by 0.0009 |
 | Multimodal accuracy (MMMU, MMSU, Daily-Omni) | Evaluators and references frozen; engine gates not run |
-| Robustness (C=32, 30 min, cancellation, overload, long prefills, memory ±1%) | Passed on `track_s_fast` (33,291 requests, 0 invalid, max stall 0.18 s); not repeated on `track_s_fast_r11` or `track_s_fast_r16` |
+| Robustness (C=32, 30 min, cancellation, overload, long prefills, memory ±1%) | **Passed on `track_s_fast_r16`** (2026-10-21: 38,990 sustain requests, 0 invalid, max stall 0.47 s, memory within 0.73%; replay equal); earlier on `track_s_fast` |
 
 ## Speech quality
 
@@ -189,6 +189,7 @@ Test-suite results, the end-to-end smoke of this repository and the robustness a
   (`r16_vs_envelope.json`, `r16_envelope.log`) and the cell verification log (`r16_verify.log`).
 - `evidence/20261021-l20x/quality/engine_final/`: the three-seed speech quality reports at C=1 and C=32 with per-row
   records.
+- `evidence/20261021-l20x/robustness_track_s_fast_r16_28f8584/`: the robustness acceptance report of `track_s_fast_r16` and its replay.
 - `evidence/20261021-l20x/manifest.json`: every file's SHA-256 and its source file.
 - `evidence/20261021-l20x/baselines.json` points to `evidence/20261019-l20x`, which holds the unchanged baseline
   evaluation cells, the frozen envelope (`campaign/envelope.json`), the tuning winners (`campaign/winners.json`), the
