@@ -1,0 +1,26 @@
+{
+ "description": "Engine (track_s_fast_r16) full-set speech quality at C=1, seed 2 (with seed 0 the final-scope three seeds), round 16",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 2,
+ "gpu": 0,
+ "port": 19022,
+ "k": 1,
+ "run_order_seed": 20261742,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r16",
+   "label": "r16-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
