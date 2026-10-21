@@ -16,14 +16,14 @@ tests are in [engine.md](engine.md); the order in which they were tried is in [o
 | First-chunk ramp | First audio window after 8 frames instead of 25 | Lower TTFA | Approved approximation; costs ~0.025 UTMOS in a 320-row ablation |
 | First-chunk lane and bounded prefills | New voices' setups first while continuations keep 100 ms of slack; Thinker prefills within 2048 tokens a tick | C=32 vs the earlier policy: TTFA p95 −11.4% (LCB 1.089), p50 −5.1%, stall 0.109 vs 0.142 s | Core (`track_s_fast`); chosen by a rule fixed before the ablation |
 | KV lifetime commitments | Thinker and Talker KV granted only for a request's whole lifetime, in admission order | Throughput −0.3 to −2.8% (separate sessions); no admission wait observed | Core; required for correctness under a full pool |
-| TF32 HiFT upsampling | Only the upsampling convolutions in TF32; f0 predictor, source and input/output convolutions stay FP32 | Throughput +2.3 to +10.3% at every C (C=32 2050 → 2262 frames/s), TTFA p50 −1.7 to −9.4% | Option `t2w_hift_decode_tf32`; max chunk error 5.3e-3 (bound 1e-2) alone |
+| TF32 HiFT upsampling | Only the upsampling convolutions in TF32; f0 predictor, source and input/output convolutions stay FP32; in `track_s_fast_r16` also stage 0's transposed convolution | Throughput +2.3 to +10.3% at every C (C=32 2050 → 2262 frames/s), TTFA p50 −1.7 to −9.4%; keeping stage 0's transposed convolution in FP32 costs nothing measurable | Option `t2w_hift_decode_tf32`; max chunk error 5.3e-3 alone, 3.2e-3 with the batched setup encoder and stage 0's transposed convolution in FP32 (bound 1e-2) |
 | Batched prompt-setup encoder | All prompts of a setup call in one right-padded flow-encoder batch, masked attention keys, caches cut per prompt | With Talker prefill graphs: throughput +3.7 to +6.8% at every C (C=32 2262 → 2353) | Option `t2w_batch_setup_encoder`; served chunks 3.71e-3 (FP16 bound 5e-3) |
 | Talker chunk-prefill graphs | Graphs per row count (1–4) and token bucket for prefills that append to existing sequences; first frames sampled in one call | (included in the row above) | Option `talker_prefill_graphs`; equal to eager within row-batching noise |
 | Copies without waiting | Queued host-to-device copies instead of `torch.tensor(..., device="cuda")`; FlashInfer plans from host inputs, each waiting only for its predecessor's upload | Throughput +0.5 to +3.6% (C=32 2353 → 2437); the worker's flow call 30.9 → 7.3 ms host | Core; the plan-ordering fix removed an upload race found by the formal sweep |
+| Overlapped engine tick | The Thinker step is queued on its own CUDA stream before the Talker step and collected after it, so the tick's two GPU waits overlap; graphs of the two lanes are captured on separate streams (cuBLAS keeps a workspace per stream). Ticks that complete a first text chunk, and ticks with more than 16 live requests, run serially | Throughput +1.6 to +8.0% at C=1–16 against r11c, C=32 unchanged; C=2 TTFA p50 −7% | Option `tick_overlap` (`tick_overlap_first_chunks: false`, `tick_overlap_max_live: 16`); same Talker codes as the serial tick at C=1 (all 1088 durations equal) |
 
-The measured profile `track_s_fast_r11` enables the three options. TF32 HiFT and the batched setup encoder together
-exceed the HiFT bound on 1 of 190 chunks (1.06e-2), so the combination is not qualified; see
-[current-results.md](current-results.md).
+The current profile `track_s_fast_r16` enables these options and the overlapped tick. It passes the numerical bounds
+and the speech-quality absolute floors over three seeds; see [current-results.md](current-results.md).
 
 ## Measured and not adopted
 

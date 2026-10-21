@@ -1,0 +1,597 @@
+{
+ "label": "run4",
+ "concurrency": 1,
+ "measured": true,
+ "gpu": "L20X",
+ "engine": "engine",
+ "config": "track_s_fast_r16",
+ "candidate_id": "engine:track_s_fast_r16-r16:f7155c5306ae",
+ "config_digest": "f7155c5306ae49fad6a31b9e457530f732ca948b61010cc31451d9fe7ad488a7",
+ "cell_digest": "8c59d0d0b6a11cdc7e2f2cda2d88e659a029bf0c045e25bca56c1fa0f987b712",
+ "experiment_base_digest": "760c83f2b9cd7c972219f6f7360d6f75b555374c697f19128e75905f5d46894f",
+ "mps_policy": "on",
+ "id_set": "eval",
+ "ids_sha256": "f14cf5103a5cec0890895d2cc0ff1216c3011350c57644ef5edd357c7f2c1324",
+ "expected_ids_sha256": "f14cf5103a5cec0890895d2cc0ff1216c3011350c57644ef5edd357c7f2c1324",
+ "seed_index": 0,
+ "timeout_s": 180.0,
+ "strict": true,
+ "cache_policy": "restart",
+ "cache_evidence": {
+  "fresh_server": true,
+  "served_identity": {
+   "config_path": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/configs/engine/track_s_fast_r16.json",
+   "config_sha256": "01d5e8394f2fb21cad9aa1e25f022ecb2843817cca3fd67a716b43ad8fe2355e",
+   "backend": "engine.runtime.backend_s:TrackSBackend",
+   "engine_tree_sha256": "de2e43b83451be671e0948659f8d19151142976a1a3a5dc0afcaa01f15b31361",
+   "python": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+   "python_dists_sha256": "6ff4b646577d68908f081fbf307a7762b8dbcdab8bdc3606f05240184b5f46c6",
+   "pid": 831081,
+   "t2w_worker_pid": 832585,
+   "device_uuid": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+   "device_name": "NVIDIA L20X"
+  },
+  "served_identity_problems": [],
+  "server_pid": 831065,
+  "server_pgid": 831065,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/scripts/serve_engine.sh",
+   "track_s_fast_r16",
+   "19011"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "0",
+   "ENGINE_MPS": "1",
+   "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_HUB_OFFLINE": "1",
+   "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 0,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 335.22741136327386,
+  "process_tree": [
+   831065,
+   831081,
+   832584,
+   832585,
+   834649,
+   834652,
+   834653,
+   834654
+  ],
+  "gpu_workers": [
+   {
+    "pid": 831081,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-m",
+     "engine.server",
+     "--host",
+     "127.0.0.1",
+     "--port",
+     "19011",
+     "--config",
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/configs/engine/track_s_fast_r16.json"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni"
+    }
+   },
+   {
+    "pid": 832585,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=50)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834649,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=59)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834652,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=61)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834653,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=63)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834654,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=65)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "on",
+   "workers": [
+    {
+     "pid": 831081,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "62018 MiB"
+    },
+    {
+     "pid": 832585,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "32546 MiB"
+    },
+    {
+     "pid": 834649,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    },
+    {
+     "pid": 834652,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    },
+    {
+     "pid": 834653,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    },
+    {
+     "pid": 834654,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    }
+   ],
+   "foreign": [
+    {
+     "pid": 831918,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ],
+   "mps_servers_on_gpu": [
+    {
+     "pid": 831918,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ]
+  }
+ },
+ "runtime_evidence": {
+  "served_identity": {
+   "config_path": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/configs/engine/track_s_fast_r16.json",
+   "config_sha256": "01d5e8394f2fb21cad9aa1e25f022ecb2843817cca3fd67a716b43ad8fe2355e",
+   "backend": "engine.runtime.backend_s:TrackSBackend",
+   "engine_tree_sha256": "de2e43b83451be671e0948659f8d19151142976a1a3a5dc0afcaa01f15b31361",
+   "python": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+   "python_dists_sha256": "6ff4b646577d68908f081fbf307a7762b8dbcdab8bdc3606f05240184b5f46c6",
+   "pid": 831081,
+   "t2w_worker_pid": 832585,
+   "device_uuid": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+   "device_name": "NVIDIA L20X"
+  },
+  "served_identity_problems": [],
+  "server_pid": 831065,
+  "server_pgid": 831065,
+  "launch_argv": [
+   "bash",
+   "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/scripts/serve_engine.sh",
+   "track_s_fast_r16",
+   "19011"
+  ],
+  "launch_env": {
+   "CUDA_VISIBLE_DEVICES": "0",
+   "ENGINE_MPS": "1",
+   "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+   "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+   "HF_HOME": "/workspace/models",
+   "HF_HUB_CACHE": "/workspace/models/hub",
+   "HF_HUB_OFFLINE": "1",
+   "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+   "HF_XET_CACHE": "/workspace/models/cgzheng/xet"
+  },
+  "gpu": {
+   "gpu_index": 0,
+   "gpu_sku": "L20X",
+   "gpu_uuid": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+   "driver": "570.133.20",
+   "memory_mib": "143771"
+  },
+  "startup_s": 335.22741136327386,
+  "process_tree": [
+   831065,
+   831081,
+   832584,
+   832585,
+   834649,
+   834652,
+   834653,
+   834654
+  ],
+  "gpu_workers": [
+   {
+    "pid": 831081,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-m",
+     "engine.server",
+     "--host",
+     "127.0.0.1",
+     "--port",
+     "19011",
+     "--config",
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/configs/engine/track_s_fast_r16.json"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni"
+    }
+   },
+   {
+    "pid": 832585,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=50)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834649,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=59)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834652,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=61)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834653,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=63)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   },
+   {
+    "pid": 834654,
+    "cmdline": [
+     "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "-c",
+     "from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=46, pipe_handle=65)",
+     "--multiprocessing-fork"
+    ],
+    "env": {
+     "CUDA_MPS_LOG_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/log",
+     "CUDA_MPS_PIPE_DIRECTORY": "/tmp/minicpmo-engine-mps-19011/pipe",
+     "CUDA_VISIBLE_DEVICES": "GPU-15bcd737-c479-4024-0cba-1fb1e633bb74",
+     "ENGINE_MPS": "1",
+     "ENGINE_PYTHON": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "HF_DATASETS_CACHE": "/workspace/models/cgzheng/datasets",
+     "HF_HOME": "/workspace/models",
+     "HF_HUB_CACHE": "/workspace/models/hub",
+     "HF_HUB_OFFLINE": "1",
+     "HF_MODULES_CACHE": "/workspace/models/cgzheng/hf_modules",
+     "HF_XET_CACHE": "/workspace/models/cgzheng/xet",
+     "OMNI_ASR_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/asr-env",
+     "OMNI_EVAL_ENV": "/workspace/cgzheng/cgzheng/omni-baselines/eval-env",
+     "OMNI_SGLANG_REPO": "/workspace/cgzheng/cgzheng/omni-baselines/sglang-omni-main",
+     "OMNI_VLLM_REPO": "/workspace/cgzheng/cgzheng/vllm-omni",
+     "TORCHINDUCTOR_CACHE_DIR": "/tmp/torchinductor_cgzheng"
+    }
+   }
+  ],
+  "mps": {
+   "observed": "on",
+   "workers": [
+    {
+     "pid": 831081,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "62018 MiB"
+    },
+    {
+     "pid": 832585,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "32546 MiB"
+    },
+    {
+     "pid": 834649,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    },
+    {
+     "pid": 834652,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    },
+    {
+     "pid": 834653,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    },
+    {
+     "pid": 834654,
+     "type": "M+C",
+     "process_name": "/workspace/cgzheng/cgzheng/qwen3_omni_runs/r16-d12877e/.venv-engine/bin/python",
+     "used_memory": "1378 MiB"
+    }
+   ],
+   "foreign": [
+    {
+     "pid": 831918,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ],
+   "mps_servers_on_gpu": [
+    {
+     "pid": 831918,
+     "type": "C",
+     "process_name": "nvidia-cuda-mps-server",
+     "used_memory": "66 MiB"
+    }
+   ]
+  }
+ },
+ "server_startup_s": 335.22741136327386,
+ "n_requests": 320,
+ "n_failed": 0,
+ "valid": true,
+ "invalid_reasons": {},
+ "makespan_s": 89.66161020845175,
+ "throughput_frames_s": 407.4988159933349,
+ "ttfa_p50_s": 0.1257352139800787,
+ "ttfa_p95_s": 0.13739361502230168,
+ "rtf_mean": 0.06208347948129054,
+ "rtf_duration_weighted": 0.06120195637291414,
+ "req_s": 3.568974494837211,
+ "audio_s_per_s": 16.299952639733398,
+ "e2e_p50_s": 0.2812923789024353,
+ "e2e_p95_s": 0.3714193737134338,
+ "total_audio_s": 1461.48,
+ "first_chunk_mean_s": 0.31999999999999995,
+ "stall_mean_s": 0.0,
+ "stall_max_s": 0.0,
+ "inter_chunk_gap_p50_s": 0.035485878586769104,
+ "inter_chunk_gap_p95_s": 0.04522270709276199,
+ "inter_chunk_gap_max_s": 0.24090376123785973
+}

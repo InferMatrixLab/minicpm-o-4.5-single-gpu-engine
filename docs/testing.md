@@ -53,4 +53,4 @@ cancellations, EOS-length requests, a 48 s fallback, 128-request overload and 8 
 | Long prompts | 8 of 8 long requests and 110 of 110 companion streams valid; per-tick prefill max 2048 (the budget) |
 | Replay | `tools/robustness_replay.py` rebuilds the same verdict from the raw records |
 
-Not repeated on `track_s_fast_r11`.
+Not repeated on `track_s_fast_r11` or `track_s_fast_r16`.

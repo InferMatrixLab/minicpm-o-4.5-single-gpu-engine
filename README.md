@@ -32,7 +32,7 @@ uv pip install --python .venv-engine/bin/python --no-deps \
 
 hf download openbmb/MiniCPM-o-4_5 --revision 503e754207c94da6bb26850b4469f367c9ea3582
 
-CUDA_VISIBLE_DEVICES=0 ENGINE_MPS=1 scripts/serve_engine.sh track_s_fast 18080
+CUDA_VISIBLE_DEVICES=0 ENGINE_MPS=1 scripts/serve_engine.sh track_s_fast_r16 18080
 ```
 
 `scripts/serve_engine.sh <config> <port>` loads `configs/engine/<config>.json`. With `ENGINE_MPS=1` it starts a
@@ -73,22 +73,22 @@ SGLang-Omni [`22d4ace`](https://github.com/sgl-project/sglang-omni/commit/22d4ac
 
 | C | Framework | Config | Throughput (frames/s) | Throughput / SGLang | TTFA p50 (ms) | TTFA p95 (ms) | RTF (mean) |
 |---:|---|---|---:|---:|---:|---:|---:|
-| 1 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 397.43 | 1.43× | 126.2 | 133.2 | 0.0635 |
+| 1 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r16` | 406.01 | 1.46× | 125.8 | 137.6 | 0.0623 |
 | 1 | vllm-omni | `minicpmo_4_5_turn_mps-mps-on` | 187.52 | 0.67× | 295.3 | 339.9 | 0.1354 |
 | 1 | sglang-omni | `speech-mm32k` | 278.72 | 1.00× | 381.2 | 502.9 | 0.0931 |
-| 2 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 521.11 | 1.16× | 190.2 | 222.5 | 0.0975 |
+| 2 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r16` | 562.93 | 1.25× | 177.3 | 212.2 | 0.0906 |
 | 2 | vllm-omni | `minicpmo_4_5_turn_mps-mps-on` | 318.61 | 0.71× | 380.0 | 465.1 | 0.1596 |
 | 2 | sglang-omni | `speech-mps-on` | 450.37 | 1.00× | 471.0 | 637.7 | 0.1152 |
-| 4 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 761.92 | 1.07× | 267.1 | 308.2 | 0.1335 |
+| 4 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r16` | 810.38 | 1.14× | 272.7 | 326.7 | 0.1261 |
 | 4 | vllm-omni | not evaluated at this C | — | — | — | — | — |
 | 4 | sglang-omni | `speech-mps-on` | 709.73 | 1.00× | 597.6 | 825.6 | 0.1463 |
-| 8 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 1118.93 | 1.08× | 361.4 | 425.6 | 0.1817 |
+| 8 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r16` | 1180.65 | 1.14× | 367.2 | 439.6 | 0.1734 |
 | 8 | vllm-omni | not evaluated at this C | — | — | — | — | — |
 | 8 | sglang-omni | `speech-mps-on` | 1033.40 | 1.00× | 853.9 | 1150.4 | 0.2001 |
-| 16 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 1674.36 | 1.15× | 483.5 | 569.6 | 0.2422 |
+| 16 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r16` | 1682.74 | 1.16× | 484.6 | 597.5 | 0.2426 |
 | 16 | vllm-omni | `minicpmo_4_5_turn_mrv2_h200_mps-mps-on` | 411.03 | 0.28× | 1057.2 | 1982.3 | 1.0148 |
 | 16 | sglang-omni | `speech-mps-on` | 1455.39 | 1.00× | 1179.2 | 1686.0 | 0.2829 |
-| 32 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r11` | 2437.10 | 1.22× | 654.6 | 794.6 | 0.3345 |
+| 32 | minicpm-o-4.5-single-gpu-engine | `track_s_fast_r16` | 2419.94 | 1.21× | 654.1 | 804.2 | 0.3366 |
 | 32 | vllm-omni | `minicpmo_4_5_turn_mrv2_h200_mps-mps-on` | 407.68 | 0.20× | 1041.1 | 1965.6 | 2.0344 |
 | 32 | sglang-omni | `speech-mps-off` | 1996.67 | 1.00× | 1613.0 | 2374.3 | 0.4137 |
 
@@ -110,10 +110,11 @@ one C, the faster one is shown; the target ratios use the configuration selected
   ([details](docs/baselines.md#sglang-omni-does-not-stream-audio)).
 
 **Target status: not met.** The goal is 2× the better baseline on every metric at every C, with the one-sided 95%
-bootstrap lower bound (LCB) at or above 2.0. TTFA reaches it in 10 of 12 cells. Throughput and RTF reach 1.07–1.47×
-(LCB 1.06–1.46).
-The `track_s_fast_r11` profile also exceeds the Token2Wav HiFT error bound on 1 of 190 chunks (1.06e-2 against
-1e-2) and has not yet passed the speech quality gates, so it is a measured profile, not a qualified headline.
+bootstrap lower bound (LCB) at or above 2.0. TTFA reaches it in 11 of 12 cells (not TTFA p50 at C=32). Throughput and
+RTF reach 1.14–1.49× (LCB 1.13–1.49).
+The `track_s_fast_r16` profile passes the Token2Wav numerical bounds and the speech-quality absolute floors over three
+seeds at C=1 and C=32 (UTMOS 4.166 / 4.167 against 4.163). Its UTMOS stays 0.13 below SGLang-Omni's, which does not
+stream audio; that comparison is reported, not required.
 [Ratios, streaming metrics, quality, run ranges and raw evidence](docs/current-results.md) ·
 [Baseline selection and analysis](docs/baselines.md) · [Test results](docs/testing.md).
 <!-- latest-performance:end -->

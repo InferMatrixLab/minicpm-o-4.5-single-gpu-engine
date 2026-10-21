@@ -64,16 +64,17 @@ synthetic jobs each, so their memory is flat during load). Startup is outside th
 ## Defaults versus measured profiles
 
 `scripts/serve_engine.sh <config>` loads `configs/engine/<config>.json`; nothing else changes the engine's behaviour.
-Options that are off in `track_s_fast` are not part of the qualified path.
+Options that are off in `track_s_fast_r16` are not part of the qualified path.
 
-| Setting | `track_s_fast` | `track_s_fast_r11` (measured profile) |
+| Setting | `track_s_fast` | `track_s_fast_r16` (current profile) |
 |---|---|---|
 | Engine loop | Track S, `max_live` 64, Thinker 1024 × 64-token pages, Talker 1280 × 128-token pages | same |
 | Thinker / Talker decode | CUDA graphs, fused Triton kernels, Talker K=4 | same |
+| Engine tick | Thinker step, then Talker step | Thinker step on its own stream beside the Talker step (`tick_overlap`); first-chunk ticks and ticks above 16 live requests serial |
 | Talker chunk prefill | eager | CUDA graphs with batched first-frame sampling (`talker_prefill_graphs`) |
 | First chunk | 8 frames (reference 25) | same |
 | Flow | FP16, fast DiT with slot caches and graphs | same |
-| HiFT | strict FP32, graphs | upsampling stages in TF32 (`t2w_hift_decode_tf32`) |
+| HiFT | strict FP32, graphs | upsampling stages in TF32 except stage 0's transposed convolution (`t2w_hift_decode_tf32: [1, 2, "0:src", "0:res"]`) |
 | Prompt setup encoder | one prompt at a time | batched per call (`t2w_batch_setup_encoder`) |
 | Scheduling | first-chunk lane 100 ms, prefill budget 2048, no slack floor | same |
 | Worker / features | worker process under MPS, 4 feature processes | same |
@@ -82,10 +83,11 @@ Neutral or negative options remain in the source, off: asynchronous Token2Wav re
 buckets above 16 rows (`t2w_hift_rows`) and whole-K Talker capture (`talker_whole_k`, profile `track_s_fast_r14`).
 See [optimizations.md](optimizations.md).
 
-`track_s_fast_r11` combines TF32 HiFT with the batched setup encoder. Together they exceed the HiFT chunk error bound
-on 1 of 190 chunks (1.06e-2 against 1e-2; `tests/engine/test_hift_tf32.py[rows_to_16_batched_setup]` is a strict
-expected failure). Each option alone stays within its bound. The profile's performance figures stand; its numerical
-qualification does not.
+`track_s_fast_r16` keeps stage 0's HiFT transposed convolution in FP32: with every upsampling part in TF32 (the earlier
+`track_s_fast_r11`) the batched setup encoder's chunks exceeded the HiFT chunk error bound on 1 of 190 chunks
+(1.06e-2 against 1e-2, B24), all of it from that convolution; without it the maximum is 3.2e-3
+(`tests/engine/test_hift_tf32.py`). The profile passes the speech-quality absolute floors over three seeds at C=1 and
+C=32 ([current-results.md](current-results.md#speech-quality)).
 
 ## External code and weights
 

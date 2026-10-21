@@ -6,13 +6,13 @@
 <line x1="58" x2="268" y1="252.0" y2="252.0" stroke="#eee"/>
 <text x="54" y="256.0" text-anchor="end" fill="#555">0</text>
 <line x1="58" x2="268" y1="202.0" y2="202.0" stroke="#eee"/>
-<text x="54" y="206.0" text-anchor="end" fill="#555">658</text>
+<text x="54" y="206.0" text-anchor="end" fill="#555">653</text>
 <line x1="58" x2="268" y1="152.0" y2="152.0" stroke="#eee"/>
-<text x="54" y="156.0" text-anchor="end" fill="#555">1316</text>
+<text x="54" y="156.0" text-anchor="end" fill="#555">1307</text>
 <line x1="58" x2="268" y1="102.0" y2="102.0" stroke="#eee"/>
-<text x="54" y="106.0" text-anchor="end" fill="#555">1974</text>
+<text x="54" y="106.0" text-anchor="end" fill="#555">1960</text>
 <line x1="58" x2="268" y1="52.0" y2="52.0" stroke="#eee"/>
-<text x="54" y="56.0" text-anchor="end" fill="#555">2632</text>
+<text x="54" y="56.0" text-anchor="end" fill="#555">2614</text>
 <text x="75.5" y="266" text-anchor="middle" fill="#555">1</text>
 <text x="110.5" y="266" text-anchor="middle" fill="#555">2</text>
 <text x="145.5" y="266" text-anchor="middle" fill="#555">4</text>
@@ -20,25 +20,25 @@
 <text x="215.5" y="266" text-anchor="middle" fill="#555">16</text>
 <text x="250.5" y="266" text-anchor="middle" fill="#555">32</text>
 <text x="163.0" y="282" text-anchor="middle" fill="#555">concurrency C</text>
-<polyline fill="none" stroke="#d1495b" stroke-width="2" points="75.5,221.8 110.5,212.4 145.5,194.1 180.5,167.0 215.5,124.8 250.5,66.8"/>
-<circle cx="75.5" cy="221.8" r="3" fill="#d1495b"/>
-<circle cx="110.5" cy="212.4" r="3" fill="#d1495b"/>
-<circle cx="145.5" cy="194.1" r="3" fill="#d1495b"/>
-<circle cx="180.5" cy="167.0" r="3" fill="#d1495b"/>
-<circle cx="215.5" cy="124.8" r="3" fill="#d1495b"/>
+<polyline fill="none" stroke="#d1495b" stroke-width="2" points="75.5,220.9 110.5,208.9 145.5,190.0 180.5,161.7 215.5,123.2 250.5,66.8"/>
+<circle cx="75.5" cy="220.9" r="3" fill="#d1495b"/>
+<circle cx="110.5" cy="208.9" r="3" fill="#d1495b"/>
+<circle cx="145.5" cy="190.0" r="3" fill="#d1495b"/>
+<circle cx="180.5" cy="161.7" r="3" fill="#d1495b"/>
+<circle cx="215.5" cy="123.2" r="3" fill="#d1495b"/>
 <circle cx="250.5" cy="66.8" r="3" fill="#d1495b"/>
-<polyline fill="none" stroke="#2e86ab" stroke-width="2" points="75.5,237.8 110.5,227.8 215.5,220.8 250.5,221.0"/>
-<circle cx="75.5" cy="237.8" r="3" fill="#2e86ab"/>
-<circle cx="110.5" cy="227.8" r="3" fill="#2e86ab"/>
-<circle cx="215.5" cy="220.8" r="3" fill="#2e86ab"/>
-<circle cx="250.5" cy="221.0" r="3" fill="#2e86ab"/>
-<polyline fill="none" stroke="#3b9b5a" stroke-width="2" points="75.5,230.8 110.5,217.8 145.5,198.1 180.5,173.5 215.5,141.4 250.5,100.3"/>
-<circle cx="75.5" cy="230.8" r="3" fill="#3b9b5a"/>
-<circle cx="110.5" cy="217.8" r="3" fill="#3b9b5a"/>
-<circle cx="145.5" cy="198.1" r="3" fill="#3b9b5a"/>
-<circle cx="180.5" cy="173.5" r="3" fill="#3b9b5a"/>
-<circle cx="215.5" cy="141.4" r="3" fill="#3b9b5a"/>
-<circle cx="250.5" cy="100.3" r="3" fill="#3b9b5a"/>
+<polyline fill="none" stroke="#2e86ab" stroke-width="2" points="75.5,237.7 110.5,227.6 215.5,220.5 250.5,220.8"/>
+<circle cx="75.5" cy="237.7" r="3" fill="#2e86ab"/>
+<circle cx="110.5" cy="227.6" r="3" fill="#2e86ab"/>
+<circle cx="215.5" cy="220.5" r="3" fill="#2e86ab"/>
+<circle cx="250.5" cy="220.8" r="3" fill="#2e86ab"/>
+<polyline fill="none" stroke="#3b9b5a" stroke-width="2" points="75.5,230.7 110.5,217.5 145.5,197.7 180.5,172.9 215.5,140.6 250.5,99.2"/>
+<circle cx="75.5" cy="230.7" r="3" fill="#3b9b5a"/>
+<circle cx="110.5" cy="217.5" r="3" fill="#3b9b5a"/>
+<circle cx="145.5" cy="197.7" r="3" fill="#3b9b5a"/>
+<circle cx="180.5" cy="172.9" r="3" fill="#3b9b5a"/>
+<circle cx="215.5" cy="140.6" r="3" fill="#3b9b5a"/>
+<circle cx="250.5" cy="99.2" r="3" fill="#3b9b5a"/>
 <text x="423.0" y="44" text-anchor="middle" font-weight="bold" fill="#222">TTFA p50 (ms) ↓</text>
 <rect x="318" y="52" width="210" height="200" fill="none" stroke="#999"/>
 <line x1="318" x2="528" y1="252.0" y2="252.0" stroke="#eee"/>
@@ -58,13 +58,13 @@
 <text x="475.5" y="266" text-anchor="middle" fill="#555">16</text>
 <text x="510.5" y="266" text-anchor="middle" fill="#555">32</text>
 <text x="423.0" y="282" text-anchor="middle" fill="#555">concurrency C</text>
-<polyline fill="none" stroke="#d1495b" stroke-width="2" points="335.5,237.5 370.5,230.2 405.5,221.3 440.5,210.5 475.5,196.5 510.5,176.8"/>
-<circle cx="335.5" cy="237.5" r="3" fill="#d1495b"/>
-<circle cx="370.5" cy="230.2" r="3" fill="#d1495b"/>
-<circle cx="405.5" cy="221.3" r="3" fill="#d1495b"/>
-<circle cx="440.5" cy="210.5" r="3" fill="#d1495b"/>
-<circle cx="475.5" cy="196.5" r="3" fill="#d1495b"/>
-<circle cx="510.5" cy="176.8" r="3" fill="#d1495b"/>
+<polyline fill="none" stroke="#d1495b" stroke-width="2" points="335.5,237.6 370.5,231.6 405.5,220.7 440.5,209.8 475.5,196.4 510.5,176.9"/>
+<circle cx="335.5" cy="237.6" r="3" fill="#d1495b"/>
+<circle cx="370.5" cy="231.6" r="3" fill="#d1495b"/>
+<circle cx="405.5" cy="220.7" r="3" fill="#d1495b"/>
+<circle cx="440.5" cy="209.8" r="3" fill="#d1495b"/>
+<circle cx="475.5" cy="196.4" r="3" fill="#d1495b"/>
+<circle cx="510.5" cy="176.9" r="3" fill="#d1495b"/>
 <polyline fill="none" stroke="#2e86ab" stroke-width="2" points="335.5,218.1 370.5,208.4 475.5,130.6 510.5,132.5"/>
 <circle cx="335.5" cy="218.1" r="3" fill="#2e86ab"/>
 <circle cx="370.5" cy="208.4" r="3" fill="#2e86ab"/>
@@ -96,13 +96,13 @@
 <text x="735.5" y="266" text-anchor="middle" fill="#555">16</text>
 <text x="770.5" y="266" text-anchor="middle" fill="#555">32</text>
 <text x="683.0" y="282" text-anchor="middle" fill="#555">concurrency C</text>
-<polyline fill="none" stroke="#d1495b" stroke-width="2" points="595.5,241.6 630.5,234.6 665.5,228.0 700.5,218.8 735.5,207.6 770.5,190.0"/>
-<circle cx="595.5" cy="241.6" r="3" fill="#d1495b"/>
-<circle cx="630.5" cy="234.6" r="3" fill="#d1495b"/>
-<circle cx="665.5" cy="228.0" r="3" fill="#d1495b"/>
-<circle cx="700.5" cy="218.8" r="3" fill="#d1495b"/>
-<circle cx="735.5" cy="207.6" r="3" fill="#d1495b"/>
-<circle cx="770.5" cy="190.0" r="3" fill="#d1495b"/>
+<polyline fill="none" stroke="#d1495b" stroke-width="2" points="595.5,241.3 630.5,235.5 665.5,226.5 700.5,217.7 735.5,205.4 770.5,189.3"/>
+<circle cx="595.5" cy="241.3" r="3" fill="#d1495b"/>
+<circle cx="630.5" cy="235.5" r="3" fill="#d1495b"/>
+<circle cx="665.5" cy="226.5" r="3" fill="#d1495b"/>
+<circle cx="700.5" cy="217.7" r="3" fill="#d1495b"/>
+<circle cx="735.5" cy="205.4" r="3" fill="#d1495b"/>
+<circle cx="770.5" cy="189.3" r="3" fill="#d1495b"/>
 <polyline fill="none" stroke="#2e86ab" stroke-width="2" points="595.5,225.5 630.5,215.7 735.5,97.4 770.5,98.7"/>
 <circle cx="595.5" cy="225.5" r="3" fill="#2e86ab"/>
 <circle cx="630.5" cy="215.7" r="3" fill="#2e86ab"/>
@@ -134,13 +134,13 @@
 <text x="995.5" y="266" text-anchor="middle" fill="#555">16</text>
 <text x="1030.5" y="266" text-anchor="middle" fill="#555">32</text>
 <text x="943.0" y="282" text-anchor="middle" fill="#555">concurrency C</text>
-<polyline fill="none" stroke="#d1495b" stroke-width="2" points="855.5,246.2 890.5,243.1 925.5,239.8 960.5,235.5 995.5,230.0 1030.5,221.5"/>
-<circle cx="855.5" cy="246.2" r="3" fill="#d1495b"/>
-<circle cx="890.5" cy="243.1" r="3" fill="#d1495b"/>
-<circle cx="925.5" cy="239.8" r="3" fill="#d1495b"/>
-<circle cx="960.5" cy="235.5" r="3" fill="#d1495b"/>
-<circle cx="995.5" cy="230.0" r="3" fill="#d1495b"/>
-<circle cx="1030.5" cy="221.5" r="3" fill="#d1495b"/>
+<polyline fill="none" stroke="#d1495b" stroke-width="2" points="855.5,246.3 890.5,243.8 925.5,240.5 960.5,236.2 995.5,229.9 1030.5,221.4"/>
+<circle cx="855.5" cy="246.3" r="3" fill="#d1495b"/>
+<circle cx="890.5" cy="243.8" r="3" fill="#d1495b"/>
+<circle cx="925.5" cy="240.5" r="3" fill="#d1495b"/>
+<circle cx="960.5" cy="236.2" r="3" fill="#d1495b"/>
+<circle cx="995.5" cy="229.9" r="3" fill="#d1495b"/>
+<circle cx="1030.5" cy="221.4" r="3" fill="#d1495b"/>
 <polyline fill="none" stroke="#2e86ab" stroke-width="2" points="855.5,239.7 890.5,237.5 995.5,159.6 1030.5,66.8"/>
 <circle cx="855.5" cy="239.7" r="3" fill="#2e86ab"/>
 <circle cx="890.5" cy="237.5" r="3" fill="#2e86ab"/>

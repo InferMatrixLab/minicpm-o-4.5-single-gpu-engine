@@ -36,7 +36,7 @@ Machine-specific locations go in `scripts/env.local.sh` (untracked). `scripts/en
 ## 2. One engine cell
 
 ```bash
-.venv/bin/python -m bench.cli cell --adapter engine --config track_s_fast_r11 --mps on --env ENGINE_MPS=1 \
+.venv/bin/python -m bench.cli cell --adapter engine --config track_s_fast_r16 --mps on --env ENGINE_MPS=1 \
   --gpu 0 --port 18932 --concurrency 32 --k 5 --out results/engine/c32
 ```
 

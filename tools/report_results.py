@@ -3,7 +3,9 @@
     python tools/report_results.py evidence/20261019-l20x
 
 Reads every cell's measured run summaries (``run1`` .. ``runK``; ``run0`` is the discarded first run) and the saved
-envelope comparison (``campaign/r11c_vs_envelope.json``, produced by ``tools/engine_vs_envelope.py`` on the raw cells).
+envelope comparison (the one ``campaign/*_vs_envelope.json``, produced by ``tools/engine_vs_envelope.py`` on the raw cells).
+A snapshot that holds only engine cells names the snapshot with the unchanged baseline cells, tuning cells and traces
+in ``baselines.json`` (``{"evidence": "../<snapshot>"}``); its baseline cells are read from there.
 Writes ``docs/current-results.json``, ``docs/figures/full-comparison.svg`` and prints the README table.
 """
 
@@ -104,15 +106,24 @@ def svg_chart(rows: dict, cs: list[int]) -> str:
     return "\n".join(out) + "\n"
 
 
+def config_name(c: dict) -> str:
+    return c["config"] if c["framework"] == "engine" else c["candidate_id"].split(":")[1]
+
+
 def main():
-    ev = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / "evidence" / "20261019-l20x").resolve()
+    ev = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / "evidence" / "20261021-l20x").resolve()
     cells = load_cells(ev)
-    tuning = load_cells(ev / "tuning") if (ev / "tuning").exists() else []
-    traces = trace_rows(ev) if (ev / "traces").exists() else []
-    ratios = json.loads((ev / "campaign" / "r11c_vs_envelope.json").read_text())
+    base = ev
+    if (ev / "baselines.json").exists():
+        base = (ev / json.loads((ev / "baselines.json").read_text())["evidence"]).resolve()
+        cells += [c for c in load_cells(base) if c["framework"] != "engine"]
+    tuning = load_cells(base / "tuning") if (base / "tuning").exists() else []
+    traces = trace_rows(base) if (base / "traces").exists() else []
+    (ratios_path,) = sorted((ev / "campaign").glob("*_vs_envelope.json"))
+    ratios = json.loads(ratios_path.read_text())
     rows = best_per_framework(cells)
     cs = sorted({c["C"] for c in cells})
-    (ROOT / "docs" / "current-results.json").write_text(json.dumps({"evidence": str(ev.relative_to(ROOT)), "cells": cells,
+    (ROOT / "docs" / "current-results.json").write_text(json.dumps({"evidence": str(ev.relative_to(ROOT)), "baseline_evidence": str(base.relative_to(ROOT)), "cells": cells,
                                                                     "tuning_cells": tuning, "traces": traces,
                                                                     "engine_vs_envelope": ratios}, indent=1) + "\n")
     (ROOT / "docs" / "figures").mkdir(parents=True, exist_ok=True)
@@ -126,7 +137,7 @@ def main():
             if r is None:
                 print(f"| {c} | {LABEL[f]} | not evaluated at this C | — | — | — | — | — |")
                 continue
-            cfg = r["candidate_id"].split(":")[1].removesuffix("-r11c")
+            cfg = config_name(r)
             print(f"| {c} | {LABEL[f]} | `{cfg}` | {r['throughput_frames_s']:.2f} | "
                   f"{r['throughput_frames_s'] / sg['throughput_frames_s']:.2f}× | {r['ttfa_p50_s'] * 1e3:.1f} | "
                   f"{r['ttfa_p95_s'] * 1e3:.1f} | {r['rtf_mean']:.4f} |")
@@ -135,7 +146,7 @@ def main():
     print("| C | Framework | Config | E2E p50 (s) | E2E p95 (s) | Stall mean (ms) | Stall max (s) | Chunk gap p95 (ms) | Audio per run (s) | Requests/s |")
     print("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|")
     for c in sorted(cells, key=lambda c: (c["C"], FRAMEWORKS.index(c["framework"]), c["candidate_id"])):
-        print(f"| {c['C']} | {LABEL[c['framework']]} | `{c['candidate_id'].split(':')[1].removesuffix('-r11c')}` | {c['e2e_p50_s']:.2f} | "
+        print(f"| {c['C']} | {LABEL[c['framework']]} | `{config_name(c)}` | {c['e2e_p50_s']:.2f} | "
               f"{c['e2e_p95_s']:.2f} | {c['stall_mean_s'] * 1e3:.1f} | {c['stall_max_s']:.2f} | {c['inter_chunk_gap_p95_s'] * 1e3:.0f} | "
               f"{c['total_audio_s']:.0f} | {c['req_s']:.2f} |")
     if tuning:
