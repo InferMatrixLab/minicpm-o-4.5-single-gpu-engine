@@ -1,0 +1,26 @@
+{
+ "description": "Round-16 UTMOS attribution: track_s_fast_q16c (track_s_fast_r15d with Talker chunk-prefill graphs off), full-set speech quality at C=1, seed 0",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 0,
+ "port": 19002,
+ "k": 1,
+ "run_order_seed": 20261702,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_q16c",
+   "label": "q16c-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

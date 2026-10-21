@@ -1,0 +1,26 @@
+{
+ "description": "Round-16 UTMOS attribution: track_s_fast_q16b (track_s_fast_r15d with batched setup encoder off), full-set speech quality at C=1, seed 0",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 1,
+ "port": 19003,
+ "k": 1,
+ "run_order_seed": 20261703,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_q16b",
+   "label": "q16b-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
