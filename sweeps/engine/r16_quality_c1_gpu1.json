@@ -1,0 +1,26 @@
+{
+ "description": "Engine (track_s_fast_r16) full-set speech quality at C=1, seed 0, round 16 (rerun: the first attempt's C=1 server met a diagnostic process on GPU1)",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 1,
+ "port": 19013,
+ "k": 1,
+ "run_order_seed": 20261713,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r16",
+   "label": "r16-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
