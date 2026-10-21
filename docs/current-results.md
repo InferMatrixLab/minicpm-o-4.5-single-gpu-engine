@@ -145,7 +145,8 @@ Minimum–maximum over the measured runs of each cell. No request failed in any 
 | Fast DiT, FP16 flow | Within the FP16 mel bound (5e-3) |
 | TF32 HiFT alone | Max chunk 5.3e-3 (bound 1e-2), 190 chunks |
 | TF32 HiFT + batched setup encoder (`track_s_fast_r11`) | **Fails on 1 of 190 chunks: 1.06e-2.** Strict expected failure in `tests/engine/test_hift_tf32.py` until repaired |
-| Speech quality gates (WER, SIM, UTMOS vs the frozen baseline reference, 1088 rows × 3 seeds at C=1 and C=32) | Comparative gates not run. Development run (seed 0) of `track_s_fast` below passes the absolute floors. **`track_s_fast_r11` (scored 2026-10-20) misses the UTMOS floor 4.1634: 4.1625 at C=1, 4.1606 at C=32**; WER and SIM pass ([engine.md](engine.md), round 15) |
+| TF32 HiFT without stage 0's transposed convolution + batched setup encoder (`track_s_fast_r16`) | Max chunk 3.2e-3 (bound 1e-2), 190 chunks: B24 repaired |
+| Speech quality gates (WER, SIM, UTMOS vs the frozen baseline reference, 1088 rows × 3 seeds at C=1 and C=32) | `track_s_fast_r16` (round 16): absolute floors **pass** at C=1 and C=32 over three seeds (UTMOS 4.1658 / 4.1670); the comparative UTMOS gate **fails** (4.17 vs the non-streaming 4.30, margin 0.05), computed with the gate formula on cells not declared against the frozen Q_ref ([engine.md](engine.md), round 16). `track_s_fast_r11`'s single seed-0 scoring missed the UTMOS floor by 0.0009 |
 | Multimodal accuracy (MMMU, MMSU, Daily-Omni) | Evaluators and references frozen; engine gates not run |
 | Robustness (C=32, 30 min, cancellation, overload, long prefills, memory ±1%) | Passed on `track_s_fast` (33,291 requests, 0 invalid, max stall 0.18 s); not repeated on `track_s_fast_r11` |
 

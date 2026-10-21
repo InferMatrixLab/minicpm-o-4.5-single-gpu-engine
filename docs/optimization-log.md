@@ -1,6 +1,6 @@
 # Optimization log
 
-Chronological record of the engine's development, 2026-10-14 to 2026-10-20, on L20X GPUs. "Envelope" is the best
+Chronological record of the engine's development, 2026-10-14 to 2026-10-21, on L20X GPUs. "Envelope" is the best
 baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% lower bound reaches 2.0 (24 cells:
 6 concurrencies × 4 metrics). Full measurements: [engine.md](engine.md).
 
@@ -22,6 +22,7 @@ baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% 
 | 13 | HiFT graph buckets above 16 rows | Neutral; not adopted | 10 |
 | 14 | Whole-K Talker capture (one graph per K-frame block); matched HiFT comparison | Neutral; not adopted. Found that TF32 HiFT with the batched setup encoder exceeds the HiFT bound on 1 of 190 chunks | 10 |
 | 15 | Overlapped engine tick: the Thinker step on its own stream beside the Talker step; first-chunk ticks and ticks above 16 live requests serial (`track_s_fast_r15d`); per-lane graph capture streams | Throughput +1.6 to +7.3% at C=1–16, C=32 unchanged; C=2 TTFA p50 −7%. First speech-quality scoring of `track_s_fast_r11`: UTMOS 0.001–0.003 below the floor (r15 unchanged at C=1) | 11 |
+| 16 | B24 repair (stage 0's HiFT transposed convolution back in FP32); UTMOS attribution; three-seed speech quality (`track_s_fast_r16`) | Performance unchanged (throughput +0.5 to +8.0% vs r11c at C=1–16, C=32 −0.7%); absolute floors pass at C=1 and C=32 over three seeds; comparative UTMOS gate fails (4.17 vs 4.30 non-streaming reference) | 11 |
 
 ## Lessons recorded on the way
 
@@ -43,3 +44,8 @@ baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% 
   the gate's real firing rate (17% at 24 live requests), which the K=5 cell alone did not.
 - **Score every candidate's quality, including the earlier headline.** `track_s_fast_r11` had performance evidence but
   had never been scored; its first scoring misses the UTMOS floor.
+- **A single seed is not a quality verdict near a floor.** Padding the Talker's chunk prefills changed the bf16 rounding,
+  150 of 1088 rows sampled other codes and seed 0 fell 0.0008 under the UTMOS floor; the other seeds and the pooled
+  score pass. Attribute by ablation at C=1, where the output is deterministic, before changing precision.
+- **Declare the frozen references in the sweep spec before running a gate candidate.** The comparative gate accepts only
+  cells whose experiment names the frozen Q_ref (`frozen_refs.speech_qref`).
