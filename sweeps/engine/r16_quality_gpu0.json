@@ -1,0 +1,27 @@
+{
+ "description": "Engine (track_s_fast_r16: r15d with the B24 HiFT repair) full-set speech quality at C=1 and C=32, seed 0, development evidence (round 16)",
+ "kind": "quality",
+ "id_set": "full",
+ "seed_index": 0,
+ "gpu": 0,
+ "port": 19010,
+ "k": 1,
+ "run_order_seed": 20261710,
+ "timeout_s": 180,
+ "save_audio": true,
+ "concurrencies": [
+  1,
+  32
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r16",
+   "label": "r16-mps",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}

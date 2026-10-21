@@ -1,0 +1,28 @@
+{
+ "description": "Round-16 measurement on GPU0: track_s_fast_r16 (r15d with the B24 HiFT repair: stage 0's transposed convolution in FP32), K=5, eval IDs; compared with r11c and r15b/r15d",
+ "kind": "performance",
+ "id_set": "eval",
+ "seed_index": 0,
+ "k": 5,
+ "timeout_s": 180,
+ "save_audio": true,
+ "gpu": 0,
+ "port": 19011,
+ "run_order_seed": 20261711,
+ "concurrencies": [
+  1,
+  4,
+  16
+ ],
+ "configs": [
+  {
+   "adapter": "engine",
+   "config": "track_s_fast_r16",
+   "label": "r16",
+   "mps": "on",
+   "env": {
+    "ENGINE_MPS": "1"
+   }
+  }
+ ]
+}
