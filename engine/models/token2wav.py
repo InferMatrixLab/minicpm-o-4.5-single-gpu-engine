@@ -138,27 +138,50 @@ def istft_overlap_add(spec: torch.Tensor, n_fft: int, hop: int, window: torch.Te
     return (y / env)[:, half:total - half]
 
 
-def _hift_decode(hift, x: torch.Tensor, s: torch.Tensor, tf32: bool = False) -> torch.Tensor:
+PARTS = ("ups", "src", "res")  # an upsampling stage: its transposed convolution, the source branch, the resblocks
+
+
+def tf32_stages(tf32, num_upsamples: int) -> frozenset:
+    """The (stage, part) pairs that ``decode_tf32`` runs in TF32: every part of every upsampling stage for True, none for
+    False, else the listed entries (a config's ``t2w_hift_decode_tf32`` may be a list): a stage index for all of its
+    parts or ``"<stage>:<part>"`` with a part of ``PARTS``."""
+    if tf32 is True:
+        tf32 = range(num_upsamples)
+    if not tf32:
+        return frozenset()
+    out = set()
+    for e in tf32:
+        i, _, part = str(e).partition(":")
+        assert 0 <= int(i) < num_upsamples and part in ("",) + PARTS, (tf32, num_upsamples)
+        out |= {(int(i), q) for q in ((part,) if part else PARTS)}
+    return frozenset(out)
+
+
+def _hift_decode(hift, x: torch.Tensor, s: torch.Tensor, tf32=False) -> torch.Tensor:
     """``HiFTGenerator.decode`` with ``istft_overlap_add`` in place of ``torch.istft``.  ``tf32``: the upsampling stages
-    (``ups``, the source ``source_downs`` / ``source_resblocks`` and ``resblocks``) in TF32 (``decoder_tf32``); the input
-    and output convolutions stay in the caller's precision."""
+    (``ups``, the source ``source_downs`` / ``source_resblocks`` and ``resblocks``) in TF32 (``decoder_tf32``), all of
+    them or the listed ones (``tf32_stages``); the input and output convolutions stay in the caller's precision."""
     import torch.nn.functional as Fn
 
+    stages = tf32_stages(tf32, hift.num_upsamples)
     s_stft_real, s_stft_imag = hift._stft(s.squeeze(1))
     s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
     x = hift.conv_pre(x)
-    with decoder_tf32() if tf32 else contextlib.nullcontext():
-        for i in range(hift.num_upsamples):
-            x = Fn.leaky_relu(x, hift.lrelu_slope)
+    prec = lambda i, part: decoder_tf32() if (i, part) in stages else contextlib.nullcontext()  # noqa: E731
+    for i in range(hift.num_upsamples):
+        x = Fn.leaky_relu(x, hift.lrelu_slope)
+        with prec(i, "ups"):
             x = hift.ups[i](x)
-            if i == hift.num_upsamples - 1:
-                x = hift.reflection_pad(x)
+        if i == hift.num_upsamples - 1:
+            x = hift.reflection_pad(x)
+        with prec(i, "src"):
             si = hift.source_resblocks[i](hift.source_downs[i](s_stft))
-            x = x + si
-            xs = None
+        x = x + si
+        xs = None
+        with prec(i, "res"):
             for j in range(hift.num_kernels):
                 xs = hift.resblocks[i * hift.num_kernels + j](x) if xs is None else xs + hift.resblocks[i * hift.num_kernels + j](x)
-            x = xs / hift.num_kernels
+        x = xs / hift.num_kernels
     x = Fn.leaky_relu(x)
     x = hift.conv_post(x)
     nf = hift.istft_params["n_fft"]
@@ -177,7 +200,9 @@ def decoder_tf32():
     moves the waveform by ~34% relative L2).  So do the decoder's input and output convolutions: with only the
     upsampling stages in TF32 the waveform moves by at most 2.4e-3 against strict FP32 under the same seeded noise (134
     speech windows of 32 voices; 6.4e-3 with the whole decoder in TF32; ``tools/spike/hift_precision_probe.py``),
-    within AC-3.4's HiFT bound of 1e-2; the served combination is checked in ``tests/engine/test_hift_tf32.py``."""
+    within AC-3.4's HiFT bound of 1e-2; the served combination is checked in ``tests/engine/test_hift_tf32.py``.  With
+    the batched setup encoder one chunk reached 1.06e-2 (B24); all of it came from stage 0's transposed convolution,
+    and with that one in FP32 (``[1, 2, "0:src", "0:res"]``) the maximum is 3.2e-3 (``tools/spike/hift_tf32_stages.py``)."""
     prev = torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32
     torch.backends.cudnn.allow_tf32 = torch.backends.cuda.matmul.allow_tf32 = True
     try:

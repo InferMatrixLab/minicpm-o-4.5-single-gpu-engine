@@ -23,9 +23,12 @@ N_UTT, FIRST_CHUNK, BOUND = 32, 8, 1e-2
 
 
 EXTENDED_ROWS = (1, 2, 4, 8, 12, 16, 20, 24, 32)  # t2w_hift_rows of track_s_fast_r13
+# B24 repair (track_s_fast_r16): every upsampling part in TF32 except stage 0's transposed convolution, from which the
+# 1.06e-2 chunk comes (tools/spike/hift_tf32_stages.py, results/engine_profile/r16_hift_parts*.json)
+WITHOUT_UPS0 = [1, 2, "0:src", "0:res"]
 
 
-def _serve(served, feats, plans, tf32: bool, hift_rows=None, batch_setup=False):
+def _serve(served, feats, plans, tf32, hift_rows=None, batch_setup=False):
     from engine.runtime.token2wav_batch import BatchedToken2Wav
 
     bt = BatchedToken2Wav(served, use_graphs=True, fast_dit=True, fast_slots=65536, hift_decode_tf32=tf32, hift_rows=hift_rows,
@@ -52,14 +55,15 @@ def _serve(served, feats, plans, tf32: bool, hift_rows=None, batch_setup=False):
     return got
 
 
-@pytest.mark.parametrize("hift_rows,batch_setup", [
-    (None, False), (EXTENDED_ROWS, False),
+@pytest.mark.parametrize("tf32,hift_rows,batch_setup", [
+    (True, None, False), (True, EXTENDED_ROWS, False),
     # B24: with the batched setup encoder (the r11c candidate's combination) one of 190 chunks reaches 1.062e-2
-    # (results/engine_profile/r14_hift_matched.json); recorded as a strict expected failure until repaired
-    pytest.param(None, True, marks=pytest.mark.xfail(strict=True, reason="B24: TF32 HiFT + batched setup exceeds the AC-3.4 chunk bound")),
-], ids=["rows_to_16", "rows_to_32", "rows_to_16_batched_setup"])
+    # (results/engine_profile/r14_hift_matched.json); a strict expected failure for every part in TF32
+    pytest.param(True, None, True, marks=pytest.mark.xfail(strict=True, reason="B24: TF32 HiFT + batched setup exceeds the AC-3.4 chunk bound")),
+    (WITHOUT_UPS0, None, True), (WITHOUT_UPS0, None, False),
+], ids=["rows_to_16", "rows_to_32", "rows_to_16_batched_setup", "without_ups0_batched_setup", "without_ups0"])
 @torch.inference_mode()
-def test_tf32_hift_decoder_within_the_hift_bound(hift_rows, batch_setup):
+def test_tf32_hift_decoder_within_the_hift_bound(tf32, hift_rows, batch_setup):
     from bench.workload import canonical_requests, load_seed_tts_rows, make_id_sets
     from engine.models.token2wav import Token2Wav
     from engine.token2wav_chunker import StreamChunker
@@ -77,7 +81,7 @@ def test_tf32_hift_decoder_within_the_hift_bound(hift_rows, batch_setup):
         plans.append(ws + [(lambda w: (w.tokens, w.last))(ch.finish())])
     ref = _serve(served, feats, plans, tf32=False, batch_setup=batch_setup)
     again = _serve(served, feats, plans, tf32=False, batch_setup=batch_setup)
-    new = _serve(served, feats, plans, tf32=True, hift_rows=hift_rows, batch_setup=batch_setup)
+    new = _serve(served, feats, plans, tf32=tf32, hift_rows=hift_rows, batch_setup=batch_setup)
     chunk_errs, utt_errs, control = [], [], []
     rel = lambda a, b: float(np.linalg.norm(a - b) / np.linalg.norm(b))  # noqa: E731
     for j in range(N_UTT):
@@ -89,7 +93,7 @@ def test_tf32_hift_decoder_within_the_hift_bound(hift_rows, batch_setup):
                 control.append(rel(z, y))
         utt_errs.append((rel(np.concatenate(new[j]), np.concatenate(ref[j])), j))
     worst_c, worst_u = max(chunk_errs), max(utt_errs)
-    print(f"HiFT TF32 decoder (graph rows {hift_rows or 'default'}) vs strict FP32: {len(chunk_errs)} chunks, max rel L2 {worst_c[0]:.2e} (utt {worst_c[1]}, chunk {worst_c[2]}), "
+    print(f"HiFT TF32 decoder {tf32} (graph rows {hift_rows or 'default'}) vs strict FP32: {len(chunk_errs)} chunks, max rel L2 {worst_c[0]:.2e} (utt {worst_c[1]}, chunk {worst_c[2]}), "
           f"median {float(np.median([e[0] for e in chunk_errs])):.2e}; utterances max {worst_u[0]:.2e} (utt {worst_u[1]}); "
           f"strict-FP32 run to run max {max(control):.2e}")
     assert max(control) <= 1e-4  # two strict-FP32 runs agree far inside the bound: the difference measured is the precision
