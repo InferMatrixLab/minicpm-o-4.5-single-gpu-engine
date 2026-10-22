@@ -134,7 +134,7 @@ class TrackSBackend:
                  feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
                  t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False,
                  t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False,
-                 tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None):
+                 tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None, thinker_max_len: int = 32768):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -165,6 +165,9 @@ class TrackSBackend:
         if (prefill_token_budget is not None and int(prefill_token_budget) < 1) or prefill_max_age_ms < 0 or \
                 (prefill_slack_floor_ms is not None and prefill_slack_floor_ms < 0) or (talker_start_budget is not None and int(talker_start_budget) < 1):
             raise ValueError("prefill_token_budget and talker_start_budget must be >= 1 (or null), prefill_max_age_ms and prefill_slack_floor_ms >= 0")
+        pool = thinker_pages * (thinker_page_size or page_size)
+        if not 0 < thinker_max_len <= pool:
+            raise ValueError(f"thinker_max_len={thinker_max_len} must be in 1..{pool} (the Thinker KV pool)")
         self.prefill_policy = PrefillPolicy(token_budget=prefill_token_budget, max_age_s=prefill_max_age_ms / 1000,
                                             slack_floor_s=None if prefill_slack_floor_ms is None else prefill_slack_floor_ms / 1000,
                                             talker_start_budget=talker_start_budget)
@@ -196,7 +199,9 @@ class TrackSBackend:
         self.arun = DecoderRunner(self.talker.w, self.aspec, self.akv)
         # Track S sampling: the canonical warpers, no minimum length, no global maximum (HF streaming path)
         self.cfg = TalkerSampling(min_new_tokens=0, max_new_tokens=1 << 30)
-        self.tdec = ThinkerDecoder(self.thinker, self.tkv, self.tspec, use_graphs=use_graphs, layers=tlayers)
+        # the served context (prompt plus reply) of one Thinker sequence: Daily-Omni's interleaved frames and audio reach ~13k
+        # tokens, so 32768 as the multimodal reference served (SGLang-Omni at 32k); a longer prompt is an HTTP 400
+        self.tdec = ThinkerDecoder(self.thinker, self.tkv, self.tspec, use_graphs=use_graphs, layers=tlayers, max_len=thinker_max_len)
         self.adec = TalkerDecoder(self.talker, self.akv, self.aspec, self.cfg, use_graphs=use_graphs, whole_k=talker_whole_k)
         self.tprefill = None
         if prefill_graphs and use_graphs:
