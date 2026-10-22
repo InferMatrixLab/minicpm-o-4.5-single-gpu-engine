@@ -144,7 +144,8 @@ class EngineBackend:
             return ids, None
         from engine.media import parts_to_native
 
-        msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else parts_to_native(m["content"])} for m in req.messages]
+        rs = getattr(self, "audio_resampler", "librosa")
+        msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else parts_to_native(m["content"], rs)} for m in req.messages]
         pk = getattr(req, "processor_kwargs", None) or {}
         with self._lock:
             inputs = self.frontend.build_prompt(msgs, use_tts_template=kw["use_tts_template"], enable_thinking=kw["enable_thinking"],

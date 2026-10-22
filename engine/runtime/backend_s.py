@@ -135,7 +135,7 @@ class TrackSBackend:
                  t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False,
                  t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False,
                  tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None, thinker_max_len: int = 32768,
-                 t2w_merge_solve: bool = False):
+                 t2w_merge_solve: bool = False, audio_resampler: str = "librosa"):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -166,6 +166,11 @@ class TrackSBackend:
         if (prefill_token_budget is not None and int(prefill_token_budget) < 1) or prefill_max_age_ms < 0 or \
                 (prefill_slack_floor_ms is not None and prefill_slack_floor_ms < 0) or (talker_start_budget is not None and int(talker_start_budget) < 1):
             raise ValueError("prefill_token_budget and talker_start_budget must be >= 1 (or null), prefill_max_age_ms and prefill_slack_floor_ms >= 0")
+        from engine.media import RESAMPLERS
+
+        if audio_resampler not in RESAMPLERS:
+            raise ValueError(f"audio_resampler must be one of {RESAMPLERS}, not {audio_resampler!r}")
+        self.audio_resampler = audio_resampler  # 16 kHz resampling of understanding inputs (engine.media)
         pool = thinker_pages * (thinker_page_size or page_size)
         if not 0 < thinker_max_len <= pool:
             raise ValueError(f"thinker_max_len={thinker_max_len} must be in 1..{pool} (the Thinker KV pool)")
