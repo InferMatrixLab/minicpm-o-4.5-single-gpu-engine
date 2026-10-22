@@ -379,6 +379,52 @@ def test_fast_dit_matches_eager(graphs, first_chunk):
     assert max(errs) <= 5e-3, errs  # AC-3.4 FP16 bound
 
 
+@pytest.mark.parametrize("graphs", [False, True])
+def test_merged_solve_matches_per_group_solves(graphs):
+    """``merge_solve``: a decode whose windows fall into several groups (ramped first windows, steady windows, merged
+    finals) runs one packed fast-DiT solve instead of one per group; its mels equal the per-group solves' within the
+    AC-3.4 FP16 bound, and every cache slot is returned."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", float16=True, noise_seed=7)
+    feats = [ours.features(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav")] * 2
+    gen = np.random.default_rng(9)
+    plans = []
+    for n in (120, 95, 70, 140, 60, 101):
+        ch = StreamChunker(first_chunk=8)
+        plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
+    starts = [0, 1, 2, 2, 4, 7]
+    mels, calls = [], []
+    for merge in (False, True):
+        bt = BatchedToken2Wav(ours, use_graphs=graphs, fast_dit=True, fast_slots=32768, merge_solve=merge)
+        rec, vocode, solve = [], bt._vocode, bt.fast.solve
+        bt._vocode = lambda items, ms, *rest, vocode=vocode, rec=rec: (rec.extend((id(it[0]), m.float().cpu()) for it, m in zip(items, ms))
+                                                                     or vocode(items, ms, *rest))
+        n_solve = [0]
+        bt.fast.solve = lambda *a, solve=solve, n_solve=n_solve: (n_solve.__setitem__(0, n_solve[0] + 1), solve(*a))[1]
+        prompts = bt.setup_many(feats)
+        sts = [bt.new_stream(p, noise_seed=j, adopt=True) for j, p in enumerate(prompts)]
+        order = {id(st): j for j, st in enumerate(sts)}
+        n_solve[0] = 0
+        for tick in range(max(s + len(p) for s, p in zip(starts, plans))):
+            bt.decode([(sts[j], *plans[j][tick - s]) for j, s in enumerate(starts) if s <= tick < s + len(plans[j])])
+        got = {j: [] for j in range(len(sts))}
+        for sid, m in rec:
+            got[order[sid]].append(m)
+        mels.append(got)
+        calls.append(n_solve[0])
+        for st in sts:
+            bt.release_stream(st)
+        assert bt.fast.pool.in_use() == bt.fast.scratch
+    assert calls[1] < calls[0], calls  # some decodes had several groups
+    errs = [float((x - y).norm() / y.norm()) for j in mels[0] for x, y in zip(mels[1][j], mels[0][j])]
+    assert len(errs) == sum(len(p) for p in plans)
+    print(f"merged solve: {calls[0]} -> {calls[1]} solve calls, max mel rel L2 {max(errs):.2e}, bitwise {max(errs) == 0.0}")
+    assert max(errs) <= 5e-3, errs  # AC-3.4 FP16 bound
+
+
 def test_split_prompt_features_equal_reference():
     """The feature path of the worker, split into a CPU front end (feature processes, no CUDA) and the GPU S3 tokens in
     the worker (``prompt_front_end`` + ``finish_prompt``), returns exactly the reference ``Token2wav._prepare_prompt``

@@ -138,13 +138,15 @@ class PendingAudio:
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
                  fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False,
-                 batch_setup_encoder: bool = False, hift_rows: tuple | None = None):
+                 batch_setup_encoder: bool = False, hift_rows: tuple | None = None, merge_solve: bool = False):
         """``fast_dit``: the estimator solve of ``engine.runtime.dit_fast`` (slot-pool caches, packed ragged rows, CUDA
         graphs with ``use_graphs``) in place of the reference-module solve; FP16 flow only.  Streams must then be made with
         ``new_stream`` and released with ``release_stream``.  ``hift_decode_tf32``: HiFT's upsampling stages
         in TF32 (``token2wav.decoder_tf32``; the f0 predictor, the source and the input/output convolutions stay strict FP32).
         ``batch_setup_encoder``: the prompt setups of one ``setup_many`` call share one padded flow-encoder batch.
-        ``hift_rows``: the HiFT graph row buckets (default ``hift_graph.ROWS``; larger calls run in slices of the largest)."""
+        ``hift_rows``: the HiFT graph row buckets (default ``hift_graph.ROWS``; larger calls run in slices of the largest).
+        ``merge_solve`` (fast DiT): a decode with several window groups runs each group's flow encoder and then one packed
+        solve over all of them (``_flow_merged``) instead of one solve per group."""
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         self.batch_setup_encoder = batch_setup_encoder
         self.hift_rows = tuple(hift_rows) if hift_rows else None
@@ -156,6 +158,7 @@ class BatchedToken2Wav:
             self.fast = FastDiT(t2w.flow.decoder, t2w.n_timesteps, n_slots=fast_slots, max_streams=max_streams, use_graphs=use_graphs)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
         self.merge_finals = True
+        self.merge_solve = merge_solve
         self.max_flow_streams = 32  # the staged per-step solve keeps a 32-stream call's transient memory small
         self.profile: dict | None = None  # stage -> [calls, seconds, items] when set
         self.trace = None  # diagnostic stage trace (engine.runtime.stage_trace): inner spans, no synchronization
@@ -196,6 +199,14 @@ class BatchedToken2Wav:
         mels: list[torch.Tensor | None] = [None] * len(items)
         with strict_fp32():
             with torch.amp.autocast("cuda", dtype=self.dtype):
+                if self.merge_solve and self.fast is not None and len(groups) > 1:
+                    chunks = [(last, idx_all[a:a + self.max_flow_streams]) for (_, last), idx_all in groups.items()
+                              for a in range(0, len(idx_all), self.max_flow_streams)]
+                    parts = [([items[i][0] for i in idx], [items[i][1] for i in idx], last, [bool(items[i][2]) for i in idx]) for last, idx in chunks]
+                    for (_, idx), ms in zip(chunks, self._prof("flow", len(items), self._flow_merged, parts)):
+                        for i, m in zip(idx, ms):
+                            mels[i] = m
+                    return self._prof("vocode", len(items), self._vocode, items, mels, async_result)
                 for (_, last), idx_all in groups.items():
                     # at most max_flow_streams per flow call: the padded caches of a call are staged for all Euler steps
                     for a in range(0, len(idx_all), self.max_flow_streams):
@@ -271,6 +282,31 @@ class BatchedToken2Wav:
     def _flow(self, sts: list[StreamState], windows: list[list[int]], last: bool, lasts: list[bool] | None = None) -> list[torch.Tensor]:
         """One group: windows of equal token count and final flag, or steady windows with merged final windows
         (``lasts[i]`` true: zero-padded to the group's token count; their real frames are 2 x their tokens)."""
+        enc = self._flow_encode(sts, windows, last, lasts)
+        if self.fast is not None:
+            mels = self._prof("solve", len(sts), self.fast.solve, [st.flow_cache["fast"] for st in sts], enc["mu"], enc["spk"], None, enc["keep"])
+        else:
+            mels = self._prof("solve", len(sts), self._solve, sts, enc["h"].transpose(1, 2).contiguous(), enc["spk"], None, not last, enc["t_real"])
+        return self._flow_finish(sts, mels, enc["t_real"])
+
+    def _flow_merged(self, parts: list[tuple[list[StreamState], list[list[int]], bool, list[bool]]]) -> list[list[torch.Tensor]]:
+        """Fast DiT only: every group's flow encoder (one call per group, as ``_flow``), then the groups' windows in one
+        packed ragged solve of at most ``max_flow_streams`` requests per call instead of one solve per group."""
+        encs = [self._flow_encode(*part) for part in parts]
+        flat = [(st, mu, enc["spk"][i:i + 1], k) for (sts, *_), enc in zip(parts, encs) for i, (st, mu, k) in enumerate(zip(sts, enc["mu"], enc["keep"]))]
+        mels = []
+        for a in range(0, len(flat), self.max_flow_streams):
+            sl = flat[a:a + self.max_flow_streams]
+            mels += self._prof("solve", len(sl), self.fast.solve, [x[0].flow_cache["fast"] for x in sl], [x[1] for x in sl],
+                               torch.cat([x[2] for x in sl]), None, [x[3] for x in sl])
+        out, o = [], 0
+        for (sts, *_), enc in zip(parts, encs):
+            out.append(self._flow_finish(sts, mels[o:o + len(sts)], enc["t_real"]))
+            o += len(sts)
+        return out
+
+    def _flow_encode(self, sts: list[StreamState], windows: list[list[int]], last: bool, lasts: list[bool] | None = None) -> dict:
+        """A group's flow encoder: the solve inputs (``mu`` per request for the fast DiT, ``h`` for the reference solve)."""
         from engine.token2wav_chunker import CHUNK, PRE_LOOKAHEAD
 
         flow = self.flow
@@ -284,13 +320,15 @@ class BatchedToken2Wav:
         spk = flow.spk_embed_affine_layer(F.normalize(torch.cat([st.prompt.spk for st in sts]), dim=1))
         h = flow.encoder_proj(self._prof("encoder", n, self._encoder, sts, flow.input_embedding(tok), last, valid, vl))
         t_real = [2 * len(w) if fin else h.shape[1] for w, fin in zip(windows, lasts)] if merged else None
+        assert all(len(w) - (0 if fin else PRE_LOOKAHEAD) <= h.shape[1] // 2 for w, fin in zip(windows, lasts))
+        enc = {"h": h, "spk": spk, "t_real": t_real, "keep": [not fin for fin in lasts]}
         if self.fast is not None:
             mu = h.transpose(1, 2)
             Ts = t_real if t_real is not None else [h.shape[1]] * n
-            mels = self._prof("solve", n, self.fast.solve, [st.flow_cache["fast"] for st in sts], [mu[i, :, :Ts[i]] for i in range(n)], spk, None,
-                              [not fin for fin in lasts])
-        else:
-            mel = self._prof("solve", n, self._solve, sts, h.transpose(1, 2).contiguous(), spk, None, not last, t_real)
+            enc["mu"] = [mu[i, :, :Ts[i]] for i in range(n)]
+        return enc
+
+    def _flow_finish(self, sts: list[StreamState], mels, t_real: list[int] | None) -> list[torch.Tensor]:
         out = []
         for i, st in enumerate(sts):
             keep = st.prompt.mels.shape[1]
@@ -301,8 +339,7 @@ class BatchedToken2Wav:
             if self.fast is not None:
                 out.append(mels[i][None])
             else:
-                out.append(mel[i:i + 1, :, :t_real[i]] if t_real is not None else mel[i:i + 1])
-        assert all(len(w) - (0 if fin else PRE_LOOKAHEAD) <= h.shape[1] // 2 for w, fin in zip(windows, lasts))
+                out.append(mels[i:i + 1, :, :t_real[i]] if t_real is not None else mels[i:i + 1])
         return out
 
     def _encoder(self, sts: list[StreamState], xs: torch.Tensor, last: bool, valid: torch.Tensor | None = None, vl: list[int] | None = None) -> torch.Tensor:

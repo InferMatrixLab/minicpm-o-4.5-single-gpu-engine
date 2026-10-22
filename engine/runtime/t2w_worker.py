@@ -537,7 +537,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
     bt = BatchedToken2Wav(t2w, use_graphs=cfg.get("t2w_graphs", False), compile_estimator=cfg.get("t2w_compile", False),
                           euler_graphs=cfg.get("t2w_euler_graphs", False), fast_dit=cfg.get("t2w_fast_dit", False),
                           fast_slots=cfg.get("t2w_fast_slots", 49152), hift_decode_tf32=cfg.get("t2w_hift_decode_tf32", False),
-                          batch_setup_encoder=cfg.get("t2w_batch_setup_encoder", False), hift_rows=cfg.get("t2w_hift_rows"))
+                          batch_setup_encoder=cfg.get("t2w_batch_setup_encoder", False), hift_rows=cfg.get("t2w_hift_rows"),
+                          merge_solve=cfg.get("t2w_merge_solve", False))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             p0 = bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav"))

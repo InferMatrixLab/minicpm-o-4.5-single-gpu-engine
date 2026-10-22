@@ -134,7 +134,8 @@ class TrackSBackend:
                  feature_allocator: str = "jemalloc", stage_trace_dir: str | None = None, t2w_hift_decode_tf32: bool = False,
                  t2w_batch_setup_encoder: bool = False, talker_prefill_graphs: bool = False, t2w_async_results: bool = False,
                  t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False,
-                 tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None, thinker_max_len: int = 32768):
+                 tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None, thinker_max_len: int = 32768,
+                 t2w_merge_solve: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -237,10 +238,11 @@ class TrackSBackend:
                                           "feature_allocator": feature_allocator, "stage_trace_dir": stage_trace_dir,
                                           "t2w_hift_decode_tf32": t2w_hift_decode_tf32,
                                           "t2w_batch_setup_encoder": t2w_batch_setup_encoder, "t2w_async_results": t2w_async_results,
-                                          "t2w_hift_rows": t2w_hift_rows}, self._on_t2w)
+                                          "t2w_hift_rows": t2w_hift_rows, "t2w_merge_solve": t2w_merge_solve}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             assert not t2w_async_results, "asynchronous results are a Token2Wav-process option (t2w_process)"
+            assert not t2w_merge_solve, "the merged solve is a fast-DiT option (t2w_process)"
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
             self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile, euler_graphs=t2w_euler_graphs,
                                               hift_decode_tf32=t2w_hift_decode_tf32, batch_setup_encoder=t2w_batch_setup_encoder,
