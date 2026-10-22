@@ -49,7 +49,7 @@ def test_whole_k_graph_matches_frame_graphs(page_size, k):
     """Whole-K capture (``whole_k``: every frame of a block in one graph, each frame planned through its own wrapper
     before the replay) against the per-frame graph and the eager path: identical codes, sampler state and KV for blocks
     that cross pages, rows that reach EOS inside a block at different frames (max_new_tokens forces it), a padded
-    bucket, and a row cancelled between blocks."""
+    bucket, and a row cancelled between blocks.  ``strided_qkv`` (no q/k/v copies) is identical too, eager and whole-K."""
     from engine.models.talker import Talker
     from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
     from engine.runtime.talker_decode import TalkerDecoder
@@ -60,7 +60,7 @@ def test_whole_k_graph_matches_frame_graphs(page_size, k):
     spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, False)
     cfg = TalkerSampling(min_new_tokens=0, max_new_tokens=27)  # rows starting at different steps hit EOS mid-block
     results = []
-    for mode in ("eager", "frames", "whole_k"):
+    for mode in ("eager", "frames", "whole_k", "whole_k_strided", "eager_strided"):
         kv = PagedKV(spec, 2048, page_size)
         pre = DecoderRunner(ta.w, spec, kv)
         gen = torch.Generator(device="cuda").manual_seed(0)
@@ -69,8 +69,9 @@ def test_whole_k_graph_matches_frame_graphs(page_size, k):
         hid = pre.forward(torch.cat(conds), kv.layout([0, 1, 2], [x.shape[0] for x in conds]))
         logits = torch.nn.functional.linear(hid[torch.tensor([11, 41, 48], device="cuda")], ta.head).float()
         first = logits.argmax(-1)
-        dec = TalkerDecoder(ta, kv, spec, cfg, use_graphs=mode != "eager", buckets=(4,), whole_k=mode == "whole_k")
-        if mode != "eager":
+        dec = TalkerDecoder(ta, kv, spec, cfg, use_graphs=not mode.startswith("eager"), buckets=(4,), whole_k=mode.startswith("whole_k"),
+                            strided_qkv=mode.endswith("strided"))
+        if not mode.startswith("eager"):
             dec.capture_all(ks=(k,))
         st = {"codes": first, "seeds": torch.tensor([1, 2, 3], device="cuda"), "steps": torch.tensor([1, 5, 9], device="cuda"),
               "history": torch.full((3, 16), PAD, dtype=torch.int64, device="cuda"), "live": torch.ones(3, dtype=torch.bool, device="cuda")}

@@ -1,6 +1,6 @@
 """Talker frame graph: replay time per bucket and its kernel breakdown (GPU, diagnostic).
 
-    CUDA_VISIBLE_DEVICES=G .venv-engine/bin/python tools/spike/talker_frame_profile.py [buckets...]
+    CUDA_VISIBLE_DEVICES=G .venv-engine/bin/python tools/spike/talker_frame_profile.py [--strided-qkv] [buckets...]
 """
 
 import sys
@@ -21,14 +21,15 @@ def main():
     from engine.runtime.talker_decode import TalkerDecoder
     from engine.talker_sampler import PAD
 
-    buckets = tuple(int(b) for b in sys.argv[1:]) or (1, 8, 32)
+    strided = "--strided-qkv" in sys.argv[1:]
+    buckets = tuple(int(b) for b in sys.argv[1:] if b != "--strided-qkv") or (1, 8, 32)
     ta = Talker.load(MODEL, device="cuda")
     c = ta.cfg
     print({k: getattr(c, k) for k in ("num_layers", "hidden_size", "num_heads", "num_kv_heads", "head_dim")}, "head", tuple(ta.head.shape))
     spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, False)
     kv = PagedKV(spec, 4096)
     for b in buckets:
-        dec = TalkerDecoder(ta, kv, spec, buckets=(b,))
+        dec = TalkerDecoder(ta, kv, spec, buckets=(b,), strided_qkv=strided)
         seqs = list(range(b))
         for s in seqs:
             kv.reserve(s, 100)
@@ -44,7 +45,7 @@ def main():
         for _ in range(n):
             bk.graph.replay()
         torch.cuda.synchronize()
-        print(f"bucket {b}: frame replay {1e3 * (time.perf_counter() - t) / n:.3f} ms", flush=True)
+        print(f"bucket {b}{' strided_qkv' if strided else ''}: frame replay {1e3 * (time.perf_counter() - t) / n:.3f} ms", flush=True)
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
             for _ in range(5):
                 bk.graph.replay()

@@ -84,10 +84,11 @@ class _Bucket:
 
 class TalkerDecoder:
     def __init__(self, talker, kv: PagedKV, spec: DecoderSpec, cfg: TalkerSampling = TalkerSampling(), buckets=(1, 2, 4, 8, 16, 32, 64),
-                 max_len: int = 4096, use_graphs: bool = True, whole_k: bool = False):
+                 max_len: int = 4096, use_graphs: bool = True, whole_k: bool = False, strided_qkv: bool = False):
         """``whole_k``: one CUDA graph per (bucket, K) holds all K frames of a block (each frame attends through its own
         wrapper, planned before the replay) and writes a fixed [K, rows] output; otherwise one frame graph replayed K
-        times."""
+        times.  ``strided_qkv``: RoPE, the KV append and the attention read q, k and v as strided views of the fused
+        projection (FlashInfer takes their row and head strides) instead of three contiguous copies per layer."""
         self.talker, self.kv, self.spec, self.cfg = talker, kv, spec, cfg
         self.layers = fuse_weights(talker.w, spec)
         self.final_norm = talker.w[f"{spec.prefix}norm.weight"]
@@ -95,7 +96,7 @@ class TalkerDecoder:
         self.emb = talker.w["emb_code.0.weight"]
         self.eos = talker.cfg.eos
         self.device = kv.k.device
-        self.max_len, self.use_graphs, self.whole_k = max_len, use_graphs, whole_k
+        self.max_len, self.use_graphs, self.whole_k, self.strided_qkv = max_len, use_graphs, whole_k, strided_qkv
         self.workspace = torch.empty(128 << 20, dtype=torch.uint8, device=self.device)
         self.buckets = {b: _Bucket(self, b) for b in buckets}
         self._pad_next = PAD_SEQ_BASE
@@ -114,9 +115,11 @@ class TalkerDecoder:
         for i, L in enumerate(self.layers):
             h = fi.rmsnorm(x, L["ln1"], s.rms_eps)
             qkv = F.linear(h, L["qkv"])
-            q = qkv[:, :nq].reshape(-1, s.num_heads, s.head_dim).contiguous()
-            k = qkv[:, nq:nq + nk].reshape(-1, s.num_kv_heads, s.head_dim).contiguous()
-            v = qkv[:, nq + nk:].reshape(-1, s.num_kv_heads, s.head_dim).contiguous()
+            q = qkv[:, :nq].unflatten(1, (s.num_heads, s.head_dim))
+            k = qkv[:, nq:nq + nk].unflatten(1, (s.num_kv_heads, s.head_dim))
+            v = qkv[:, nq + nk:].unflatten(1, (s.num_kv_heads, s.head_dim))
+            if not self.strided_qkv:
+                q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
             fi.apply_rope_pos_ids_inplace(q, k, bk.positions, rope_theta=s.rope_theta)
             fi.append_paged_kv_cache(k, v, bk.batch_idx, bk.positions, (self.kv.k[i], self.kv.v[i]), indices, indptr, last)
             a = wrapper.run(q, (self.kv.k[i], self.kv.v[i]))
