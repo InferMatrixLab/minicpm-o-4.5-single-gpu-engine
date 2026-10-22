@@ -42,8 +42,9 @@ def not_significantly_worse(eng: list, hf: list, stat, higher_is_better=True, re
     return upper >= 0.0, float(stat(eng) - stat(hf)), upper
 
 
+@pytest.mark.parametrize("hf_kernels", [False, True], ids=["torch_ops", "prefill_hf_kernels"])
 @torch.inference_mode()
-def test_thinker_within_hf_noise():
+def test_thinker_within_hf_noise(hf_kernels):
     from engine.models.thinker import Thinker
     from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
     from engine.runtime.thinker_decode import ThinkerDecoder
@@ -52,7 +53,7 @@ def test_thinker_within_hf_noise():
     c = th.cfg
     spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
     kv = PagedKV(spec, 4096)
-    run = DecoderRunner(th.w, spec, kv)
+    run = DecoderRunner(th.w, spec, kv, hf_kernels=hf_kernels)  # prefill: torch ops, or the fused kernels (prefill_hf_kernels)
     dec = ThinkerDecoder(th, kv, spec, buckets=(1,))  # the served decode path: graphs, fused reference-rounding kernels
     ref, hf = torch.load(REF), torch.load(SDPA)
     assert len(ref) == len(hf) == 64
@@ -94,7 +95,7 @@ def test_thinker_within_hf_noise():
               "hf_sdpa": {"cos_min": float(torch.cat([x["cos"] for x in hf]).min()), "cos_p01": p01(hf), "cos_mean": mean(hf),
                           "top1_untied": agree(top1(hf)), "greedy_identical": greedy(hf)},
               "checks": {k: {"not_worse": v[0], "difference": v[1], "upper95": v[2]} for k, v in checks.items()}, "divergences": divergences}
-    (ROOT / "results" / "engine_parity" / "thinker_parity_report.json").write_text(json.dumps(report, indent=1))
+    (ROOT / "results" / "engine_parity" / ("thinker_parity_report_prefill_hf_kernels.json" if hf_kernels else "thinker_parity_report.json")).write_text(json.dumps(report, indent=1))
     assert all(v[0] for v in checks.values()), report["checks"]
     assert report["engine"]["greedy_identical"] >= 0.9
     # "divergences only at small margins": no engine divergence at a larger HF top-1/top-2 margin than HF's own SDPA
@@ -103,5 +104,5 @@ def test_thinker_within_hf_noise():
     hf_margins = [x["diverge_margin"] for x in hf if x.get("diverge_margin") is not None]
     assert hf_margins, "the noise-floor file predates divergence records; rerun tools/hfref/ac3_noise_floor.py"
     report["hf_sdpa_divergence_margins"] = hf_margins
-    (ROOT / "results" / "engine_parity" / "thinker_parity_report.json").write_text(json.dumps(report, indent=1))
+    (ROOT / "results" / "engine_parity" / ("thinker_parity_report_prefill_hf_kernels.json" if hf_kernels else "thinker_parity_report.json")).write_text(json.dumps(report, indent=1))
     assert all(m <= max(hf_margins) for _, _, m in divergences), (divergences, hf_margins)

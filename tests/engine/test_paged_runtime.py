@@ -57,3 +57,64 @@ def test_ragged_batch_matches_reference(which):
         want = torch.cat(want)
         got = torch.cat([out[sum(lens[:j]):sum(lens[:j + 1])]] + [d[j:j + 1] for d in dec])
         assert _cos(got, want).min() >= 0.999, (j, _cos(got, want).min())
+
+
+@pytest.mark.parametrize("which", ["thinker", "talker"])
+@torch.inference_mode()
+def test_prefill_hf_kernels_match_torch_ops(which):
+    """``prefill_hf_kernels``: the prefill layer stack with the fused reference-rounding kernels against the torch ops
+    on the same ragged batches (fresh prompts, then continued chunks).  The kernels round as the ops do and differ only
+    in a norm's fp32 sum order, so most outputs are equal bit for bit; the rest stay below the batching control (the
+    same rows one at a time through the torch ops: GEMM tiling) and the Thinker's greedy next tokens agree."""
+    from engine.models.talker import Talker
+    from engine.models.thinker import Thinker
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+
+    if which == "thinker":
+        ref = Thinker.load(MODEL, device="cuda", dtype=torch.bfloat16)
+        c = ref.cfg
+        spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
+        emb, head = ref.embed, ref.w["lm_head.weight"]
+        vocab = 150000
+    else:
+        ref = Talker.load(MODEL, device="cuda", dtype=torch.bfloat16)
+        c = ref.cfg
+        spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, False)
+        emb, head = (lambda ids: ref.code_embed(ids % 6561)), None
+        vocab = 6561
+    kvs = [PagedKV(spec, num_pages=192, page_size=64) for _ in range(3)]  # torch ops, fused kernels, torch ops one row at a time
+    runs = [DecoderRunner(ref.w, spec, kvs[0]), DecoderRunner(ref.w, spec, kvs[1], hf_kernels=True), DecoderRunner(ref.w, spec, kvs[2])]
+    assert runs[1].hf_kernels and not runs[0].hf_kernels
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    calls = [([0, 1, 2], [37, 300, 5]), ([3], [700]), ([0, 2], [64, 129]), ([1, 3, 4, 5], [1, 1, 90, 17])]
+    rel = lambda a, b: float((a.float() - b.float()).norm() / b.float().norm())  # noqa: E731
+    worst = control = 0.0
+    equal = total = 0
+    agree = [0, 0, 0]
+    for seqs, ns in calls:
+        x = emb(torch.randint(0, vocab, (sum(ns),), device="cuda", generator=gen))
+        ht = runs[0].forward(x, kvs[0].layout(seqs, ns))
+        hk = runs[1].forward(x, kvs[1].layout(seqs, ns))
+        parts, a = [], 0
+        for s, n in zip(seqs, ns):
+            parts.append(runs[2].forward(x[a:a + n], kvs[2].layout([s], [n])))
+            a += n
+        ho = torch.cat(parts)
+        worst, control = max(worst, rel(hk, ht)), max(control, rel(ho, ht))
+        equal += int((hk == ht).sum())
+        total += hk.numel()
+        if head is not None:  # greedy tokens at every position: the kernels' agreement with the ops beside the control's
+            top = [torch.nn.functional.linear(h, head).argmax(-1) for h in (ht, hk, ho)]
+            agree[0] += int((top[1] == top[0]).sum())
+            agree[1] += int((top[2] == top[0]).sum())
+            agree[2] += top[0].numel()
+    kv_worst = kv_control = 0.0
+    for seq in range(6):
+        n = kvs[0].lengths[seq]
+        for i in range(len(kvs[0].k)):
+            k0, k1, k2 = (kv.k[i][kv.pages[seq][:-(-n // kv.page_size)]].flatten(0, 1)[:n] for kv in kvs)
+            kv_worst, kv_control = max(kv_worst, rel(k1, k0)), max(kv_control, rel(k2, k0))
+    print(f"{which} prefill hf kernels vs torch ops: hidden {worst:.2e} ({equal / total:.1%} of elements equal), K {kv_worst:.2e}"
+          + (f", greedy {agree[0]}/{agree[2]}" if agree[2] else "") + f"; control (one row at a time): hidden {control:.2e}, K {kv_control:.2e}"
+          + (f", greedy {agree[1]}/{agree[2]}" if agree[2] else ""))
+    assert worst <= 2 * control and kv_worst <= 2 * kv_control

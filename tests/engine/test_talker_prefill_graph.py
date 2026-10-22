@@ -46,14 +46,15 @@ def _kv_of(kv, seq):
     return k, v
 
 
+@pytest.mark.parametrize("hf_kernels", [False, True], ids=["torch_ops", "prefill_hf_kernels"])
 @torch.inference_mode()
-def test_chunk_prefill_graphs_match_eager():
+def test_chunk_prefill_graphs_match_eager(hf_kernels):
     from engine.runtime.paged import DecoderRunner, PagedKV
     from engine.runtime.prefill_graph import ChunkPrefillGraphs
 
     talker, spec = _talker()
     kvs = [PagedKV(spec, 64, 128, device="cuda") for _ in range(3)]  # eager together, graphs, eager one row at a time
-    runs = [DecoderRunner(talker.w, spec, kv) for kv in kvs]
+    runs = [DecoderRunner(talker.w, spec, kv, hf_kernels=hf_kernels) for kv in kvs]
     graphs = ChunkPrefillGraphs(runs[1])
     gen = torch.Generator(device="cuda").manual_seed(0)
     emb = lambda n: talker.code_embed(torch.randint(0, 6561, (n,), device="cuda", generator=gen))  # noqa: E731

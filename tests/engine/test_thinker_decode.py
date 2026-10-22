@@ -113,8 +113,9 @@ def test_fp8_thinker_ac37():
     assert report["cos_min"] >= 0.99, report
 
 
+@pytest.mark.parametrize("hf_kernels", [False, True], ids=["torch_ops", "prefill_hf_kernels"])
 @torch.inference_mode()
-def test_prefill_graph_matches_eager_two_sequence_batch():
+def test_prefill_graph_matches_eager_two_sequence_batch(hf_kernels):
     """A graph-captured single-request prefill equals the eager forward of the same padded two-sequence batch, and the
     graph decode that follows it is identical (KV written exactly)."""
     from engine.models.thinker import Thinker
@@ -129,7 +130,7 @@ def test_prefill_graph_matches_eager_two_sequence_batch():
         ids = torch.randint(0, 150000, (n,), device="cuda", generator=gen)
         x = th.embed(ids)
         kv = PagedKV(spec, 2048)
-        run = DecoderRunner(th.w, spec, kv)
+        run = DecoderRunner(th.w, spec, kv, hf_kernels=hf_kernels)
         pg = PrefillGraphs(run, buckets=(32, 64, 128, 256))
         a = pg.forward(x, 1)
         b_seq = 2
@@ -202,13 +203,15 @@ def test_more_rows_than_buckets_and_pad_release():
     assert kv.used_pages == 0
 
 
+@pytest.mark.parametrize("hf_kernels", [False, True], ids=["torch_ops", "prefill_hf_kernels"])
 @torch.inference_mode()
-def test_thinker_chunk_prefill_graphs_match_eager():
+def test_thinker_chunk_prefill_graphs_match_eager(hf_kernels):
     """``thinker_chunk_prefill_graphs``: multi-row Thinker prompt prefills (fresh prompts and continued chunks of 9-700
     tokens, 1-4 rows) through ``ChunkPrefillGraphs``.  As for the single-request prefill graphs, a replay equals the
     eager forward of the same padded batch (the rows plus the scratch sequence) bit for bit, hidden states and appended
     K/V; against the unpadded eager call only GEMM tiling over the padded rows differs, and the greedy next tokens must
-    agree.  The padding effect is printed beside the batching control (the same rows one at a time)."""
+    agree wherever the eager top-1/top-2 margin exceeds 0.25 (random-token logits are flat; bf16 resolves 0.125-0.25
+    near the top, AC-3.1's divergence rule).  The padding effect is printed beside the batching control (the same rows one at a time)."""
     from engine.models.thinker import Thinker
     from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
     from engine.runtime.prefill_graph import PAD_SEQ, ChunkPrefillGraphs
@@ -217,7 +220,7 @@ def test_thinker_chunk_prefill_graphs_match_eager():
     c = th.cfg
     spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
     kvs = [PagedKV(spec, 160, 64, device="cuda") for _ in range(4)]  # graphs, eager padded, eager together, eager one at a time
-    runs = [DecoderRunner(th.w, spec, kv) for kv in kvs]
+    runs = [DecoderRunner(th.w, spec, kv, hf_kernels=hf_kernels) for kv in kvs]
     buckets = (64, 128, 256, 512, 1024)
     graphs = ChunkPrefillGraphs(runs[0], rows=(1, 2, 3, 4), buckets=buckets, lane="thinker", pad_pages=16)
     gen = torch.Generator(device="cuda").manual_seed(0)
@@ -226,6 +229,7 @@ def test_thinker_chunk_prefill_graphs_match_eager():
     rel = lambda a, b: float((a.float() - b.float()).norm() / b.float().norm())  # noqa: E731
     pad_effect = control = 0.0
     head = th.w["lm_head.weight"]
+    flips = []  # top-1/top-2 margins where the padded and unpadded greedy tokens differ
     for seqs, ns in calls:
         x, total = emb(sum(ns)), sum(ns)
         hg, last = graphs.forward(x, seqs, ns)
@@ -244,7 +248,12 @@ def test_thinker_chunk_prefill_graphs_match_eager():
             a += n
         ho = torch.cat(parts)
         pad_effect, control = max(pad_effect, rel(hg, he)), max(control, rel(ho, he))
-        assert torch.equal(torch.nn.functional.linear(hg[last], head).argmax(-1), torch.nn.functional.linear(he[last], head).argmax(-1)), (seqs, ns)
+        lg, le = torch.nn.functional.linear(hg[last], head).float(), torch.nn.functional.linear(he[last], head).float()
+        top2 = le.topk(2, dim=-1).values
+        margin = top2[:, 0] - top2[:, 1]  # random-token logits are flat: GEMM tiling flips only near-ties (bf16 resolves 0.125-0.25 there)
+        flip = lg.argmax(-1) != le.argmax(-1)
+        flips += [round(float(m), 3) for m in margin[flip]]
+        assert not (flip & (margin > 0.25)).any(), (seqs, ns, margin[flip])
     assert graphs.counts["graph"] == len(calls)
     for seq in range(1, 8):
         n = kvs[0].lengths[seq]
@@ -254,4 +263,4 @@ def test_thinker_chunk_prefill_graphs_match_eager():
             gv, pv = (kv.v[i][kv.pages[seq][:-(-n // kv.page_size)]].flatten(0, 1)[:n] for kv in kvs[:2])
             assert torch.equal(ga, pa) and torch.equal(gv, pv), (seq, i)
     print(f"thinker chunk prefill graphs: bitwise equal to the eager padded batch; padding effect on hidden {pad_effect:.2e}, "
-          f"batching control {control:.2e}")
+          f"batching control {control:.2e}; greedy flips at margins {flips}")
