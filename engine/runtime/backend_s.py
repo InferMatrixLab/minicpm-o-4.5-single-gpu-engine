@@ -136,7 +136,8 @@ class TrackSBackend:
                  t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False,
                  tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None, thinker_max_len: int = 32768,
                  t2w_merge_solve: bool = False, audio_resampler: str = "librosa", t2w_fuse_setup_frames: int = 0,
-                 talker_lean_frame: bool = False):
+                 talker_lean_frame: bool = False, t2w_hold_slack_ms: float | None = None, t2w_hold_max_ms: float = 100.0,
+                 t2w_hold_rows: int = 16, t2w_hold_setups: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -167,6 +168,10 @@ class TrackSBackend:
         if t2w_fuse_setup_frames and (not isinstance(t2w_fuse_setup_frames, int) or t2w_fuse_setup_frames < 0 or not t2w_fast_dit
                                       or not t2w_process or t2w_policy != "edf"):
             raise ValueError("t2w_fuse_setup_frames must be an integer >= 0 and needs t2w_fast_dit, t2w_process and t2w_policy edf")
+        if (t2w_hold_slack_ms is not None and (t2w_hold_slack_ms < 0 or t2w_policy != "edf" or not t2w_process)) or t2w_hold_max_ms < 0 \
+                or int(t2w_hold_rows) < 1 or (t2w_hold_setups and not t2w_fuse_setup_frames):
+            raise ValueError("t2w_hold_slack_ms >= 0 needs t2w_policy edf and t2w_process; t2w_hold_max_ms >= 0, t2w_hold_rows >= 1; "
+                             "t2w_hold_setups needs t2w_fuse_setup_frames")
         if (prefill_token_budget is not None and int(prefill_token_budget) < 1) or prefill_max_age_ms < 0 or \
                 (prefill_slack_floor_ms is not None and prefill_slack_floor_ms < 0) or (talker_start_budget is not None and int(talker_start_budget) < 1):
             raise ValueError("prefill_token_budget and talker_start_budget must be >= 1 (or null), prefill_max_age_ms and prefill_slack_floor_ms >= 0")
@@ -249,7 +254,9 @@ class TrackSBackend:
                                           "t2w_hift_decode_tf32": t2w_hift_decode_tf32,
                                           "t2w_batch_setup_encoder": t2w_batch_setup_encoder, "t2w_async_results": t2w_async_results,
                                           "t2w_hift_rows": t2w_hift_rows, "t2w_merge_solve": t2w_merge_solve,
-                                          "t2w_fuse_setup_frames": t2w_fuse_setup_frames}, self._on_t2w)
+                                          "t2w_fuse_setup_frames": t2w_fuse_setup_frames, "t2w_hold_slack_ms": t2w_hold_slack_ms,
+                                          "t2w_hold_max_ms": t2w_hold_max_ms, "t2w_hold_rows": t2w_hold_rows,
+                                          "t2w_hold_setups": t2w_hold_setups}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             assert not t2w_async_results, "asynchronous results are a Token2Wav-process option (t2w_process)"

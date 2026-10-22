@@ -42,6 +42,10 @@ class Policy:
     max_decode_rows: int | None = None  # windows per decode call (None: every ready window)
     first_slack_s: float = 0.25  # a first window's deadline after it became ready
     first_lane_slack_s: float | None = None  # setups before the decode while every waiting continuation has this slack
+    hold_slack_s: float | None = None  # continuation-only decodes wait while every ready window keeps this much slack
+    hold_max_s: float = 0.1  # ... for at most this long after the oldest ready window arrived
+    hold_rows: int = 16  # ... and only while fewer windows are ready
+    hold_setups: bool = False  # setups that could ride the held decode wait for it too (fused setups)
 
 
 @dataclass
@@ -80,6 +84,17 @@ class AudioState:
     def slack(self, now: float) -> float | None:
         """Seconds of buffered playback left (None before the first audio; negative while stalled)."""
         return None if self.t_exhaust is None else self.t_exhaust - now
+
+
+def hold_decode(ready: list, now: float, policy: Policy) -> bool:
+    """Hold this tick's decode to batch more windows?  ``ready``: (deadline, receipt time, first audio sent) per request
+    whose head window is ready.  Never with a first window (TTFA) or a window within ``hold_slack_s`` of its deadline;
+    at most ``hold_max_s`` after the oldest window arrived and while fewer than ``hold_rows`` are ready."""
+    if policy.hold_slack_s is None or not ready or len(ready) >= policy.hold_rows:
+        return False
+    if not all(started for _, _, started in ready):
+        return False
+    return min(d for d, _, _ in ready) - now >= policy.hold_slack_s and now - min(t for _, t, _ in ready) < policy.hold_max_s
 
 
 def choose_windows(ready: list, policy: Policy) -> list:

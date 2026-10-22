@@ -485,3 +485,60 @@ def test_a_failed_fused_call_fails_its_windows_and_its_setups():
 def test_fused_setups_need_the_edf_policy():
     with pytest.raises(ValueError):
         WorkerLoop(None, None, None, None, Policy(), mode="r6", fuse_setups=True)
+
+
+def test_hold_decode_rules():
+    from engine.runtime.t2w_sched import hold_decode
+
+    p = Policy(hold_slack_s=0.5, hold_max_s=0.1, hold_rows=3)
+    ready = [(10.0, 9.95, True), (11.0, 9.97, True)]
+    assert hold_decode(ready, 10.0 - 1.0, Policy()) is False  # off by default
+    assert hold_decode([(10.0, 8.95, True)], 9.0, p)  # 1 s of slack, waited 50 ms
+    assert not hold_decode([(10.0, 8.85, True)], 9.0, p)  # the oldest waited 150 ms
+    assert not hold_decode([(9.3, 8.95, True)], 9.0, p)  # 0.3 s of slack
+    assert not hold_decode([(10.0, 8.95, True), (9.5, 8.99, False)], 9.0, p)  # a first window: TTFA
+    assert not hold_decode([(10.0, 8.95, True)] * 3, 9.0, p)  # enough rows
+
+
+def test_held_decodes_batch_continuations_and_first_windows_go_at_once():
+    """Two streams with seconds of buffered audio: their windows wait for each other (one call instead of two) and
+    for at most ``hold_max_s``; a new voice's first window is decoded in the tick it is ready."""
+    loop, bt, clock, out = _fused_loop(policy=Policy(first_lane_slack_s=0.1, hold_slack_s=0.5, hold_max_s=0.1))
+    for s in (0, 1):
+        loop.open(s, s, Fut())
+    loop.tick()
+    for s in (0, 1):
+        loop.reqs[s].audio.sent(3 * SR, clock.t)
+    loop.window(0, list(range(25)), False, 1)
+    n = len(bt.calls)
+    loop.tick()
+    assert len(bt.calls) == n and loop.held  # held: 3 s of slack
+    clock.t += 0.05
+    loop.window(1, list(range(25)), False, 1)
+    loop.tick()
+    assert len(bt.calls) == n  # still held, 50 ms
+    clock.t += 0.06
+    loop.tick()
+    assert [c[:2] for c in bt.calls[n:]] == [("decode", 2)]  # the oldest waited 110 ms: one call for both
+    loop.open(2, 2, Fut())
+    loop.tick()  # its setup (no decode to ride)
+    loop.window(2, list(range(8)), False, 0)
+    loop.window(0, list(range(25)), False, 2)
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[:2] for c in bt.calls[n:]] == [("decode", 2)]  # the first window goes now, with the waiting continuation
+
+
+def test_held_decode_keeps_fusable_setups_with_hold_setups():
+    loop, bt, clock, out = _fused_loop(policy=Policy(first_lane_slack_s=0.1, hold_slack_s=0.5, hold_setups=True))
+    loop.open(0, 0, Fut())
+    loop.tick()
+    loop.reqs[0].audio.sent(3 * SR, clock.t)
+    loop.window(0, list(range(25)), False, 1)
+    loop.open(1, 1, Fut())
+    n = len(bt.calls)
+    loop.tick()
+    assert len(bt.calls) == n and loop.reqs[1].stream is None  # the setup waits for the held decode
+    clock.t += 0.2
+    loop.tick()
+    assert [c[:3] for c in bt.calls[n:]] == [("decode+setup", 1, 1)]

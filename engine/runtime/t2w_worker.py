@@ -23,7 +23,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from engine.runtime.t2w_sched import AudioState, Policy, choose_windows, first_lane_open, plan_tick
+from engine.runtime.t2w_sched import AudioState, Policy, choose_windows, first_lane_open, hold_decode, plan_tick
 
 
 _FEAT = None  # per feature process: an object with what ``Token2wav._prepare_prompt`` reads
@@ -318,7 +318,10 @@ class WorkerLoop:
     ``fuse_setups`` (edf): pending setups ride the tick's decode call (``bt.decode(setups=...)``: their rows in the
     decode's solve, oldest first, up to the call's room and ``bt.fuse_setup_frames``) instead of a solve of their own; a
     setup whose request already has a window waiting (its first audio waits on the setup) still runs before the decode
-    while the first lane is open.  Setups left over, or in a tick without a decode, run as before."""
+    while the first lane is open.  Setups left over, or in a tick without a decode, run as before.
+
+    ``Policy.hold_slack_s`` (edf): a decode of continuation windows only waits for more windows while each keeps that much
+    playback slack (``t2w_sched.hold_decode``), so calls are larger; with ``hold_setups`` the fusable setups wait for it."""
 
     def __init__(self, bt, emit, resolve, calls_for, policy: Policy, mode: str = "edf", min_batch: int = 8, max_wait: float = 0.04,
                  clock=time.perf_counter, log=None, note=None, async_results: bool = False, max_inflight: int = 2, fuse_setups: bool = False):
@@ -327,6 +330,7 @@ class WorkerLoop:
         if fuse_setups and mode != "edf":
             raise ValueError("fused setups (t2w_fuse_setup_frames) need t2w_policy edf")
         self.fuse_setups = fuse_setups
+        self.held = False  # the last decode was held (Policy.hold_slack_s)
         if mode not in MODES:
             raise ValueError(f"t2w_policy must be one of {MODES}, not {mode!r}")
         self.bt, self.emit, self.resolve, self.calls_for, self.policy, self.mode = bt, emit, resolve, calls_for, policy, mode
@@ -398,6 +402,8 @@ class WorkerLoop:
         worked = self._decode(fuse=order) or worked
         order = [(b, [r for r in part if r.stream is None and r.feat is not None and self.reqs.get(r.seq) is r]) for b, part in order]
         order = [c for c in order if c[1]]
+        if self.held and self.policy.hold_setups:  # the held decode will carry them (a blocking one took the lane above)
+            return worked
         while order and first_lane_open(self._waiting_deadline(), self.clock(), self.policy):
             worked = self._setups([order.pop(0)]) or worked
         if order:
@@ -473,10 +479,14 @@ class WorkerLoop:
     def _decode(self, gate: bool = False, fuse: list | None = None) -> bool:
         """One decode call over the ready head windows (earliest playback deadline first); False if nothing ran.
         ``fuse``: pending setup calls, some of which may ride the call (``_fused_part``)."""
+        self.held = False
         ready = [r for r in self.reqs.values() if r.stream is not None and r.windows]
         if not ready:
             return False
         now = self.clock()
+        if self.mode == "edf" and hold_decode([(self._deadline(r), r.windows[0][3], r.audio.started) for r in ready], now, self.policy):
+            self.held = True
+            return False
         if gate:
             heads = [r.windows[0] for r in ready]
             if not (any(h[2] == 0 for h in heads) or any(h[1] for h in heads) or len(ready) >= min(self.min_batch, len(self.reqs))
@@ -678,7 +688,10 @@ def _worker_main(inq, outq, cfg: dict) -> None:
 
     lane = cfg.get("t2w_first_lane_slack_ms")
     policy = Policy(setup_calls_when_busy=cfg.get("t2w_setup_calls_when_busy", 1), max_decode_rows=cfg.get("t2w_max_decode_rows"),
-                    first_slack_s=cfg.get("t2w_first_slack_ms", 250.0) / 1000, first_lane_slack_s=None if lane is None else lane / 1000)
+                    first_slack_s=cfg.get("t2w_first_slack_ms", 250.0) / 1000, first_lane_slack_s=None if lane is None else lane / 1000,
+                    hold_slack_s=None if cfg.get("t2w_hold_slack_ms") is None else cfg["t2w_hold_slack_ms"] / 1000,
+                    hold_max_s=cfg.get("t2w_hold_max_ms", 100.0) / 1000, hold_rows=cfg.get("t2w_hold_rows", 16),
+                    hold_setups=cfg.get("t2w_hold_setups", False))
 
     def resolve(fut):
         """A done feature future -> the prompt features on this process's stream (raises for unusable audio)."""
