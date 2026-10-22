@@ -31,6 +31,35 @@ def ln_mod(x: torch.Tensor, shift: torch.Tensor, scale1: torch.Tensor, eps: floa
 
 
 @triton.jit
+def _add_ln_mod_kernel(h_ptr, g_ptr, y_ptr, sh_ptr, sc_ptr, hout_ptr, out_ptr, C, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    m = cols < C
+    h = tl.load(h_ptr + row * C + cols, mask=m, other=0.0).to(tl.float32)
+    g = tl.load(g_ptr + cols, mask=m, other=0.0).to(tl.float32)
+    y = tl.load(y_ptr + row * C + cols, mask=m, other=0.0).to(tl.float32)
+    hn = tl.fma(g, y, h).to(hout_ptr.dtype.element_ty)  # torch.addcmul(h, g, y): one fp32 fma, rounded to the activation dtype
+    tl.store(hout_ptr + row * C + cols, hn, mask=m)
+    x = hn.to(tl.float32)  # then _ln_mod_kernel on the rounded sum
+    mean = tl.sum(x, axis=0) / C
+    d = tl.where(m, x - mean, 0.0)
+    var = tl.sum(d * d, axis=0) / C
+    xn = d * tl.math.rsqrt(var + eps)
+    sc = tl.load(sc_ptr + cols, mask=m, other=0.0).to(tl.float32)
+    sh = tl.load(sh_ptr + cols, mask=m, other=0.0).to(tl.float32)
+    tl.store(out_ptr + row * C + cols, (xn * sc + sh).to(out_ptr.dtype.element_ty), mask=m)
+
+
+def add_ln_mod(h: torch.Tensor, g: torch.Tensor, y: torch.Tensor, shift: torch.Tensor, scale1: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """``h = torch.addcmul(h, g, y)`` (gated residual, ``g`` [C]) and ``ln_mod(h, shift, scale1, eps)`` in one kernel;
+    returns the new residual and the modulated norm.  h, y [N, C] contiguous."""
+    assert h.is_contiguous() and y.is_contiguous() and h.shape == y.shape
+    hout, out = torch.empty_like(h), torch.empty_like(h)
+    _add_ln_mod_kernel[(h.shape[0],)](h, g, y, shift, scale1, hout, out, h.shape[1], eps, BLOCK=triton.next_power_of_2(h.shape[1]))
+    return hout, out
+
+
+@triton.jit
 def _qk_norm_scatter_kernel(qkv_ptr, qw_ptr, qb_ptr, kw_ptr, kb_ptr, q_ptr, kc_ptr, vc_ptr, slot_ptr, H, eps, NH: tl.constexpr,
                             D: tl.constexpr):
     row = tl.program_id(0)

@@ -137,7 +137,8 @@ class TrackSBackend:
                  tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None, thinker_max_len: int = 32768,
                  t2w_merge_solve: bool = False, audio_resampler: str = "librosa", t2w_fuse_setup_frames: int = 0,
                  talker_lean_frame: bool = False, t2w_hold_slack_ms: float | None = None, t2w_hold_max_ms: float = 100.0,
-                 t2w_hold_rows: int = 16, t2w_hold_setups: bool = False):
+                 t2w_hold_rows: int = 16, t2w_hold_setups: bool = False, t2w_hift_lean: bool = False,
+                 t2w_dit_fused_residual: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -256,7 +257,8 @@ class TrackSBackend:
                                           "t2w_hift_rows": t2w_hift_rows, "t2w_merge_solve": t2w_merge_solve,
                                           "t2w_fuse_setup_frames": t2w_fuse_setup_frames, "t2w_hold_slack_ms": t2w_hold_slack_ms,
                                           "t2w_hold_max_ms": t2w_hold_max_ms, "t2w_hold_rows": t2w_hold_rows,
-                                          "t2w_hold_setups": t2w_hold_setups}, self._on_t2w)
+                                          "t2w_hold_setups": t2w_hold_setups, "t2w_hift_lean": t2w_hift_lean,
+                                          "t2w_dit_fused_residual": t2w_dit_fused_residual}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             assert not t2w_async_results, "asynchronous results are a Token2Wav-process option (t2w_process)"
@@ -264,7 +266,7 @@ class TrackSBackend:
             self.t2w = Token2Wav(model_dir / "assets" / "token2wav", float16=float16_flow, spk_threads=spk_threads)
             self.t2w_batch = BatchedToken2Wav(self.t2w, use_graphs=t2w_graphs, compile_estimator=t2w_compile, euler_graphs=t2w_euler_graphs,
                                               hift_decode_tf32=t2w_hift_decode_tf32, batch_setup_encoder=t2w_batch_setup_encoder,
-                                              hift_rows=t2w_hift_rows)
+                                              hift_rows=t2w_hift_rows, hift_lean=t2w_hift_lean)
             if t2w_graphs:  # a prepared default voice supplies the cache dtypes
                 self.t2w_batch.capture_graphs(self.t2w_batch.setup(self.t2w.features(model_dir / "assets" / "HT_ref_audio.wav")))
         self.frontend = MultimodalFrontend(model_dir, device=device)

@@ -138,7 +138,8 @@ class PendingAudio:
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
                  fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False,
-                 batch_setup_encoder: bool = False, hift_rows: tuple | None = None, merge_solve: bool = False, fuse_setup_frames: int = 0):
+                 batch_setup_encoder: bool = False, hift_rows: tuple | None = None, merge_solve: bool = False, fuse_setup_frames: int = 0,
+                 hift_lean: bool = False, dit_fused_residual: bool = False):
         """``fast_dit``: the estimator solve of ``engine.runtime.dit_fast`` (slot-pool caches, packed ragged rows, CUDA
         graphs with ``use_graphs``) in place of the reference-module solve; FP16 flow only.  Streams must then be made with
         ``new_stream`` and released with ``release_stream``.  ``hift_decode_tf32``: HiFT's upsampling stages
@@ -148,8 +149,15 @@ class BatchedToken2Wav:
         ``merge_solve`` (fast DiT): a decode with several window groups runs each group's flow encoder and then one packed
         solve over all of them (``_flow_merged``) instead of one solve per group.
         ``fuse_setup_frames`` (fast DiT): ``decode(setups=...)`` may carry prompt setups of up to this many mel frames in
-        all into the decode's solve (the DiT graphs take ``2 * fuse_setup_frames`` more tokens per row bucket)."""
+        all into the decode's solve (the DiT graphs take ``2 * fuse_setup_frames`` more tokens per row bucket).
+        ``hift_lean``: HiFT's Snake activations fused and its weight norms folded (``engine.runtime.hift_lean``, the same
+        vocoder within cuDNN's run-to-run spread), before its graphs are made.  ``dit_fused_residual`` (fast DiT): its gated residual adds
+        fused with the norms after them (``FastDiT(fused_residual=True)``)."""
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
+        if hift_lean:
+            from engine.runtime.hift_lean import make_lean
+
+            make_lean(self.hift)
         self.batch_setup_encoder = batch_setup_encoder
         self.hift_rows = tuple(hift_rows) if hift_rows else None
         self.fast = None
@@ -158,7 +166,7 @@ class BatchedToken2Wav:
 
             assert t2w.float16, "the fast DiT runs the FP16 flow"
             self.fast = FastDiT(t2w.flow.decoder, t2w.n_timesteps, n_slots=fast_slots, max_streams=max_streams, use_graphs=use_graphs,
-                                setup_tokens=2 * fuse_setup_frames)
+                                setup_tokens=2 * fuse_setup_frames, fused_residual=dit_fused_residual)
         assert not fuse_setup_frames or fast_dit, "fused setups are a fast-DiT option"
         self.fuse_setup_frames = int(fuse_setup_frames)
         self.dtype = torch.float16 if t2w.float16 else torch.float32
