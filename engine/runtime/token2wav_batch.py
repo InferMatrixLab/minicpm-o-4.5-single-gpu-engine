@@ -225,16 +225,23 @@ class BatchedToken2Wav:
                     for (_, idx), ms in zip(chunks, self._prof("flow", len(items), self._flow_merged, parts, rows)):
                         for i, m in zip(idx, ms):
                             mels[i] = m
-                    out = self._prof("vocode", len(items), self._vocode, items, mels, async_result)
-                    return (out, [self.t2w.prompt(f, st.flow_cache) for f, st in zip(setups, rows[0])]) if setups else out
-                for (_, last), idx_all in groups.items():
-                    # at most max_flow_streams per flow call: the padded caches of a call are staged for all Euler steps
-                    for a in range(0, len(idx_all), self.max_flow_streams):
-                        idx = idx_all[a:a + self.max_flow_streams]
-                        for i, m in zip(idx, self._prof("flow", len(idx), self._flow, [items[i][0] for i in idx], [items[i][1] for i in idx], last,
-                                                        [bool(items[i][2]) for i in idx])):
-                            mels[i] = m
-            return self._prof("vocode", len(items), self._vocode, items, mels, async_result)
+                    prompts = [self.t2w.prompt(f, st.flow_cache) for f, st in zip(setups, rows[0])] if setups else None
+                else:
+                    prompts = None
+                    self._flow_groups(items, groups, mels)
+            # HiFT outside the flow's autocast, as the per-group path runs it: its eager calls stay FP32 / TF32
+            out = self._prof("vocode", len(items), self._vocode, items, mels, async_result)
+        return (out, prompts) if setups else out
+
+    def _flow_groups(self, items, groups, mels) -> None:
+        """One flow call per group (at most ``max_flow_streams`` requests each), mels written into ``mels``."""
+        for (_, last), idx_all in groups.items():
+            # at most max_flow_streams per flow call: the padded caches of a call are staged for all Euler steps
+            for a in range(0, len(idx_all), self.max_flow_streams):
+                idx = idx_all[a:a + self.max_flow_streams]
+                for i, m in zip(idx, self._prof("flow", len(idx), self._flow, [items[i][0] for i in idx], [items[i][1] for i in idx], last,
+                                                [bool(items[i][2]) for i in idx])):
+                    mels[i] = m
 
     def new_stream(self, prompt, noise_seed: int = 0, adopt: bool = False):
         """``Token2Wav.new_stream``; with the fast DiT the stream gets its own copy of the prompt's estimator caches, or

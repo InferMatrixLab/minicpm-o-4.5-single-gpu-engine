@@ -383,7 +383,8 @@ def test_fast_dit_matches_eager(graphs, first_chunk):
 def test_merged_solve_matches_per_group_solves(graphs):
     """``merge_solve``: a decode whose windows fall into several groups (ramped first windows, steady windows, merged
     finals) runs one packed fast-DiT solve instead of one per group; its mels equal the per-group solves' within the
-    AC-3.4 FP16 bound, and every cache slot is returned."""
+    AC-3.4 FP16 bound, and every cache slot is returned.  The waveforms agree too: HiFT runs outside the flow's FP16
+    autocast on both paths (the merged path once vocoded inside it, so HiFT's eager calls ran in FP16)."""
     from engine.models.token2wav import Token2Wav
     from engine.runtime.token2wav_batch import BatchedToken2Wav
     from engine.token2wav_chunker import StreamChunker
@@ -396,7 +397,7 @@ def test_merged_solve_matches_per_group_solves(graphs):
         ch = StreamChunker(first_chunk=8)
         plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
     starts = [0, 1, 2, 2, 4, 7]
-    mels, calls = [], []
+    mels, calls, wavs = [], [], []
     for merge in (False, True):
         bt = BatchedToken2Wav(ours, use_graphs=graphs, fast_dit=True, fast_slots=32768, merge_solve=merge)
         rec, vocode, solve = [], bt._vocode, bt.fast.solve
@@ -408,8 +409,12 @@ def test_merged_solve_matches_per_group_solves(graphs):
         sts = [bt.new_stream(p, noise_seed=j, adopt=True) for j, p in enumerate(prompts)]
         order = {id(st): j for j, st in enumerate(sts)}
         n_solve[0] = 0
+        wav = {j: [] for j in range(len(sts))}
         for tick in range(max(s + len(p) for s, p in zip(starts, plans))):
-            bt.decode([(sts[j], *plans[j][tick - s]) for j, s in enumerate(starts) if s <= tick < s + len(plans[j])])
+            js = [j for j, s in enumerate(starts) if s <= tick < s + len(plans[j])]
+            for j, w in zip(js, bt.decode([(sts[j], *plans[j][tick - starts[j]]) for j in js])):
+                wav[j].append(w)
+        wavs.append({j: np.concatenate(w) for j, w in wav.items()})
         got = {j: [] for j in range(len(sts))}
         for sid, m in rec:
             got[order[sid]].append(m)
@@ -421,8 +426,10 @@ def test_merged_solve_matches_per_group_solves(graphs):
     assert calls[1] < calls[0], calls  # some decodes had several groups
     errs = [float((x - y).norm() / y.norm()) for j in mels[0] for x, y in zip(mels[1][j], mels[0][j])]
     assert len(errs) == sum(len(p) for p in plans)
-    print(f"merged solve: {calls[0]} -> {calls[1]} solve calls, max mel rel L2 {max(errs):.2e}, bitwise {max(errs) == 0.0}")
+    werr = max(float(np.linalg.norm(wavs[1][j] - wavs[0][j]) / np.linalg.norm(wavs[0][j])) for j in wavs[0])
+    print(f"merged solve: {calls[0]} -> {calls[1]} solve calls, max mel rel L2 {max(errs):.2e}, bitwise {max(errs) == 0.0}, wav {werr:.2e}")
     assert max(errs) <= 5e-3, errs  # AC-3.4 FP16 bound
+    assert werr <= 1e-4, werr  # equal mels: only HiFT's run-to-run spread
 
 
 @pytest.mark.parametrize("graphs", [False, True])
