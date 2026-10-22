@@ -18,7 +18,9 @@ setups share one code path.
 
 Token layout of a call: ``[cond rows | empty rows | pad row | uncond rows | empty rows | pad row]``; each half holds
 ``Nb / 2`` tokens (the pad row takes the rest), so the CFG halves sit at fixed offsets and a call can replay a CUDA
-graph captured for its ``(rows, tokens)`` bucket.  The attention plan is made on the host before each replay.
+graph captured for its ``(rows, tokens)`` bucket.  The attention plan is made on the host before each replay.  A call
+takes the smallest row bucket with a token bucket for its tokens; ``setup_tokens`` raises every row bucket's token
+top by that many, so prompt setups can ride a decode's solve (``BatchedToken2Wav.decode(setups=...)``).
 """
 
 from __future__ import annotations
@@ -38,17 +40,17 @@ SETUP_TOKENS = 4096  # small row buckets also cover prompt setups (whole prompts
 SETUP_ROWS = 8
 
 
-def bucket_top(rb: int) -> int:
-    """Most tokens (both halves) a row bucket's graphs take."""
-    return max(rb * MAX_GRAPH_T, SETUP_TOKENS if rb <= SETUP_ROWS else 0)
+def bucket_top(rb: int, extra: int = 0) -> int:
+    """Most tokens (both halves) a row bucket's graphs take (``extra``: fused prompt-setup tokens, ``FastDiT.setup_tokens``)."""
+    return max(rb * MAX_GRAPH_T + extra, SETUP_TOKENS if rb <= SETUP_ROWS else 0)
 
 
 TOP = max(bucket_top(rb) for rb in ROW_BUCKETS)
 
 
-def token_buckets(rb: int) -> list[int]:
-    """Token buckets (both halves) of a row bucket: multiples of 256 (128 below 512) up to ``bucket_top(rb)``."""
-    top = bucket_top(rb)
+def token_buckets(rb: int, extra: int = 0) -> list[int]:
+    """Token buckets (both halves) of a row bucket: multiples of 256 (128 below 512) up to ``bucket_top(rb, extra)``."""
+    top = bucket_top(rb, extra)
     out = [b for b in list(range(128, 512, 128)) + list(range(512, top, 256)) if b < top]
     return out + [top]
 
@@ -95,7 +97,10 @@ class FastCache:
 
 
 class FastDiT:
-    def __init__(self, cfm, steps: int, n_slots: int = 32768, max_streams: int = 96, device="cuda", use_graphs: bool = False):
+    def __init__(self, cfm, steps: int, n_slots: int = 32768, max_streams: int = 96, device="cuda", use_graphs: bool = False,
+                 setup_tokens: int = 0):
+        """``setup_tokens``: tokens (both halves) every row bucket's graphs take beyond its windows, for prompt setups
+        in a decode's solve (0: setups ride only the small row buckets' ``SETUP_TOKENS``)."""
         est = cfm.estimator
         self.cfm, self.est, self.steps = cfm, est, steps
         self.depth = len(est.blocks)
@@ -106,7 +111,9 @@ class FastDiT:
         self.dtype = next(est.parameters()).dtype
         assert self.dtype == torch.float16, "the fast DiT runs the FP16 flow"
         self.device, self.use_graphs = device, use_graphs
-        self.scratch = TOP  # slots reserved for pad-row tokens (never attended by real rows)
+        self.setup_tokens = int(setup_tokens)
+        self.top = max(bucket_top(rb, self.setup_tokens) for rb in ROW_BUCKETS)
+        self.scratch = self.top  # slots reserved for pad-row tokens (never attended by real rows)
         self.pool = SlotPool(n_slots + self.scratch, steps, self.depth, self.heads, self.hd, self.dtype, device)
         self.pad_slots = self.pool.alloc(self.scratch)
         n_rs = 2 * max_streams + ROW_BUCKETS[-1] + 2
@@ -197,11 +204,15 @@ class FastDiT:
 
     # --- planning -----------------------------------------------------------------------------------------------------
     def _bucket(self, n_rows: int, n_tok: int, max_t: int):
-        if not self.use_graphs or n_rows > ROW_BUCKETS[-1]:
+        """The smallest row bucket holding ``n_rows`` with a token bucket for ``n_tok``, and that token bucket."""
+        if not self.use_graphs:
             return None
-        rb = next(b for b in ROW_BUCKETS if b >= n_rows)
-        nb = next((b for b in token_buckets(rb) if b >= n_tok), None)
-        return None if nb is None else (rb, nb)
+        for rb in ROW_BUCKETS:
+            if rb >= n_rows:
+                nb = next((b for b in token_buckets(rb, self.setup_tokens) if b >= n_tok), None)
+                if nb is not None:
+                    return rb, nb
+        return None
 
     def _plan(self, caches: list[FastCache], Ts: list[int], keep: list[bool]):
         """Host plan of one call: new slots, the token layout (padded to a bucket when graphs apply), attention lists,
@@ -298,7 +309,7 @@ class FastDiT:
                 paged_kv_last_page_len_buf=torch.ones(R, dtype=torch.int32, device=self.device))
             # graph mode fixes its limits at the first plan: make it the largest (tokens and cached keys) this bucket
             # will see; later plans must fit within it
-            nb, cap = bucket_top(rb), self._kv_capacity()
+            nb, cap = bucket_top(rb, self.setup_tokens), self._kv_capacity()
             qo = torch.tensor([0] * (rb // 2 + 1) + [nb // 2] * (rb // 2 + 1) + [nb], dtype=torch.int32, device=self.device)
             kv = torch.tensor([0] * (rb // 2 + 1) + [cap // 2] * (rb // 2 + 1) + [cap], dtype=torch.int32, device=self.device)
             idx = torch.tensor(self.pad_slots, dtype=torch.int32, device=self.device).repeat(cap // len(self.pad_slots) + 1)[:cap]
@@ -307,11 +318,11 @@ class FastDiT:
         return self._gw[rb]
 
     def _kv_capacity(self) -> int:
-        return 2 * ROW_BUCKETS[-1] * 1400 + TOP
+        return 2 * ROW_BUCKETS[-1] * 1400 + self.top
 
     def _static_bufs(self, rb: int, nb: int) -> dict:
         R, half = rb + 2, nb // 2
-        top = TOP
+        top = self.top
         if "x0" not in self._gbuf:
             g = self._gbuf
             g["x0"] = torch.zeros(top // 2, self.mel, dtype=self.dtype, device=self.device)
@@ -363,7 +374,7 @@ class FastDiT:
 
     def capture_all(self, row_buckets=ROW_BUCKETS) -> int:
         for rb in row_buckets:
-            for nb in token_buckets(rb):
+            for nb in token_buckets(rb, self.setup_tokens):
                 self.capture(rb, nb)
         return len(self.graphs)
 
@@ -373,7 +384,8 @@ class FastDiT:
               keep: list[bool]) -> list[torch.Tensor]:
         """The CFG Euler solve of one window per request (``CausalConditionalCFM.forward_chunk``, cosine schedule).
 
-        ``mu[i]`` [mel, T_i] (fp16), ``spks`` [n, mel] (after the affine layer), ``cond[i]`` [mel, T_i] or None (zeros).
+        ``mu[i]`` [mel, T_i] (fp16), ``spks`` [n, mel] (after the affine layer), ``cond[i]`` [mel, T_i] or None (zeros;
+        ``cond`` None: zeros for every request).
         Requests with ``keep[i]`` keep the window's keys and conv caches (then trimmed as the reference does); the
         others (final flushes) leave their caches untouched.  Returns each request's mel [mel, T_i] in fp32.
         """
@@ -388,7 +400,8 @@ class FastDiT:
                        + [torch.zeros(pad_t, mel, device=self.device, dtype=self.cfm.rand_noise.dtype)]).to(self.dtype)
         mu_t = torch.cat([m.t() for m in mu]).to(self.dtype)
         spk_t = torch.cat([spks[i:i + 1].expand(t, -1) for i, t in enumerate(Ts)]).to(self.dtype)
-        cond_t = torch.cat([c.t() for c in cond]).to(self.dtype) if cond is not None else torch.zeros_like(mu_t)
+        cond_t = torch.cat([c.t() if c is not None else mu_t.new_zeros(t, mel) for c, t in zip(cond, Ts)]).to(self.dtype) \
+            if cond is not None else torch.zeros_like(mu_t)
         static = torch.zeros(nb, 3 * mel, dtype=self.dtype, device=self.device)
         static[:sum(Ts)] = torch.cat([mu_t, spk_t, cond_t], dim=1)
         if p["bucket"] is not None and p["kv_idx"].numel() > self._kv_capacity():

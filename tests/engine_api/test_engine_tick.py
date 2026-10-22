@@ -283,7 +283,10 @@ def test_talker_starts_are_bounded_and_ordered_by_playback_deadline(monkeypatch)
 
 def test_backend_constructor_validates_the_new_knobs():
     for bad in ({"talker_start_budget": 0}, {"t2w_first_lane_slack_ms": -1.0}, {"t2w_policy": "r7"},
-                {"thinker_max_len": 0}, {"thinker_max_len": 1024 * 64 + 1, "thinker_pages": 1024, "thinker_page_size": 64}):
+                {"thinker_max_len": 0}, {"thinker_max_len": 1024 * 64 + 1, "thinker_pages": 1024, "thinker_page_size": 64},
+                {"t2w_fuse_setup_frames": 2048},  # needs the fast DiT in the Token2Wav process
+                {"t2w_fuse_setup_frames": -1, "t2w_fast_dit": True, "t2w_process": True},
+                {"t2w_fuse_setup_frames": 2048, "t2w_fast_dit": True, "t2w_process": True, "t2w_policy": "r6"}):
         with pytest.raises(ValueError):
             B.TrackSBackend(**bad)
 

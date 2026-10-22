@@ -387,3 +387,101 @@ def test_r6_control_makes_the_round6_decisions():
     assert [c[:2] for c in bt.calls] == [c[:2] for c in bt2.calls]
     assert [round(c[2], 6) for c in bt.calls] == [round(c[2], 6) for c in bt2.calls]
     assert norm == ref.out and len(ref.out) > 60
+
+
+class FusedBT(FakeBT):
+    """FakeBT with ``decode(setups=...)``: the call carries the setups (one decode cost) and returns their prompts."""
+
+    max_flow_streams = 4
+    fuse_setup_frames = 250
+
+    def __init__(self, clock, fail=False, **kw):
+        super().__init__(clock, **kw)
+        self.fail = fail
+
+    def decode(self, items, setups=None):
+        if self.fail:
+            raise RuntimeError("boom")
+        wavs = super().decode(items)
+        if setups is None:
+            return wavs
+        self.calls[-1] = ("decode+setup", len(items), len(setups), self.clock.t)
+        return wavs, [object() for _ in setups]
+
+
+def _fused_loop(policy=None, frames=100, **bt_kw):
+    clock = Clock()
+    bt = FusedBT(clock, slots=256, **bt_kw)
+    out = []
+    loop = WorkerLoop(bt, out.append, lambda f: Feat(f.result().frames), lambda ready: [(512, [r]) for r in ready], policy or Policy(first_lane_slack_s=0.1),
+                      clock=clock, fuse_setups=True)
+    return loop, bt, clock, out
+
+
+def test_fused_setups_ride_the_decode_call_within_its_room_and_frame_budget():
+    """Three new voices (100 frames each) beside a continuing stream: the decode call carries two of them (frame budget
+    250), the third runs after it as its own setup (the room is 4 requests, the budget is what binds)."""
+    loop, bt, clock, out = _fused_loop()
+    _speaking(loop, clock)
+    for s in range(1, 4):
+        loop.open(s, s, Fut())
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[:2] for c in bt.calls[n:]] == [("decode+setup", 1), ("setup", 1)] and bt.calls[n][2] == 2
+    assert all(loop.reqs[s].stream is not None and loop.reqs[s].feat is None for s in (1, 2, 3))
+    assert len(_audio(out, 0)) == 1  # the continuation's window was decoded in the fused call
+    loop.window(1, list(range(8)), False, 0)
+    loop.tick()
+    assert len(_audio(out, 1)) == 1  # the fused setup's stream decodes as any other
+
+
+def test_fused_setup_room_is_the_call_s_request_limit():
+    loop, bt, clock, out = _fused_loop()
+    bt.fuse_setup_frames = 10_000
+    for s in range(3):
+        loop.open(s, s, Fut())
+    loop.tick()  # their setups, no decode
+    for s in range(3):
+        loop.reqs[s].audio.sent(2 * SR, clock.t)
+        loop.window(s, list(range(25)), False, 1)
+    for s in range(3, 6):
+        loop.open(s, s, Fut())
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[:3] for c in bt.calls[n:]][0] == ("decode+setup", 3, 1)  # 3 windows + 1 setup = max_flow_streams
+
+
+def test_a_setup_whose_first_window_waits_runs_before_the_decode():
+    """A voice whose first window already arrived would wait a call for its audio if it rode the decode: it takes the
+    first lane (its own setup, then the decode that carries its window); the others ride the decode."""
+    loop, bt, clock, out = _fused_loop()
+    _speaking(loop, clock)
+    loop.open(1, 1, Fut())
+    loop.open(2, 2, Fut())
+    loop.window(2, list(range(8)), False, 0)
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[:3] for c in bt.calls[n:]] == [("setup", 1, bt.calls[n][2]), ("decode+setup", 2, 1)]
+    assert len(_audio(out, 2)) == 1 and loop.reqs[1].stream is not None
+
+
+def test_fused_setups_without_a_decode_run_on_their_own():
+    loop, bt, clock, out = _fused_loop()
+    loop.open(1, 1, Fut())
+    loop.tick()
+    assert [c[0] for c in bt.calls] == ["setup"] and loop.reqs[1].stream is not None
+
+
+def test_a_failed_fused_call_fails_its_windows_and_its_setups():
+    loop, bt, clock, out = _fused_loop()
+    _speaking(loop, clock)
+    loop.open(1, 1, Fut())
+    bt.fail = True
+    loop.tick()
+    errs = sorted((m[1], m[2]) for m in out if m[0] == "error")
+    assert errs == [(0, "token2wav: RuntimeError: boom"), (1, "prompt setup: RuntimeError: boom")] and not loop.reqs
+
+
+def test_fused_setups_need_the_edf_policy():
+    with pytest.raises(ValueError):
+        WorkerLoop(None, None, None, None, Policy(), mode="r6", fuse_setups=True)
