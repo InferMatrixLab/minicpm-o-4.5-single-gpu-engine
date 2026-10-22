@@ -112,10 +112,11 @@ def processed_logits(logits: torch.Tensor, history: torch.Tensor, steps: torch.T
     return torch.where(forced & ~col, torch.full_like(x, float("-inf")), torch.where(forced & col, torch.zeros_like(x), x))
 
 
-def draw(x: torch.Tensor, seeds: torch.Tensor, steps: torch.Tensor) -> torch.Tensor:
+def draw(x: torch.Tensor, seeds: torch.Tensor, steps: torch.Tensor, u: torch.Tensor | None = None) -> torch.Tensor:
+    """``u``: ``uniform(seeds, steps)`` when already computed (``engine.runtime.kernels.counter_uniform``)."""
     probs = torch.softmax(x, dim=-1)
     cdf = probs.cumsum(dim=-1)
-    u = uniform(seeds, steps).to(cdf.dtype)[:, None] * cdf[:, -1:]
+    u = (uniform(seeds, steps) if u is None else u).to(cdf.dtype)[:, None] * cdf[:, -1:]
     return torch.searchsorted(cdf, u, right=True).squeeze(-1).clamp_(max=x.size(-1) - 1)
 
 

@@ -136,7 +136,7 @@ class TrackSBackend:
                  t2w_hift_rows: list | None = None, talker_whole_k: bool = False, tick_overlap: bool = False,
                  tick_overlap_first_chunks: bool = True, tick_overlap_max_live: int | None = None, thinker_max_len: int = 32768,
                  t2w_merge_solve: bool = False, audio_resampler: str = "librosa", t2w_fuse_setup_frames: int = 0,
-                 talker_strided_qkv: bool = False):
+                 talker_lean_frame: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -213,7 +213,7 @@ class TrackSBackend:
         # tokens, so 32768 as the multimodal reference served (SGLang-Omni at 32k); a longer prompt is an HTTP 400
         self.tdec = ThinkerDecoder(self.thinker, self.tkv, self.tspec, use_graphs=use_graphs, layers=tlayers, max_len=thinker_max_len)
         self.adec = TalkerDecoder(self.talker, self.akv, self.aspec, self.cfg, use_graphs=use_graphs, whole_k=talker_whole_k,
-                                  strided_qkv=talker_strided_qkv)
+                                  lean_frame=talker_lean_frame)
         self.tprefill = None
         if prefill_graphs and use_graphs:
             from engine.runtime.prefill_graph import PrefillGraphs

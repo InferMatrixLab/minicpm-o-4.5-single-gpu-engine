@@ -148,3 +148,33 @@ def silu_mul_hf(gu: torch.Tensor) -> torch.Tensor:
     block = 1024
     _silu_mul_hf_kernel[(n, triton.cdiv(two // 2, block))](gu, y, two // 2, gu.stride(0), y.stride(0), BLOCK=block)
     return y
+
+
+@triton.jit
+def _mix32(x):
+    x = x & 0xFFFFFFFF
+    x = x ^ (x >> 16)
+    x = (x * 0x7FEB352D) & 0xFFFFFFFF
+    x = x ^ (x >> 15)
+    x = (x * 0x846CA68B) & 0xFFFFFFFF  # int64 lanes wrap modulo 2**64 as torch's do; the low 32 bits are exact
+    return x ^ (x >> 16)
+
+
+@triton.jit
+def _counter_uniform_kernel(seed_ptr, step_ptr, u_ptr, n, BLOCK: tl.constexpr):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = i < n
+    s = tl.load(seed_ptr + i, mask=mask, other=0).to(tl.int64)
+    t = tl.load(step_ptr + i, mask=mask, other=0).to(tl.int64)
+    h = _mix32(s & 0xFFFFFFFF)
+    h = _mix32(h ^ ((s >> 32) & 0xFFFFFFFF) ^ 0x9E3779B9)
+    h = _mix32(h ^ (t & 0xFFFFFFFF) ^ 0x632BE5AB)
+    tl.store(u_ptr + i, (h >> 8).to(tl.float32) * (1.0 / 16777216.0), mask=mask)
+
+
+def counter_uniform(seeds: torch.Tensor, steps: torch.Tensor) -> torch.Tensor:
+    """``engine.talker_sampler.uniform`` in one kernel: the same integer hash of (seed, frame index), bit for bit."""
+    n = seeds.numel()
+    u = torch.empty(n, dtype=torch.float32, device=seeds.device)
+    _counter_uniform_kernel[(triton.cdiv(n, 128),)](seeds, steps, u, n, BLOCK=128)
+    return u
