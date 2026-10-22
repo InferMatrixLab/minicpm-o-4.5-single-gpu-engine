@@ -1,6 +1,7 @@
 """Served media prompts follow the request's processor policy and are never silently truncated (B18).
 
-The native Daily-Omni client sends ``mm_processor_kwargs = {max_slice_nums: 1, use_image_id: False}``; the server keeps
+The native Daily-Omni client sends ``mm_processor_kwargs = {use_audio_in_video: False, max_slice_nums: 1, use_image_id: False}``
+(frames and 1 s audio segments as separate parts); the server keeps
 and validates it, the backend passes it to the checkpoint processor, and a prompt that does not fit the engine's
 context is an HTTP 400 instead of a processor-side cut at 8192 tokens.
 """
@@ -31,9 +32,21 @@ def _body(**kw):
 def test_parser_keeps_and_validates_the_processor_policy():
     assert parse_request(_body(mm_processor_kwargs=NATIVE_POLICY)).processor_kwargs == NATIVE_POLICY
     assert parse_request(_body()).processor_kwargs == {}
-    for bad in ({"max_slice_nums": 0}, {"max_slice_nums": "1"}, {"use_image_id": "no"}, {"fps": 2}, "x"):
+    for bad in ({"max_slice_nums": 0}, {"max_slice_nums": "1"}, {"use_image_id": "no"}, {"use_audio_in_video": 0}, {"fps": 2}, "x"):
         with pytest.raises(BadRequest):
             parse_request(_body(mm_processor_kwargs=bad))
+
+
+def test_use_audio_in_video_false_is_accepted_without_a_video_part():
+    """vLLM-Omni's Daily-Omni policy (the suite's request, ``evals/multimodal/daily_omni_worker.py``) parses; False with a
+    ``video_url`` part is refused, because the engine always interleaves a video's audio track."""
+    vllm_policy = {"use_audio_in_video": False, **NATIVE_POLICY}
+    assert parse_request(_body(mm_processor_kwargs=vllm_policy)).processor_kwargs == vllm_policy
+    video = {"messages": [{"role": "user", "content": [{"type": "video_url", "video_url": {"url": "/tmp/v.mp4"}}, {"type": "text", "text": "?"}]}],
+             "modalities": ["text"]}
+    assert parse_request({**video, "mm_processor_kwargs": {"use_audio_in_video": True}}).processor_kwargs == {"use_audio_in_video": True}
+    with pytest.raises(BadRequest, match="use_audio_in_video"):
+        parse_request({**video, "mm_processor_kwargs": vllm_policy})
 
 
 class _Frontend:
