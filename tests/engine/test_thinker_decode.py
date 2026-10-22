@@ -200,3 +200,58 @@ def test_more_rows_than_buckets_and_pad_release():
     for s in range(6):
         kv.release(s)
     assert kv.used_pages == 0
+
+
+@torch.inference_mode()
+def test_thinker_chunk_prefill_graphs_match_eager():
+    """``thinker_chunk_prefill_graphs``: multi-row Thinker prompt prefills (fresh prompts and continued chunks of 9-700
+    tokens, 1-4 rows) through ``ChunkPrefillGraphs``.  As for the single-request prefill graphs, a replay equals the
+    eager forward of the same padded batch (the rows plus the scratch sequence) bit for bit, hidden states and appended
+    K/V; against the unpadded eager call only GEMM tiling over the padded rows differs, and the greedy next tokens must
+    agree.  The padding effect is printed beside the batching control (the same rows one at a time)."""
+    from engine.models.thinker import Thinker
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+    from engine.runtime.prefill_graph import PAD_SEQ, ChunkPrefillGraphs
+
+    th = Thinker.load(MODEL, device="cuda")
+    c = th.cfg
+    spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, True)
+    kvs = [PagedKV(spec, 160, 64, device="cuda") for _ in range(4)]  # graphs, eager padded, eager together, eager one at a time
+    runs = [DecoderRunner(th.w, spec, kv) for kv in kvs]
+    buckets = (64, 128, 256, 512, 1024)
+    graphs = ChunkPrefillGraphs(runs[0], rows=(1, 2, 3, 4), buckets=buckets, lane="thinker", pad_pages=16)
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    emb = lambda n: th.embed(torch.randint(0, 150000, (n,), device="cuda", generator=gen))  # noqa: E731
+    calls = [([1], [40]), ([2, 3], [130, 61]), ([4, 5, 6, 7], [90, 120, 9, 300]), ([1, 2], [200, 33]), ([3], [700]), ([5, 6, 7], [64, 64, 64])]
+    rel = lambda a, b: float((a.float() - b.float()).norm() / b.float().norm())  # noqa: E731
+    pad_effect = control = 0.0
+    head = th.w["lm_head.weight"]
+    for seqs, ns in calls:
+        x, total = emb(sum(ns)), sum(ns)
+        hg, last = graphs.forward(x, seqs, ns)
+        hg = hg.clone()
+        B = next(b for b in buckets if b > total)
+        lay = kvs[1].layout(list(seqs) + [PAD_SEQ], list(ns) + [B - total])
+        hp = runs[1].forward(torch.cat([x, x.new_zeros(B - total, x.shape[1])]), lay)[:total]
+        kvs[1].release(PAD_SEQ)
+        assert torch.equal(hg, hp), (seqs, ns)  # the replay is the eager padded batch
+        lay = kvs[2].layout(seqs, ns)
+        he = runs[2].forward(x, lay)
+        assert torch.equal(last, lay.last_token_index)
+        parts, a = [], 0
+        for s, n in zip(seqs, ns):
+            parts.append(runs[3].forward(x[a:a + n], kvs[3].layout([s], [n])))
+            a += n
+        ho = torch.cat(parts)
+        pad_effect, control = max(pad_effect, rel(hg, he)), max(control, rel(ho, he))
+        assert torch.equal(torch.nn.functional.linear(hg[last], head).argmax(-1), torch.nn.functional.linear(he[last], head).argmax(-1)), (seqs, ns)
+    assert graphs.counts["graph"] == len(calls)
+    for seq in range(1, 8):
+        n = kvs[0].lengths[seq]
+        assert kvs[1].lengths[seq] == n
+        for i in range(len(kvs[0].k)):
+            ga, pa = (kv.k[i][kv.pages[seq][:-(-n // kv.page_size)]].flatten(0, 1)[:n] for kv in kvs[:2])
+            gv, pv = (kv.v[i][kv.pages[seq][:-(-n // kv.page_size)]].flatten(0, 1)[:n] for kv in kvs[:2])
+            assert torch.equal(ga, pa) and torch.equal(gv, pv), (seq, i)
+    print(f"thinker chunk prefill graphs: bitwise equal to the eager padded batch; padding effect on hidden {pad_effect:.2e}, "
+          f"batching control {control:.2e}")

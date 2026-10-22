@@ -128,15 +128,18 @@ class ChunkPrefillGraphs:
     the batch size, hence a graph per row count.  Every real row attends to its whole cached sequence (the page indices
     and lengths are buffers rewritten before each replay, sized for the whole pool) and appends its tokens exactly as
     the eager ``DecoderRunner.forward`` of the same rows does; versus that call, only GEMM tiling over the padded rows
-    can differ.  The caller keeps one page of the pool free for the scratch sequence."""
+    can differ.  The caller keeps ``pad_pages`` pages of the pool free for the scratch sequence (one by default, the
+    Talker's; the Thinker's multi-row prompt prefills use larger buckets, ``thinker_chunk_prefill_graphs``)."""
 
     PAD_PAGES = 1
 
-    def __init__(self, run: DecoderRunner, rows=(1, 2, 3, 4), buckets=(32, 64, 128), workspace_mb: int = 128, lane: str = "talker"):
+    def __init__(self, run: DecoderRunner, rows=(1, 2, 3, 4), buckets=(32, 64, 128), workspace_mb: int = 128, lane: str = "talker",
+                 pad_pages: int = PAD_PAGES):
         self.run, self.kv, self.lane = run, run.kv, lane
-        assert max(buckets) <= self.kv.page_size * self.PAD_PAGES, "the scratch sequence must fit its reserved pages"
+        self.pad_pages = pad_pages
+        assert max(buckets) <= self.kv.page_size * pad_pages, "the scratch sequence must fit its reserved pages"
         self.workspace = torch.empty(workspace_mb << 20, dtype=torch.uint8, device=run.kv.k.device)
-        max_pages = self.kv.num_pages + self.PAD_PAGES
+        max_pages = self.kv.num_pages + pad_pages
         self.buckets = {(r, b): _ChunkBucket(run, r, b, max_pages, self.workspace) for r in rows for b in buckets}
         self.token_buckets = sorted(buckets)
         self.pool = torch.cuda.graph_pool_handle()

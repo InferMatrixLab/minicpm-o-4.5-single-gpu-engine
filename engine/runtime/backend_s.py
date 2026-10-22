@@ -138,7 +138,7 @@ class TrackSBackend:
                  t2w_merge_solve: bool = False, audio_resampler: str = "librosa", t2w_fuse_setup_frames: int = 0,
                  talker_lean_frame: bool = False, t2w_hold_slack_ms: float | None = None, t2w_hold_max_ms: float = 100.0,
                  t2w_hold_rows: int = 16, t2w_hold_setups: bool = False, t2w_hift_lean: bool = False,
-                 t2w_dit_fused_residual: bool = False):
+                 t2w_dit_fused_residual: bool = False, thinker_chunk_prefill_graphs: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -226,6 +226,16 @@ class TrackSBackend:
 
             self.tprefill = PrefillGraphs(self.trun)
             self.tprefill.capture_all()
+        # multi-row Thinker prompt prefills (and continued chunks): graphs per row count and token bucket instead of the
+        # host-bound eager forward; their scratch sequence's pages are kept out of the prefill lane's grants
+        self.tchunk = None
+        if thinker_chunk_prefill_graphs and use_graphs:
+            from engine.runtime.prefill_graph import ChunkPrefillGraphs
+
+            buckets = (64, 128, 256, 512, 1024)
+            self.tchunk = ChunkPrefillGraphs(self.trun, rows=(1, 2, 3, 4), buckets=buckets, lane="thinker",
+                                             pad_pages=-(-max(buckets) // self.tkv.page_size))
+            self.tchunk.capture_all()
         # Talker chunk prefills: CUDA graphs per row count and token bucket (eager beyond them), the first frames of
         # one call sampled together (one host transfer instead of one per row)
         self.aprefill = None
@@ -748,7 +758,7 @@ class TrackSBackend:
             return rows, False
         now = _now()
         min_slack = self._min_slack(now)
-        free = len(self.tkv.free) - self.tdec.pad_pages_outstanding() - sum(
+        free = len(self.tkv.free) - self.tdec.pad_pages_outstanding() - getattr(getattr(self, "tchunk", None), "pad_pages", 0) - sum(
             self.tkv.pages_needed(lv.seq, self._growth(lv)) for lv in rows if not lv.pending_prefill or lv.prefilled)
         take = dict(choose_prefills([(lv.t_admit, len(lv.prompt_ids) - lv.prefilled, lv.seq,
                                       0 if lv.prefilled else self.tkv.pages_needed(lv.seq, self._growth(lv))) for lv in pending],
@@ -847,6 +857,10 @@ class TrackSBackend:
         whole = all(lv.prefilled == 0 and n == len(lv.prompt_ids) for lv, n in zip(pre, ns))
         if len(pre) == 1 and whole and self.tprefill is not None and self.tprefill.supports(ns[0]):
             last = self.tprefill.forward(self._prompt_embeds(pre[0], 0, ns[0]), pre[0].seq)[-1:]  # graph-captured single-request prefill
+        elif getattr(self, "tchunk", None) is not None and self.tchunk.supports(len(pre), sum(ns)):
+            hid, idx = self.tchunk.forward(torch.cat([self._prompt_embeds(lv, lv.prefilled, lv.prefilled + n) for lv, n in zip(pre, ns)]),
+                                           [lv.seq for lv in pre], ns)
+            last = hid[idx]  # a copy: the graph's output buffer is reused by the next call
         else:
             lay = self.tkv.layout([lv.seq for lv in pre], ns)
             last = self.trun.forward(torch.cat([self._prompt_embeds(lv, lv.prefilled, lv.prefilled + n) for lv, n in zip(pre, ns)]), lay)
