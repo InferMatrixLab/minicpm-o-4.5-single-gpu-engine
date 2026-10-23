@@ -88,20 +88,3 @@ def test_counter_uniform_equals_the_sampler_hash():
     steps = torch.randint(0, 2**40, seeds.shape, device="cuda", generator=g, dtype=torch.int64)
     steps[:300] = torch.arange(300, device="cuda")
     assert torch.equal(counter_uniform(seeds, steps), uniform(seeds, steps))
-
-
-@pytest.mark.parametrize("n", [1, 8, 33, 300])
-def test_rope_hf_equals_the_torch_ops(n):
-    """RoPE only (the Talker: no q/k norms): no reduction, so bit for bit."""
-    from engine.runtime.kernels import rope_hf
-    from engine.runtime.paged import hf_rope, hf_rope_tables
-
-    nq, nkv, d = 16, 8, 128
-    g = torch.Generator(device="cuda").manual_seed(n)
-    qkv = (torch.randn(n, (nq + 2 * nkv) * d, device="cuda", generator=g) * 2).to(torch.bfloat16)
-    pos = torch.randint(0, 4000, (n,), device="cuda", generator=g, dtype=torch.int32)
-    tables = hf_rope_tables(pos, d, 1e4, torch.bfloat16)
-    q, k, v = rope_hf(qkv, *tables, nq, nkv, d)
-    rq, rk = hf_rope(qkv[:, :nq * d].reshape(-1, nq, d).contiguous(), qkv[:, nq * d:(nq + nkv) * d].reshape(-1, nkv, d).contiguous(), pos, 1e4, tables)
-    assert torch.equal(v, qkv[:, (nq + nkv) * d:].reshape(-1, nkv, d))
-    assert torch.equal(q, rq) and torch.equal(k, rk)

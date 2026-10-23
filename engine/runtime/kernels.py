@@ -79,7 +79,7 @@ def add_rms_norm_hf(x: torch.Tensor, r: torch.Tensor, w: torch.Tensor, eps: floa
 
 @triton.jit
 def _qk_norm_rope_hf_kernel(qkv_ptr, qw_ptr, kw_ptr, cos_ptr, sin_ptr, q_ptr, k_ptr, v_ptr, stride_qkv, stride_cs, n_q, n_kv, eps,
-                            D: tl.constexpr, NORM: tl.constexpr = True):
+                            D: tl.constexpr):
     row = tl.program_id(0)
     head = tl.program_id(1)
     cols = tl.arange(0, D)
@@ -93,21 +93,17 @@ def _qk_norm_rope_hf_kernel(qkv_ptr, qw_ptr, kw_ptr, cos_ptr, sin_ptr, q_ptr, k_
         is_q = head < n_q
         x = tl.load(base + cols).to(tl.float32)
         xp = tl.load(base + partner).to(tl.float32)
+        var = tl.sum(x * x, axis=0) / D
+        inv = tl.math.rsqrt(var + eps)
+        if is_q:
+            w = tl.load(qw_ptr + cols).to(tl.float32)
+            wp = tl.load(qw_ptr + partner).to(tl.float32)
+        else:
+            w = tl.load(kw_ptr + cols).to(tl.float32)
+            wp = tl.load(kw_ptr + partner).to(tl.float32)
         dt = q_ptr.dtype.element_ty
-        if NORM:
-            var = tl.sum(x * x, axis=0) / D
-            inv = tl.math.rsqrt(var + eps)
-            if is_q:
-                w = tl.load(qw_ptr + cols).to(tl.float32)
-                wp = tl.load(qw_ptr + partner).to(tl.float32)
-            else:
-                w = tl.load(kw_ptr + cols).to(tl.float32)
-                wp = tl.load(kw_ptr + partner).to(tl.float32)
-            y = _round_bf16(_round_bf16(x * inv) * w)  # hf_rms_norm's two roundings
-            yp = _round_bf16(_round_bf16(xp * inv) * wp)
-        else:  # RoPE only (models without q/k norms): the bf16 projections as they are
-            y = x
-            yp = xp
+        y = _round_bf16(_round_bf16(x * inv) * w)  # hf_rms_norm's two roundings
+        yp = _round_bf16(_round_bf16(xp * inv) * wp)
         rot = tl.where(cols < half, -yp, yp)  # rotate-half
         c = tl.load(cos_ptr + row * stride_cs + cols).to(tl.float32)
         sn = tl.load(sin_ptr + row * stride_cs + cols).to(tl.float32)
@@ -129,20 +125,6 @@ def qk_norm_rope_hf(qkv: torch.Tensor, q_w: torch.Tensor, k_w: torch.Tensor, cos
     v = torch.empty_like(k)
     c2, s2 = cos.reshape(n, head_dim), sin.reshape(n, head_dim)
     _qk_norm_rope_hf_kernel[(n, n_q + 2 * n_kv)](qkv, q_w, k_w, c2, s2, q, k, v, qkv.stride(0), c2.stride(0), n_q, n_kv, eps, D=head_dim)
-    return q, k, v
-
-
-def rope_hf(qkv: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, n_q: int, n_kv: int, head_dim: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``hf_rope`` of q and k split from ``qkv`` [n, (n_q + 2 n_kv) * D] (no q/k norms; the Talker), v copied out, in one
-    kernel.  No reduction: equal to the torch ops bit for bit.  Returns contiguous q [n, n_q, D], k and v [n, n_kv, D]."""
-    assert qkv.dtype == torch.bfloat16, "bf16 activations only (the roundings are bf16)"
-    n = qkv.shape[0]
-    q = torch.empty(n, n_q, head_dim, dtype=qkv.dtype, device=qkv.device)
-    k = torch.empty(n, n_kv, head_dim, dtype=qkv.dtype, device=qkv.device)
-    v = torch.empty_like(k)
-    c2, s2 = cos.reshape(n, head_dim), sin.reshape(n, head_dim)
-    _qk_norm_rope_hf_kernel[(n, n_q + 2 * n_kv)](qkv, qkv, qkv, c2, s2, q, k, v, qkv.stride(0), c2.stride(0), n_q, n_kv, 0.0, D=head_dim,
-                                                 NORM=False)
     return q, k, v
 
 
