@@ -8,6 +8,7 @@ magnitude inside AC-3.4's 1e-2.  The Snake kernel alone equals the reference mod
 partial last block, one row).
 """
 
+import contextlib
 import os
 
 import pytest
@@ -69,3 +70,37 @@ def test_snake_kernel_equals_the_module():
         for shape in ((1, 96, 1), (2, 96, 1025), (7, 96, 3000)):
             x = torch.randn(shape, device="cuda") * 4
             assert torch.equal(holder[0](x), m(x)), (logscale, shape)
+
+
+@torch.inference_mode()
+def test_fused_bias_resblocks_equal_the_lean_ones():
+    """``make_lean(fused_bias=True)``: every ResBlock (biases, residuals and Snakes in ``bias_snake``) returns what the
+    lean module returns, bit for bit, in strict FP32 and in TF32, on odd lengths; the vocoder too, through its graphs,
+    wherever the lean graph itself replays bit for bit (some shapes' cuDNN kernels do not: there within ``BOUND``)."""
+    from engine.models.token2wav import SOURCE_CACHE, Token2Wav, decoder_tf32, strict_fp32
+    from engine.runtime.hift_graph import HiFTGraphs
+    from engine.runtime.hift_lean import make_lean
+
+    torch.backends.cudnn.allow_tf32 = False
+    lean = Token2Wav(MODEL / "assets" / "token2wav", float16=True).hift
+    fused = Token2Wav(MODEL / "assets" / "token2wav", float16=True).hift
+    make_lean(lean)
+    changed = make_lean(fused, fused_bias=True)
+    assert changed["resblocks_fused"] == len(fused.resblocks) + len(fused.source_resblocks), changed
+    g = torch.Generator(device="cuda").manual_seed(1)
+    for blocks in ("resblocks", "source_resblocks"):
+        for a, b in zip(getattr(lean, blocks), getattr(fused, blocks)):
+            C = a.convs1[0].in_channels
+            for shape, tf in (((3, C, 1001), False), ((1, C, 37), False), ((16, C, 2400), True)):
+                x = torch.randn(shape, device="cuda", generator=g)
+                with strict_fp32(), (decoder_tf32() if tf else contextlib.nullcontext()):
+                    assert torch.equal(b(x), a(x)), (blocks, shape, tf)
+    graphs = {name: HiFTGraphs(h, decode_tf32=TF32_R16) for name, h in (("lean", lean), ("fused", fused))}
+    for rows, frames, cache in ((1, 16, 0), (5, 50, 0), (16, 58, SOURCE_CACHE), (3, 58, SOURCE_CACHE)):
+        mel = torch.randn(rows, 80, frames, device="cuda", generator=g) * 2 - 4
+        src = torch.randn(rows, 1, cache, device="cuda", generator=g) * 0.1
+        a, again, b = (graphs[n](mel, src, list(range(rows))) for n in ("lean", "lean", "fused"))
+        if all(torch.equal(x, y) for x, y in zip(a, again)):
+            assert all(torch.equal(x, y) for x, y in zip(a, b)), (rows, frames)
+        else:
+            assert _rel(b, a) <= BOUND, (rows, frames)
