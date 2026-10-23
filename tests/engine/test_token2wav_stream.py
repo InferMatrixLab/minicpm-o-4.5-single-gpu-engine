@@ -522,6 +522,45 @@ def test_dit_fused_residual_is_bitwise(graphs):
     assert all(torch.equal(x, y) for x, y in zip(mels[0], mels[2]))
 
 
+@torch.inference_mode()
+def test_prefetched_setups_equal_raw_ones():
+    """``setup_encode`` ahead of the call (``t2w_setup_prefetch``): a decode carrying prefetched setups, and a setup call
+    of prefetched rows, give the same mels bit for bit as the same calls given the features (graphs, fused setups)."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", float16=True, noise_seed=7)
+    feats = [ours.features(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav")] * 2
+    gen = np.random.default_rng(12)
+    plans = []
+    for n in (90, 70, 80, 60, 75, 66):
+        ch = StreamChunker(first_chunk=8)
+        plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
+    mels = []
+    for pre in (False, True):
+        bt = BatchedToken2Wav(ours, use_graphs=True, fast_dit=True, fast_slots=32768, merge_solve=True, fuse_setup_frames=2048,
+                              dit_fused_residual=True, dit_fused_conv=True)
+        rec, vocode = [], bt._vocode
+        bt._vocode = lambda items, ms, *rest, vocode=vocode, rec=rec: (rec.extend(m.float().cpu() for m in ms) or vocode(items, ms, *rest))
+        first = bt.setup_encode(feats[:3]) if pre else feats[:3]  # the same encoder batches either way
+        sts = [bt.new_stream(p, noise_seed=j, adopt=True) for j, p in enumerate(bt.setup_many(first))]
+        for tick in range(max(len(p) for p in plans) + 3):
+            items = [(sts[j], *plans[j][tick - (0 if j < 3 else 3)]) for j in range(len(sts)) if 0 <= tick - (0 if j < 3 else 3) < len(plans[j])]
+            if tick == 2:
+                later = bt.setup_encode(feats[3:]) if pre else feats[3:]
+                _, prompts = bt.decode(items, setups=later)
+                sts += [bt.new_stream(p, noise_seed=3 + j, adopt=True) for j, p in enumerate(prompts)]
+            elif items:
+                bt.decode(items)
+        mels.append(rec)
+        for st in sts:
+            bt.release_stream(st)
+        assert bt.fast.pool.in_use() == bt.fast.scratch
+    assert len(mels[0]) == len(mels[1]) == sum(len(p) for p in plans)
+    assert all(torch.equal(x, y) for x, y in zip(*mels))
+
+
 def test_split_prompt_features_equal_reference():
     """The feature path of the worker, split into a CPU front end (feature processes, no CUDA) and the GPU S3 tokens in
     the worker (``prompt_front_end`` + ``finish_prompt``), returns exactly the reference ``Token2wav._prepare_prompt``

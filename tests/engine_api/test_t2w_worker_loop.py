@@ -487,6 +487,107 @@ def test_fused_setups_need_the_edf_policy():
         WorkerLoop(None, None, None, None, Policy(), mode="r6", fuse_setups=True)
 
 
+class Pending:
+    def __init__(self, wavs, bt):
+        self.wavs, self.bt = wavs, bt
+
+    def result(self):
+        self.bt.calls.append(("result",))
+        return self.wavs
+
+
+class PrefetchBT(FusedBT):
+    """FusedBT with ``setup_encode`` (the encoder part of a setup: ``encode_s`` of the setup's cost), ``PreSetup``-like
+    entries in ``setup_many`` / ``decode(setups=...)`` (only the solve part is charged), and ``async_result``."""
+
+    encode_s = 0.05
+
+    def __init__(self, clock, **kw):
+        super().__init__(clock, **kw)
+        self.released_pres = 0
+
+    def setup_encode(self, feats):
+        self.clock.t += self.encode_s
+        self.calls.append(("encode", len(feats), self.clock.t))
+        return [("pre", f) for f in feats]
+
+    def release_presetup(self, p):
+        self.released_pres += 1
+
+    def setup_many(self, feats):
+        pre = sum(isinstance(f, tuple) and f[0] == "pre" for f in feats)
+        self.clock.t -= self.encode_s if pre == len(feats) else 0.0  # the encoder already ran
+        return super().setup_many(feats)
+
+    def decode(self, items, setups=None, async_result=False):
+        if self.hook:
+            self.hook()
+        out = super().decode(items, setups)
+        if setups is not None:
+            self.calls[-1] = self.calls[-1] + (sum(isinstance(f, tuple) and f[0] == "pre" for f in setups),)
+        if not async_result:
+            return out
+        wavs, prompts = out if setups is not None else (out, None)
+        return (Pending(wavs, self), prompts) if setups is not None else Pending(wavs, self)
+
+
+def _prefetch_loop(policy=None):
+    clock = Clock()
+    bt = PrefetchBT(clock, slots=256)
+    out = []
+    loop = WorkerLoop(bt, out.append, lambda f: Feat(f.result().frames), lambda ready: [(512, [r]) for r in ready], policy or Policy(first_lane_slack_s=0.1),
+                      clock=clock, fuse_setups=True, setup_prefetch=True)
+    return loop, bt, clock, out
+
+
+def test_setup_prefetch_encodes_pending_setups_while_the_call_runs():
+    """Three new voices beside a continuing stream (frame budget 250: the call carries two): the third's encoder runs
+    after the call's launch and before its samples are waited for, and its setup then solves the prefetched rows; a
+    voice whose features arrive during a call is prefetched in it and rides the next call with its prefetched rows."""
+    loop, bt, clock, out = _prefetch_loop()
+    _speaking(loop, clock)
+    for s in range(1, 4):
+        loop.open(s, s, Fut())
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[0] for c in bt.calls[n:]] == ["decode+setup", "encode", "result", "setup"]
+    assert bt.calls[n][2] == 2 and bt.calls[n][4] == 0 and bt.calls[n + 1][1] == 1  # 2 raw setups fused; seq 3 prefetched
+    assert all(loop.reqs[s].stream is not None and loop.reqs[s].pre is None for s in (1, 2, 3))
+    assert len(_audio(out, 0)) == 1
+    fut = Fut(ready=False)
+    loop.open(4, 4, fut)
+    bt.hook = lambda: setattr(fut, "ready", True)
+    loop.window(0, list(range(25)), False, 2)
+    n = len(bt.calls)
+    loop.tick()  # seq 4's features arrive during the call: prefetched there, not set up yet
+    bt.hook = None
+    assert [c[0] for c in bt.calls[n:]] == ["decode", "encode", "result"] and loop.reqs[4].pre is not None
+    loop.window(0, list(range(25)), False, 3)
+    n = len(bt.calls)
+    loop.tick()
+    assert [c[0] for c in bt.calls[n:]] == ["decode+setup", "result"] and bt.calls[n][4] == 1  # rides with its rows
+    assert loop.reqs[4].stream is not None and loop.reqs[4].pre is None and len(_audio(out, 0)) == 3
+
+
+def test_a_close_releases_a_prefetched_setup():
+    loop, bt, clock, out = _prefetch_loop(policy=Policy(first_lane_slack_s=10.0))
+    _speaking(loop, clock)
+    loop.window(0, list(range(25)), False, 2)  # still waiting after the call: the first lane stays shut
+    for s in (1, 2, 3, 4):
+        loop.open(s, s, Fut())
+    loop.tick()  # the call carries 1, 2; 3, 4 prefetched; one setup call after it (3, from its rows)
+    assert loop.reqs[3].stream is not None and loop.reqs[4].pre is not None, bt.calls
+    loop.close(4)
+    assert bt.released_pres == 1 and 4 not in loop.reqs
+
+
+def test_setup_prefetch_needs_fused_synchronous_setups():
+    with pytest.raises(ValueError):
+        WorkerLoop(None, None, None, None, Policy(), fuse_setups=False, setup_prefetch=True)
+    with pytest.raises(ValueError):
+        WorkerLoop(None, None, None, None, Policy(), fuse_setups=True, setup_prefetch=True, async_results=True)
+
+
 def test_hold_decode_rules():
     from engine.runtime.t2w_sched import hold_decode
 

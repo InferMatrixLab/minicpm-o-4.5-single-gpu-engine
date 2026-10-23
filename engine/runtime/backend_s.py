@@ -139,7 +139,8 @@ class TrackSBackend:
                  talker_lean_frame: bool = False, t2w_hold_slack_ms: float | None = None, t2w_hold_max_ms: float = 100.0,
                  t2w_hold_rows: int = 16, t2w_hold_setups: bool = False, t2w_hift_lean: bool = False,
                  t2w_dit_fused_residual: bool = False, thinker_chunk_prefill_graphs: bool = False,
-                 prefill_hf_kernels: bool = False, t2w_dit_fused_conv: bool = False, t2w_hift_fused_bias: bool = False):
+                 prefill_hf_kernels: bool = False, t2w_dit_fused_conv: bool = False, t2w_hift_fused_bias: bool = False,
+                 t2w_setup_prefetch: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -271,7 +272,7 @@ class TrackSBackend:
                                           "t2w_hold_max_ms": t2w_hold_max_ms, "t2w_hold_rows": t2w_hold_rows,
                                           "t2w_hold_setups": t2w_hold_setups, "t2w_hift_lean": t2w_hift_lean,
                                           "t2w_dit_fused_residual": t2w_dit_fused_residual, "t2w_dit_fused_conv": t2w_dit_fused_conv,
-                                          "t2w_hift_fused_bias": t2w_hift_fused_bias}, self._on_t2w)
+                                          "t2w_hift_fused_bias": t2w_hift_fused_bias, "t2w_setup_prefetch": t2w_setup_prefetch}, self._on_t2w)
         else:
             assert not t2w_fast_dit, "the fast DiT runs in the Token2Wav process (t2w_process)"
             assert not t2w_async_results, "asynchronous results are a Token2Wav-process option (t2w_process)"

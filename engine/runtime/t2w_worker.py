@@ -275,6 +275,7 @@ class _Req:
     offset: int = 0
     t_open: float = 0.0
     feat: tuple | None = None  # the resolved prompt features (on this process's stream), once ready
+    pre: object = None  # its setup's flow encoder run ahead (setup_prefetch: BatchedToken2Wav.PreSetup), not yet solved
     t_feat: float = 0.0  # when the loop saw them ready (setups are taken oldest first)
     audio: AudioState = field(default_factory=AudioState)  # first-audio state and playback clock (t2w_sched)
 
@@ -321,15 +322,25 @@ class WorkerLoop:
     while the first lane is open.  Setups left over, or in a tick without a decode, run as before.
 
     ``Policy.hold_slack_s`` (edf): a decode of continuation windows only waits for more windows while each keeps that much
-    playback slack (``t2w_sched.hold_decode``), so calls are larger; with ``hold_setups`` the fusable setups wait for it."""
+    playback slack (``t2w_sched.hold_decode``), so calls are larger; with ``hold_setups`` the fusable setups wait for it.
+
+    ``setup_prefetch`` (with ``fuse_setups``): a decode call is launched without waiting for its GPU work; while it runs,
+    the pending setups' flow encoders run (``bt.setup_encode``, oldest first, up to a call's room and frame budget), then
+    the call's samples are waited for and sent as before.  A later setup (fused or its own call) solves the prefetched
+    rows instead of encoding again, so the encoder's host time hides behind the call's GPU work; calls are formed as
+    without it."""
 
     def __init__(self, bt, emit, resolve, calls_for, policy: Policy, mode: str = "edf", min_batch: int = 8, max_wait: float = 0.04,
-                 clock=time.perf_counter, log=None, note=None, async_results: bool = False, max_inflight: int = 2, fuse_setups: bool = False):
+                 clock=time.perf_counter, log=None, note=None, async_results: bool = False, max_inflight: int = 2, fuse_setups: bool = False,
+                 setup_prefetch: bool = False):
         """``async_results``: a decode call does not wait for its GPU work; its samples are emitted (in call order) once
         its copy to the host completed, while setups and later calls run; at most ``max_inflight`` calls are pending."""
         if fuse_setups and mode != "edf":
             raise ValueError("fused setups (t2w_fuse_setup_frames) need t2w_policy edf")
         self.fuse_setups = fuse_setups
+        if setup_prefetch and (not fuse_setups or async_results):
+            raise ValueError("t2w_setup_prefetch needs fused setups and synchronous results")
+        self.setup_prefetch = setup_prefetch
         self.held = False  # the last decode was held (Policy.hold_slack_s)
         if mode not in MODES:
             raise ValueError(f"t2w_policy must be one of {MODES}, not {mode!r}")
@@ -361,6 +372,9 @@ class WorkerLoop:
         r = self.reqs.pop(seq, None)
         if r is not None and r.stream is not None:
             self.bt.release_stream(r.stream)
+        if r is not None and r.pre is not None:
+            self.bt.release_presetup(r.pre)
+            r.pre = None
 
     # one scheduling tick
     def tick(self) -> bool:
@@ -437,7 +451,7 @@ class WorkerLoop:
             try:
                 t0 = time.perf_counter()
                 tok = self.trace.begin("setup") if self.trace is not None else None
-                prompts = self.bt.setup_many([r.feat for r in part])
+                prompts = self.bt.setup_many([r.pre if r.pre is not None else r.feat for r in part])
                 if tok is not None:
                     self.trace.end(tok, len(part))
                     t1 = time.perf_counter()
@@ -457,7 +471,7 @@ class WorkerLoop:
 
     def _adopt(self, part: list, prompts: list) -> None:
         for r, p in zip(part, prompts):
-            r.feat = None
+            r.feat, r.pre = None, None  # a prefetched setup's caches now belong to the prompt
             if self.reqs.get(r.seq) is r:
                 r.stream = self.bt.new_stream(p, noise_seed=r.noise_seed, adopt=True)
             else:  # closed while its setup was pending
@@ -505,13 +519,20 @@ class WorkerLoop:
         if self.async_results and len(self.inflight) >= self.max_inflight:
             self._complete(block=True, limit=1)  # bounded: the oldest call's samples first
         part = self._fused_part(fuse, len(items)) if fuse else []
+        adopted = False
         try:
             t0 = time.perf_counter()
             tok = self.trace.begin("decode") if self.trace is not None else None
-            kw = {"setups": [r.feat for r in part]} if part else {}
-            wavs = self.bt.decode(items, async_result=True, **kw) if self.async_results else self.bt.decode(items, **kw)
+            kw = {"setups": [r.pre if r.pre is not None else r.feat for r in part]} if part else {}
+            wavs = self.bt.decode(items, async_result=True, **kw) if self.async_results or self.setup_prefetch else self.bt.decode(items, **kw)
             if part:
                 wavs, prompts = wavs
+            if self.setup_prefetch:  # adopt the fused setups (so they are not prefetched), prefetch, then wait for the call
+                if part:
+                    self._adopt(part, prompts)
+                    adopted = True
+                self._prefetch()
+                wavs = wavs.result()
             if tok is not None:  # audio frames (24 kHz, 25 frames/s); an asynchronous call's span ends at its launch
                 self.trace.end(tok, len(items), 0 if self.async_results else sum(len(w) for w in wavs) // 960)
             self.log("decode", len(items), t0)
@@ -530,13 +551,36 @@ class WorkerLoop:
                 self.emit(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
                 self.close(r.seq)
             return True
-        if part:
+        if part and not adopted:
             self._adopt(part, prompts)
         if self.async_results:
             self.inflight.append((wavs, sel, items, meta, t0))
         else:
             self._emit_results(sel, items, wavs, meta, t0)
         return True
+
+    def _prefetch(self) -> None:
+        """While a decode call's GPU work runs: the flow encoder of the pending setups (oldest first) that a call could
+        carry (its room in requests and ``bt.fuse_setup_frames``), one batch."""
+        self._resolve_ready()
+        room, budget, part = self.bt.max_flow_streams, self.bt.fuse_setup_frames, []
+        for r in sorted((r for r in self.reqs.values() if r.stream is None and r.feat is not None and r.pre is None), key=lambda r: r.t_feat):
+            f = int(r.feat[3].shape[1])
+            if room <= 0 or f > budget:
+                break
+            part.append(r)
+            room, budget = room - 1, budget - f
+        if not part:
+            return
+        try:
+            pres = self.bt.setup_encode([r.feat for r in part])
+        except Exception as e:
+            for r in part:
+                self.emit(("error", r.seq, f"prompt setup: {type(e).__name__}: {e}"))
+                self.close(r.seq)
+            return
+        for r, p in zip(part, pres):
+            r.pre = p
 
     def _fail(self, sel, e) -> None:
         for r in sel:
@@ -729,7 +773,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
 
     loop = WorkerLoop(bt, outq.put, resolve, lambda ready: setup_calls(ready, SETUP_T, ROW_LIMIT), policy, mode=cfg.get("t2w_policy", "edf"),
                       min_batch=cfg.get("t2w_min_batch", 8), max_wait=cfg.get("t2w_max_wait_ms", 40.0) / 1000, log=log, note=note,
-                      async_results=cfg.get("t2w_async_results", False), fuse_setups=bool(cfg.get("t2w_fuse_setup_frames", 0)))
+                      async_results=cfg.get("t2w_async_results", False), fuse_setups=bool(cfg.get("t2w_fuse_setup_frames", 0)),
+                      setup_prefetch=cfg.get("t2w_setup_prefetch", False))
     reqs = loop.reqs
 
     def reader():

@@ -20,6 +20,7 @@ final flushes.  The flow's fixed noise is read at each request's own offset (its
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -135,6 +136,18 @@ class PendingAudio:
         return out
 
 
+@dataclass
+class PreSetup:
+    """A prompt setup whose flow encoder already ran (``BatchedToken2Wav.setup_encode``), not solved yet: its features,
+    stream state (fast-DiT caches allocated) and solve rows.  ``decode(setups=...)`` and ``setup_many`` take it in place
+    of the features; one that is never used goes back with ``release_presetup``."""
+    feats: tuple
+    st: StreamState
+    mu: torch.Tensor
+    spk: torch.Tensor
+    cond: torch.Tensor
+
+
 class BatchedToken2Wav:
     def __init__(self, t2w: Token2Wav, use_graphs: bool = False, compile_estimator: bool = False, euler_graphs: bool = False,
                  fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False,
@@ -231,7 +244,7 @@ class BatchedToken2Wav:
                     for (_, idx), ms in zip(chunks, self._prof("flow", len(items), self._flow_merged, parts, rows)):
                         for i, m in zip(idx, ms):
                             mels[i] = m
-                    prompts = [self.t2w.prompt(f, st.flow_cache) for f, st in zip(setups, rows[0])] if setups else None
+                    prompts = [self.t2w.prompt(f, st.flow_cache) for f, st in zip(rows[4], rows[0])] if setups else None
                 else:
                     prompts = None
                     self._flow_groups(items, groups, mels)
@@ -331,7 +344,7 @@ class BatchedToken2Wav:
                 for i, (st, mu, k) in enumerate(zip(sts, enc["mu"], enc["keep"]))]
         n_set = 0
         if setup_rows is not None:
-            sts, mus, spks, conds = setup_rows
+            sts, mus, spks, conds = setup_rows[:4]
             n_set = len(sts)
             flat = [(st.flow_cache["fast"], mu, spks[i:i + 1], True, c) for i, (st, mu, c) in enumerate(zip(sts, mus, conds))] + flat
         mels = []
@@ -428,16 +441,42 @@ class BatchedToken2Wav:
         """``Token2Wav.setup`` (reference ``Flow.setup_cache``) on this module's solver (see ``setup_many``)."""
         return self.setup_many([feats])[0]
 
-    def _setup_rows(self, feats_list: list[tuple]) -> tuple:
-        """Fast DiT: the setups' flow encoder and empty caches, not solved: (streams, mu per prompt, spks, cond per prompt)."""
-        return self.setup_many(feats_list, rows_only=True)
+    def _setup_rows(self, setups: list) -> tuple:
+        """Fast DiT: the setups' flow encoder and empty caches, not solved: (streams, mu per prompt, spks, cond per prompt,
+        features per prompt).  ``setups``: features, or ``PreSetup`` whose encoder already ran (the others' run now)."""
+        pre = self._presetups(setups)
+        return [p.st for p in pre], [p.mu for p in pre], torch.cat([p.spk for p in pre]), [p.cond for p in pre], [p.feats for p in pre]
+
+    def _presetups(self, setups: list) -> list[PreSetup]:
+        raw = [f for f in setups if not isinstance(f, PreSetup)]
+        enc = iter(self.setup_encode(raw) if raw else ())
+        return [f if isinstance(f, PreSetup) else next(enc) for f in setups]
+
+    @torch.inference_mode()
+    def setup_encode(self, feats_list: list[tuple]) -> list[PreSetup]:
+        """Fast DiT: the setups' flow encoder (one batch, as ``setup_many``) and empty caches, ahead of their solve."""
+        sts, mus, spks, conds = self.setup_many(feats_list, rows_only=True)
+        return [PreSetup(f, st, mu, spks[i:i + 1], c) for i, (f, st, mu, c) in enumerate(zip(feats_list, sts, mus, conds))]
+
+    def release_presetup(self, p: PreSetup) -> None:
+        if self.fast is not None and p.st.flow_cache.get("fast") is not None:
+            self.fast.release(p.st.flow_cache["fast"])
+            p.st.flow_cache["fast"] = None
 
     @torch.inference_mode()
     def setup_many(self, feats_list: list[tuple], rows_only: bool = False) -> list:
         """Prompt setups of several requests: each prompt (plus 3 silence tokens) through the flow encoder (one padded
         batch with ``batch_setup_encoder``, else one prompt at a time), then one Euler solve over all prompts' frames
         (each with its prompt mel as condition and empty caches; frames right-padded to the longest / a graph bucket,
-        padding masked, conv caches gathered at each prompt's real end)."""
+        padding masked, conv caches gathered at each prompt's real end).  Entries may be ``PreSetup`` (fast DiT: encoder
+        already run); then every prompt's solve runs here, the others' encoder first."""
+        if any(isinstance(f, PreSetup) for f in feats_list):
+            assert self.fast is not None and not rows_only
+            pre = self._presetups(feats_list)
+            with strict_fp32(), torch.amp.autocast("cuda", dtype=self.dtype), span(self.trace, "setup.solve", len(pre)):
+                self.fast.solve([p.st.flow_cache["fast"] for p in pre], [p.mu for p in pre], torch.cat([p.spk for p in pre]), [p.cond for p in pre],
+                                [True] * len(pre))
+            return [self.t2w.prompt(p.feats, p.st.flow_cache) for p in pre]
         flow = self.flow
         est = flow.decoder.estimator
         steps, depth = self.t2w.n_timesteps, len(est.blocks)
