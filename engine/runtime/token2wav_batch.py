@@ -153,7 +153,7 @@ class BatchedToken2Wav:
                  fast_dit: bool = False, fast_slots: int = 49152, max_streams: int = 96, hift_decode_tf32: bool = False,
                  batch_setup_encoder: bool = False, hift_rows: tuple | None = None, merge_solve: bool = False, fuse_setup_frames: int = 0,
                  hift_lean: bool = False, dit_fused_residual: bool = False, dit_fused_conv: bool = False,
-                 hift_fused_bias: bool = False):
+                 hift_fused_bias: bool = False, encoder_batched_io: bool = False):
         """``fast_dit``: the estimator solve of ``engine.runtime.dit_fast`` (slot-pool caches, packed ragged rows, CUDA
         graphs with ``use_graphs``) in place of the reference-module solve; FP16 flow only.  Streams must then be made with
         ``new_stream`` and released with ``release_stream``.  ``hift_decode_tf32``: HiFT's upsampling stages
@@ -169,7 +169,8 @@ class BatchedToken2Wav:
         biases, residuals and activations fused (``make_lean(fused_bias=True)``, the same ResBlock outputs bit for bit).
         ``dit_fused_residual`` (fast DiT): its gated residual adds fused with the norms after them
         (``FastDiT(fused_residual=True)``); ``dit_fused_conv``: and the convolutions' im2col written by the norms before
-        them (``FastDiT(fused_conv=True)``)."""
+        them (``FastDiT(fused_conv=True)``).  ``encoder_batched_io``: the flow encoder's caches gathered and written back for
+        all of a call's streams in one kernel each (``engine.runtime.encoder_io``, the same caches bit for bit)."""
         self.t2w, self.flow, self.hift = t2w, t2w.flow, t2w.hift
         if hift_lean:
             from engine.runtime.hift_lean import make_lean
@@ -177,6 +178,7 @@ class BatchedToken2Wav:
             make_lean(self.hift, fused_bias=hift_fused_bias)
         assert hift_lean or not hift_fused_bias, "hift_fused_bias is a hift_lean option"
         self.batch_setup_encoder = batch_setup_encoder
+        self.encoder_batched_io = encoder_batched_io
         self.hift_rows = tuple(hift_rows) if hift_rows else None
         self.fast = None
         if fast_dit:
@@ -413,12 +415,17 @@ class BatchedToken2Wav:
         T1 = xs.shape[1] if last else xs.shape[1] - enc.pre_lookahead_layer.pre_lookahead_len
         T2, L2 = T1 * s, L1 * s
         nh, dk2 = atts[0].shape[2], atts[0].shape[4]
+        if valid is not None and vl is None:
+            vl = valid.tolist()
+        if self.encoder_batched_io:
+            A1, A2, mask1, mask2 = self._encoder_in(atts, off1, n, L1, T1, s, vl, xs.shape[1], graphs)
+            core = graphs if graphs is not None else (lambda *a: _encoder_core(enc, *a))
+            xs, new1, new2, new_cnn = core(xs, cnns, A1, mask1, A2, mask2, last, valid)
+            return self._encoder_out(sts, xs, new1, new2, new_cnn, off1, T1, L1, graphs is not None)
         A1 = atts[0].new_zeros((d1, n, nh, L1, dk2))
         A2 = atts[0].new_zeros((d2, n, nh, L2, dk2))
         mask1 = torch.ones(n, T1, L1 + T1, dtype=torch.bool, device=dev)
         mask2 = torch.ones(n, T2, L2 + T2, dtype=torch.bool, device=dev)
-        if valid is not None and vl is None:
-            vl = valid.tolist()
         for i, a in enumerate(atts):
             A1[:, i, :, L1 - off1[i]:] = a[:d1, 0, :, :off1[i]]
             mask1[i, :, :L1 - off1[i]] = False
@@ -435,6 +442,40 @@ class BatchedToken2Wav:
             st.flow_cache["conformer_att_cache"] = torch.cat([c1.repeat(1, 1, 1, 2, 1), c2], dim=0)
             st.flow_cache["conformer_cnn_cache"] = new_cnn[i:i + 1].clone()
         return xs.clone() if graphs is not None else xs
+
+    def _encoder_in(self, atts, off1, n, L1, T1, s, vl, tok, graphs):
+        """``encoder_batched_io``: the padded caches in one gather (into the graph's input arena when it is captured) and
+        the key masks from the rows' cache lengths (and merged finals' token counts) in a few vector ops."""
+        from engine.runtime.encoder_io import gather_caches
+
+        d1, d2 = len(self.flow.encoder.encoders), len(self.flow.encoder.up_encoders)
+        nh, dk2, dev = atts[0].shape[2], atts[0].shape[4], atts[0].device
+        arena = graphs.arena_inputs(n, L1, tok) if graphs is not None else None
+        if arena is None:
+            A1f, A2f = (torch.empty((d, n, nh, L, dk2), dtype=atts[0].dtype, device=dev) for d, L in ((d1, L1), (d2, L1 * s)))
+        else:
+            A1f, A2f = arena
+        gather_caches(atts, off1, A1f, A2f)
+        lo = L1 - to_device(off1, torch.int64, dev)
+        k1, k2 = torch.arange(L1 + T1, device=dev)[None, None, :], torch.arange((L1 + T1) * s, device=dev)[None, None, :]
+        mask1, mask2 = k1 >= lo[:, None, None], k2 >= s * lo[:, None, None]
+        if vl is not None:  # merged final windows: frames after their tokens are padding (rows with all tokens are unaffected)
+            hi = L1 + to_device(vl, torch.int64, dev)
+            mask1, mask2 = mask1 & (k1 < hi[:, None, None]), mask2 & (k2 < s * hi[:, None, None])
+        mask1, mask2 = mask1.expand(n, T1, -1).contiguous(), mask2.expand(n, T1 * s, -1).contiguous()
+        return A1f[:, :n], A2f[:, :n], mask1, mask2
+
+    def _encoder_out(self, sts, xs, new1, new2, new_cnn, off1, T1, L1, graphed: bool) -> torch.Tensor:
+        """``encoder_batched_io``: every stream's new attention cache in one kernel, already trimmed as ``_flow_finish``
+        trims it, and the conv caches as views of one copy."""
+        from engine.runtime.encoder_io import scatter_caches
+
+        atts = scatter_caches(new1, new2, off1, [st.prompt.mels.shape[1] for st in sts], T1, L1, TRIM_SUFFIX)
+        cnn = new_cnn.clone() if graphed else new_cnn
+        for i, st in enumerate(sts):
+            st.flow_cache["conformer_att_cache"] = atts[i]
+            st.flow_cache["conformer_cnn_cache"] = cnn[i:i + 1]
+        return xs.clone() if graphed else xs
 
     @torch.inference_mode()
     def setup(self, feats: tuple):

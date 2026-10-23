@@ -655,7 +655,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                           batch_setup_encoder=cfg.get("t2w_batch_setup_encoder", False), hift_rows=cfg.get("t2w_hift_rows"),
                           merge_solve=cfg.get("t2w_merge_solve", False), fuse_setup_frames=cfg.get("t2w_fuse_setup_frames", 0),
                           hift_lean=cfg.get("t2w_hift_lean", False), dit_fused_residual=cfg.get("t2w_dit_fused_residual", False),
-                          dit_fused_conv=cfg.get("t2w_dit_fused_conv", False), hift_fused_bias=cfg.get("t2w_hift_fused_bias", False))
+                          dit_fused_conv=cfg.get("t2w_dit_fused_conv", False), hift_fused_bias=cfg.get("t2w_hift_fused_bias", False),
+                          encoder_batched_io=cfg.get("t2w_encoder_batched_io", False))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             p0 = bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav"))

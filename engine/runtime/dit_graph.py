@@ -310,6 +310,15 @@ class EncoderGraphs:
                  torch.ones(rows, T1 * self.s, (L1 + T1) * self.s, dtype=torch.bool, device=self.device), False)
         return len(self.graphs)
 
+    def arena_inputs(self, n: int, L1: int, tok: int):
+        """The captured graph's ``A1`` / ``A2`` input buffers for a call of ``n`` rows (all bucket rows), or None before
+        its capture: a caller that writes the caches there passes their ``[:, :n]`` views, which are not copied again."""
+        key = (bucket(n, self.ROWS), L1, tok)
+        if key not in self.graphs:
+            return None
+        st = self.graphs[key][1]
+        return st["A1"], st["A2"]
+
     @torch.inference_mode()
     def __call__(self, xs, cnns, A1, mask1, A2, mask2, last, valid=None):
         n, L1, tok = xs.shape[0], A1.shape[3], xs.shape[1]
@@ -325,8 +334,10 @@ class EncoderGraphs:
         g, st, out = self.graphs[(rows, L1, tok)]
         st["xs"][:n].copy_(xs)
         st["cnn"][:n].copy_(cnns)
-        st["A1"][:, :n].copy_(A1)
-        st["A2"][:, :n].copy_(A2)
+        if A1.data_ptr() != st["A1"].data_ptr():  # not written in place (arena_inputs)
+            st["A1"][:, :n].copy_(A1)
+        if A2.data_ptr() != st["A2"].data_ptr():
+            st["A2"][:, :n].copy_(A2)
         st["m1"][:n].copy_(mask1)
         st["m2"][:n].copy_(mask2)
         if valid is not None:

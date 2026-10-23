@@ -141,7 +141,7 @@ class TrackSBackend:
                  t2w_dit_fused_residual: bool = False, thinker_chunk_prefill_graphs: bool = False,
                  prefill_hf_kernels: bool = False, t2w_dit_fused_conv: bool = False, t2w_hift_fused_bias: bool = False,
                  t2w_setup_prefetch: bool = False, prefill_rope_hf: bool = False, mps_client_priority: int | None = None,
-                 t2w_mps_client_priority: int | None = None):
+                 t2w_mps_client_priority: int | None = None, t2w_encoder_batched_io: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -279,7 +279,7 @@ class TrackSBackend:
                                           "t2w_hold_max_ms": t2w_hold_max_ms, "t2w_hold_rows": t2w_hold_rows,
                                           "t2w_hold_setups": t2w_hold_setups, "t2w_hift_lean": t2w_hift_lean,
                                           "t2w_dit_fused_residual": t2w_dit_fused_residual, "t2w_dit_fused_conv": t2w_dit_fused_conv,
-                                          "t2w_hift_fused_bias": t2w_hift_fused_bias, "t2w_setup_prefetch": t2w_setup_prefetch,
+                                          "t2w_hift_fused_bias": t2w_hift_fused_bias, "t2w_setup_prefetch": t2w_setup_prefetch, "t2w_encoder_batched_io": t2w_encoder_batched_io,
                                           # the worker inherits the engine's environment: normal priority unless set
                                           "mps_client_priority": t2w_mps_client_priority if t2w_mps_client_priority is not None
                                           else (0 if mps_client_priority is not None else None)}, self._on_t2w)

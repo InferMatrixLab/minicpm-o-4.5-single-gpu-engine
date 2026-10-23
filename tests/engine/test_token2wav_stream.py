@@ -561,6 +561,45 @@ def test_prefetched_setups_equal_raw_ones():
     assert all(torch.equal(x, y) for x, y in zip(*mels))
 
 
+@pytest.mark.parametrize("graphs", [False, True])
+@torch.inference_mode()
+def test_encoder_batched_io_is_bitwise(graphs):
+    """``encoder_batched_io``: the flow encoder's caches gathered and written back in one kernel each give the same mels
+    and the same conformer caches bit for bit (ramped first, steady windows past the trim point, merged finals)."""
+    from engine.models.token2wav import Token2Wav
+    from engine.runtime.token2wav_batch import BatchedToken2Wav
+    from engine.token2wav_chunker import StreamChunker
+
+    ours = Token2Wav(MODEL / "assets" / "token2wav", float16=True, noise_seed=7)
+    feats = [ours.features(r) for r in (REF_WAV, MODEL / "assets" / "system_ref_audio.wav", MODEL / "assets" / "bajie.wav")] * 2
+    gen = np.random.default_rng(13)
+    plans = []
+    for n in (160, 95, 70, 140, 60, 121):
+        ch = StreamChunker(first_chunk=8)
+        plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
+    mels, caches = [], []
+    for io in (False, True):
+        bt = BatchedToken2Wav(ours, use_graphs=graphs, fast_dit=True, fast_slots=32768, merge_solve=True, fuse_setup_frames=2048,
+                              dit_fused_residual=True, encoder_batched_io=io)
+        rec, vocode = [], bt._vocode
+        bt._vocode = lambda items, ms, *rest, vocode=vocode, rec=rec: (rec.extend(m.float().cpu() for m in ms) or vocode(items, ms, *rest))
+        sts = [bt.new_stream(p, noise_seed=j, adopt=True) for j, p in enumerate(bt.setup_many(feats))]
+        snap = []
+        for tick in range(max(len(p) for p in plans)):
+            items = [(sts[j], *plans[j][tick]) for j in range(len(sts)) if tick < len(plans[j])]
+            bt.decode(items)
+            snap.append([(st.flow_cache["conformer_att_cache"].clone(), st.flow_cache["conformer_cnn_cache"].clone()) for st, _, last in items if not last])
+        mels.append(rec)
+        caches.append(snap)
+        for st in sts:
+            bt.release_stream(st)
+    assert len(mels[0]) == len(mels[1]) == sum(len(p) for p in plans)
+    assert all(torch.equal(x, y) for x, y in zip(*mels))
+    assert max(a.shape[3] for snap in caches[0] for a, _ in snap) > min(a.shape[3] for a, _ in caches[0][0])  # caches grew
+    for s0, s1 in zip(*caches):
+        assert all(torch.equal(a0, a1) and torch.equal(c0, c1) for (a0, c0), (a1, c1) in zip(s0, s1))
+
+
 def test_split_prompt_features_equal_reference():
     """The feature path of the worker, split into a CPU front end (feature processes, no CUDA) and the GPU S3 tokens in
     the worker (``prompt_front_end`` + ``finish_prompt``), returns exactly the reference ``Token2wav._prepare_prompt``
