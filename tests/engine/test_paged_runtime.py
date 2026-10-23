@@ -118,3 +118,24 @@ def test_prefill_hf_kernels_match_torch_ops(which):
           + (f", greedy {agree[0]}/{agree[2]}" if agree[2] else "") + f"; control (one row at a time): hidden {control:.2e}, K {kv_control:.2e}"
           + (f", greedy {agree[1]}/{agree[2]}" if agree[2] else ""))
     assert worst <= 2 * control and kv_worst <= 2 * kv_control
+
+
+@torch.inference_mode()
+def test_talker_prefill_rope_kernel_is_bitwise():
+    """``prefill_rope_hf``: the Talker's prefill with RoPE + v copy in one kernel equals the hf-kernel prefill with the
+    torch RoPE bit for bit (hidden states and every layer's K/V), fresh and continued rows."""
+    from engine.models.talker import Talker
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+
+    ref = Talker.load(MODEL, device="cuda", dtype=torch.bfloat16)
+    c = ref.cfg
+    spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, False)
+    kvs = [PagedKV(spec, num_pages=192, page_size=64) for _ in range(2)]
+    runs = [DecoderRunner(ref.w, spec, kvs[0], hf_kernels=True), DecoderRunner(ref.w, spec, kvs[1], hf_kernels=True, rope_kernel=True)]
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    for seqs, ns in (([0, 1, 2], [37, 300, 5]), ([3], [700]), ([0, 2], [64, 129]), ([1, 3, 4], [1, 90, 17])):
+        x = ref.code_embed(torch.randint(0, 6561, (sum(ns),), device="cuda", generator=gen))
+        a, b = (r.forward(x, kv.layout(seqs, ns)) for r, kv in zip(runs, kvs))
+        assert torch.equal(a, b), (seqs, ns)
+    for i in range(len(kvs[0].k)):
+        assert torch.equal(kvs[0].k[i], kvs[1].k[i]) and torch.equal(kvs[0].v[i], kvs[1].v[i]), i

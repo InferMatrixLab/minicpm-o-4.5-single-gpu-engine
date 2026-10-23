@@ -176,16 +176,19 @@ def hf_rope(q: torch.Tensor, k: torch.Tensor, positions: torch.Tensor, theta: fl
 
 class DecoderRunner:
     def __init__(self, weights: dict[str, torch.Tensor], spec: DecoderSpec, kv: PagedKV, workspace_mb: int = 256, numerics: str = "hf",
-                 layers: list[dict] | None = None, hf_kernels: bool = False):
+                 layers: list[dict] | None = None, hf_kernels: bool = False, rope_kernel: bool = False):
         """``numerics="hf"`` rounds norms and RoPE as the reference does; ``"fused"`` uses FlashInfer's fused kernels.
         ``layers``: prebuilt fused (optionally FP8, ``engine.runtime.fp8``) layer weights shared with other runners.
         ``hf_kernels`` (``prefill_hf_kernels``, ``"hf"`` numerics, bf16): the reference-rounding Triton kernels of
         ``engine.runtime.kernels`` that the fused Thinker decode runs (residual add + norm, q/k norm + RoPE + v copy,
-        SiLU-and-multiply) in place of the torch elementwise ops; the same roundings, a norm's fp32 sum order aside."""
+        SiLU-and-multiply) in place of the torch elementwise ops; the same roundings, a norm's fp32 sum order aside.
+        ``rope_kernel`` (``prefill_rope_hf``, with ``hf_kernels``): models without q/k norms (the Talker) also take RoPE + v
+        copy in one kernel (``kernels.rope_hf``, the torch ops bit for bit)."""
         import flashinfer
 
         self.numerics = numerics
         self.hf_kernels = hf_kernels and numerics == "hf" and kv.k.dtype == torch.bfloat16
+        self.rope_kernel = rope_kernel
         self.spec, self.kv = spec, kv
         self.layers = layers if layers is not None else fuse_weights(weights, spec)
         self.final_norm = weights[f"{spec.prefix}norm.weight"]
@@ -238,9 +241,10 @@ class DecoderRunner:
         return norm(x, self.final_norm)
 
     def _body_hf_kernels(self, x, positions, batch_indices, kv_indices, kv_indptr, kv_last_page_len, wrapper) -> torch.Tensor:
-        """``body`` with each residual add fused into the next norm, q/k norm + RoPE + v copy in one kernel (q/k-norm
-        models; otherwise the torch RoPE) and SiLU-and-multiply in one kernel, as ``ThinkerDecoder._step_fused``."""
-        from engine.runtime.kernels import add_rms_norm_hf, qk_norm_rope_hf, rms_norm_hf, silu_mul_hf
+        """``body`` with each residual add fused into the next norm, q/k norm + RoPE + v copy in one kernel (models without
+        q/k norms: RoPE + v copy in one kernel with ``rope_kernel``, else the torch RoPE) and SiLU-and-multiply in one
+        kernel, as ``ThinkerDecoder._step_fused``."""
+        from engine.runtime.kernels import add_rms_norm_hf, qk_norm_rope_hf, rms_norm_hf, rope_hf, silu_mul_hf
 
         s, fi = self.spec, self._fi
         nq, nk = s.num_heads * s.head_dim, s.num_kv_heads * s.head_dim
@@ -251,6 +255,8 @@ class DecoderRunner:
             qkv = linear(h, L["qkv"])
             if s.qk_norm:
                 q, k, v = qk_norm_rope_hf(qkv, L["q_norm"], L["k_norm"], cos, sin, s.num_heads, s.num_kv_heads, s.head_dim, s.rms_eps)
+            elif self.rope_kernel:
+                q, k, v = rope_hf(qkv, cos, sin, s.num_heads, s.num_kv_heads, s.head_dim)
             else:
                 q, k = hf_rope(qkv[:, :nq].reshape(-1, s.num_heads, s.head_dim).contiguous(),
                                qkv[:, nq:nq + nk].reshape(-1, s.num_kv_heads, s.head_dim).contiguous(), positions, s.rope_theta, tables)

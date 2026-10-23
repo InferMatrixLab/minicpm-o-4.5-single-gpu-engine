@@ -140,7 +140,7 @@ class TrackSBackend:
                  t2w_hold_rows: int = 16, t2w_hold_setups: bool = False, t2w_hift_lean: bool = False,
                  t2w_dit_fused_residual: bool = False, thinker_chunk_prefill_graphs: bool = False,
                  prefill_hf_kernels: bool = False, t2w_dit_fused_conv: bool = False, t2w_hift_fused_bias: bool = False,
-                 t2w_setup_prefetch: bool = False):
+                 t2w_setup_prefetch: bool = False, prefill_rope_hf: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -215,7 +215,7 @@ class TrackSBackend:
         torch.cuda.empty_cache()
         # prefill_hf_kernels: the prefill layer stacks (eager and graphs) run the fused reference-rounding kernels
         self.trun = DecoderRunner(self.thinker.w, self.tspec, self.tkv, layers=tlayers, hf_kernels=prefill_hf_kernels)
-        self.arun = DecoderRunner(self.talker.w, self.aspec, self.akv, hf_kernels=prefill_hf_kernels)
+        self.arun = DecoderRunner(self.talker.w, self.aspec, self.akv, hf_kernels=prefill_hf_kernels, rope_kernel=prefill_rope_hf)
         # Track S sampling: the canonical warpers, no minimum length, no global maximum (HF streaming path)
         self.cfg = TalkerSampling(min_new_tokens=0, max_new_tokens=1 << 30)
         # the served context (prompt plus reply) of one Thinker sequence: Daily-Omni's interleaved frames and audio reach ~13k
