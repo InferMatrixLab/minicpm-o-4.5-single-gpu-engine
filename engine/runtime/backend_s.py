@@ -141,7 +141,8 @@ class TrackSBackend:
                  t2w_dit_fused_residual: bool = False, thinker_chunk_prefill_graphs: bool = False,
                  prefill_hf_kernels: bool = False, t2w_dit_fused_conv: bool = False, t2w_hift_fused_bias: bool = False,
                  t2w_setup_prefetch: bool = False, prefill_rope_hf: bool = False, mps_client_priority: int | None = None,
-                 t2w_mps_client_priority: int | None = None, t2w_encoder_batched_io: bool = False):
+                 t2w_mps_client_priority: int | None = None, t2w_encoder_batched_io: bool = False, talker_stream_priority: int = 0,
+                 thinker_stream_priority: int = 0):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -331,7 +332,10 @@ class TrackSBackend:
         # ticks' smaller Talker batches cost it GPU time (round 15: -3% throughput at C=32, +2-7% at C<=16)
         self.tick_overlap_max_live = tick_overlap_max_live
         if tick_overlap:
-            self.thinker_stream, self.talker_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
+            # CUDA stream priorities (0 lowest, torch.cuda.Stream.priority_range() gives the highest): the overlapped
+            # Thinker and Talker steps contend for the SMs; graph replays take the priority of the stream they launch on
+            self.thinker_stream = torch.cuda.Stream(device=device, priority=thinker_stream_priority)
+            self.talker_stream = torch.cuda.Stream(device=device, priority=talker_stream_priority)
         if split_threads:  # Thinker and Talker loops on their own threads and CUDA streams (graph replays overlap)
             self.talker_wake = threading.Event()
             self.thinker_stream, self.talker_stream = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
