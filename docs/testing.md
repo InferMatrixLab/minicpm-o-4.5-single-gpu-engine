@@ -12,6 +12,24 @@ idle GPU). Commands are in [reproduce-benchmark.md](reproduce-benchmark.md#tests
 Skips: tests that need the vLLM-Omni environment, generated reference artifacts (`results/...`) or specs recorded in
 the same checkout skip when those are absent.
 
+## Round 18 targeted runs (2026-10-22/23, branch `r18`)
+
+The full suites were not rerun for round 18. The tests added or changed in the round, run on one GPU
+(`ENGINE_GPU_TESTS=1`) or on the CPU:
+
+| Tests | Result |
+|---|---|
+| `test_dit_fast.py` (solve against the reference, fused conv kernels at C 512 / 1024, q/k norm kernel at 8 / 16 heads) | passed |
+| `test_token2wav_stream.py`: fused residuals and fused conv bitwise (eager, graphs), prefetched setups equal raw ones, batched encoder cache IO bitwise (eager, graphs) | passed |
+| `test_hift_lean.py` (incl. fused-bias ResBlocks), `test_hift_tf32.py` | 7 passed, 1 expected failure (B24 control) |
+| `test_paged_runtime.py::test_prefill_hf_kernels_match_torch_ops`, `::test_talker_prefill_rope_kernel_is_bitwise`, `test_kernels.py -k rope` | passed |
+| `test_thinker_gpu_parity.py` (AC-3.1, torch ops and `prefill_hf_kernels`), `test_thinker_decode.py` and `test_talker_prefill_graph.py` with `hf_kernels` | passed |
+| `test_talker_decode.py::test_decode_state_holds_a_live_rows_last_code` (eager, frame graphs, whole-K, lean) | 4 passed |
+| CPU: `tests/engine_api/test_engine_tick.py` (incl. lean Talker codes), `test_t2w_worker_loop.py` and `test_t2w_async_results.py` (incl. setup prefetch) | 16 and 30 passed |
+
+`test_paged_runtime.py::test_ragged_batch_matches_reference[thinker]` still fails as listed below (min cosine 0.9987,
+also on the round-17 code).
+
 ## GPU failures
 
 All five are numerical bounds that the engine misses by a small margin and that are recorded as open items; none is

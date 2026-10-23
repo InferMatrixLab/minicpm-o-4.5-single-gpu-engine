@@ -6,6 +6,15 @@ they need the whole pipeline to do twice the audio per second, and at C=32 the e
 This page records where the time goes and which levers remain. The measurements are from `tools/engine_profile.py`
 (stage spans, CUPTI kernel windows in every GPU process, NVML GPM counters) on `track_s_fast_r11`.
 
+**Round 18 update** (paired spans-only windows; [engine.md](engine.md) round 18). Levers 1, 3 and 4 below were built:
+the overlapped tick now runs at any load, multi-row Thinker prefills replay graphs, every prefill uses the fused
+HF-rounding kernels, and the worker's DiT, HiFT and setups do less GPU and host work. C=32 went from 2613 (r18f) to
+about 3640–3710 frames/s (`track_s_fast_r18c1`, not yet accepted). With the worker lighter, C=32 follows the engine
+tick (~24 ms, 4 Talker frames a row): worker-only savings measured neutral, while giving the engine's kernels MPS
+priority over the worker's and removing per-frame host work in the Talker each gained ~4%. The device still has a
+kernel running only 85% of the time at 65% SM utilization and 21% occupancy; a Talker chunk prefill takes ~7.9 ms of
+the tick for ~2 ms of kernels.
+
 ## What the GPU is doing
 
 Unperturbed (spans-only control, untraced throughput 2490 frames/s at C=32):

@@ -1,6 +1,6 @@
 # Optimization log
 
-Chronological record of the engine's development, 2026-10-14 to 2026-10-21, on L20X GPUs. "Envelope" is the best
+Chronological record of the engine's development, 2026-10-14 to 2026-10-23, on L20X GPUs. "Envelope" is the best
 baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% lower bound reaches 2.0 (24 cells:
 6 concurrencies × 4 metrics). Full measurements: [engine.md](engine.md).
 
@@ -23,6 +23,8 @@ baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% 
 | 14 | Whole-K Talker capture (one graph per K-frame block); matched HiFT comparison | Neutral; not adopted. Found that TF32 HiFT with the batched setup encoder exceeds the HiFT bound on 1 of 190 chunks | 10 |
 | 15 | Overlapped engine tick: the Thinker step on its own stream beside the Talker step; first-chunk ticks and ticks above 16 live requests serial (`track_s_fast_r15d`); per-lane graph capture streams | Throughput +1.6 to +7.3% at C=1–16, C=32 unchanged; C=2 TTFA p50 −7%. First speech-quality scoring of `track_s_fast_r11`: UTMOS 0.001–0.003 below the floor (r15 unchanged at C=1) | 11 |
 | 16 | B24 repair (stage 0's HiFT transposed convolution back in FP32); UTMOS attribution; three-seed speech quality (`track_s_fast_r16`) | Performance unchanged (throughput +0.5 to +8.0% vs r11c at C=1–16, C=32 −0.7%); absolute floors pass at C=1 and C=32 over three seeds; comparative UTMOS gate fails (4.17 vs 4.30 non-streaming reference) | 11 |
+| 17 | 32k served context; merged DiT solve; linear resampling of understanding audio (MMSU 0.5200 vs SGLang 0.5192) | `track_s_fast_r17` (measured with an FP16-autocast HiFT defect, fixed in round 18) | — |
+| 18 | Fused setups, lean Talker frame, lean HiFT, fused DiT residuals (r18f); multi-row Thinker prefill graphs; overlap at any load; HF-rounding prefill kernels (r18i); bitwise DiT kernels (r18j); Talker prefill RoPE kernel and HiFT rows (r18n); worker below normal MPS priority, lean Talker codes, batched encoder cache IO (`track_s_fast_r18c1`) | Paired windows at C=32: r18f 2613 → r18i 3267 → r18c1 ~3640–3710 frames/s; r18f vs r16 C=8/16 +17 to +23%; TTFA p50 C=32 ~0.42 s. Not yet accepted | — |
 
 ## Lessons recorded on the way
 
@@ -49,3 +51,11 @@ baseline cell per concurrency and metric; "pass" is a ratio whose one-sided 95% 
   score pass. Attribute by ablation at C=1, where the output is deterministic, before changing precision.
 - **Declare the frozen references in the sweep spec before running a gate candidate.** The comparative gate accepts only
   cells whose experiment names the frozen Q_ref (`frozen_refs.speech_qref`).
+- **At C=32 the engine tick is the throughput.** The benchmark is closed-loop, so throughput follows a request's
+  duration, which the tick sets. After the worker got lighter, worker-only speedups measured neutral (the work-conserving
+  worker turns saved time into more, smaller calls), while letting the engine's kernels go first under MPS and removing
+  engine host work each gained ~4%. An option rejected under one bottleneck (the Talker prefill's RoPE kernel, −1 to
+  −3% while the worker bounded C=32) can help under the next (+2%).
+- **Concurrent paired-window scripts need distinct ports.** `serve_engine.sh` keys its MPS directory on the port, so two
+  scripts on the same ports removed each other's MPS daemons; one window then ran without MPS at ~2300 instead of ~3350
+  frames/s and still exited cleanly. Check the GPU inventory for the MPS server before using a window.

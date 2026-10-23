@@ -180,6 +180,14 @@ and reported but do not decide: their UTMOS reference (4.298) comes from SGLang-
 
 Test-suite results, the end-to-end smoke of this repository and the robustness acceptance are in [testing.md](testing.md).
 
+## Development candidate (not part of this snapshot)
+
+Round 18 (2026-10-22/23) produced `track_s_fast_r18c1`. In time-paired spans-only windows on this host it delivers
+about 3640–3710 frames/s at C=32 with TTFA p50 ~0.42 s (r18n in the same windows: ~3400–3455), and at C=16 about
+2490–2520 frames/s with TTFA p50 ~0.30 s. These are not the K=5 evaluation cells above, and r18c1 has not yet passed
+speech quality, robustness or the multimodal suites, so `track_s_fast_r16` remains the current profile. Details:
+[engine.md](engine.md) (round 18) and [optimizations.md](optimizations.md).
+
 ## Evidence
 
 - `evidence/20261021-l20x/<candidate>_c<C>/`: the six `track_s_fast_r16` cells: each cell's `experiment.json` (the
