@@ -867,17 +867,22 @@ class Token2WavProcess:
         import os
 
         pct = cfg.get("mps_sm_percent")  # under MPS: cap the worker's SM share so the Thinker / Talker kernels are not queued
-        old = os.environ.get("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE")
-        if pct:
-            os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(int(pct))  # the spawned worker inherits the environment
+        prio = cfg.get("mps_client_priority")  # under MPS: the worker's kernels at normal (0) or below-normal (1) priority
+        env = {"CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": str(int(pct)) if pct else None,
+               "CUDA_MPS_CLIENT_PRIORITY": str(int(prio)) if prio is not None else None}
+        old = {k: os.environ.get(k) for k in env}
+        for k, v in env.items():
+            if v is not None:
+                os.environ[k] = v  # the spawned worker inherits the environment
         try:
             self.proc.start()
         finally:
-            if pct:
-                if old is None:
-                    os.environ.pop("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", None)
-                else:
-                    os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = old
+            for k, v in env.items():
+                if v is not None:
+                    if old[k] is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = old[k]
         import atexit
 
         atexit.register(self.close)
