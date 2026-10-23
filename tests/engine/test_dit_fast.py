@@ -97,14 +97,15 @@ def test_fast_solve_matches_reference(graphs):
     assert fd.counts["graph" if graphs else "eager"] >= 7, fd.counts
 
 
+@pytest.mark.parametrize("C", [512, 1024])
 @torch.inference_mode()
-def test_fused_conv_kernels_equal_gather():
+def test_fused_conv_kernels_equal_gather(C):
     """``add_ln_mod_conv`` / ``ln_mish_conv`` give ``add_ln_mod`` / ``ln_mish`` + ``conv_gather`` bit for bit (im2col, new
     caches, residual) on ragged rows of 0, 1, 2 and more tokens with strided cache views."""
     from engine.runtime.dit_kernels import add_ln_mod, add_ln_mod_conv, conv_gather, ln_mish, ln_mish_conv
 
     gen = torch.Generator(device="cuda").manual_seed(3)
-    C, dt = 1024, torch.float16
+    dt = torch.float16
     lens = [5, 0, 1, 2, 3, 40, 0, 17, 1, 56]
     R, N = len(lens), sum(lens)
     starts = [sum(lens[:i]) for i in range(R)]
@@ -127,14 +128,15 @@ def test_fused_conv_kernels_equal_gather():
     assert torch.equal(im, ref_im) and torch.equal(new, ref_new)
 
 
+@pytest.mark.parametrize("NH", [8, 16])
 @torch.inference_mode()
-def test_qk_norm_scatter_equals_per_head_kernel():
+def test_qk_norm_scatter_equals_per_head_kernel(NH):
     """The one-program-per-token q/k norm (all heads, the per-head kernel's reduction order) equals the per-head kernel
     bit for bit: q, the scattered keys and values, on activations of very different scales."""
     from engine.runtime.dit_kernels import qk_norm_scatter
 
     gen = torch.Generator(device="cuda").manual_seed(5)
-    NH, D, dt = 16, 64, torch.float16
+    D, dt = 64, torch.float16
     for N, scale in ((1, 1.0), (333, 0.01), (1792, 3.0), (4100, 40.0)):
         qkv = (torch.randn(N, 3 * NH * D, device="cuda", generator=gen) * scale
                + torch.randn(3 * NH * D, device="cuda", generator=gen)).to(dt)
@@ -147,4 +149,4 @@ def test_qk_norm_scatter_equals_per_head_kernel():
             kc, vc = torch.zeros(8192, 1, NH, D, dtype=dt, device="cuda"), torch.zeros(8192, 1, NH, D, dtype=dt, device="cuda")
             qk_norm_scatter(qkv, qn, kn, q, kc, vc, slots, NH, D, per_head=per_head)
             outs.append((q, kc, vc))
-        assert all(torch.equal(a, b) for a, b in zip(*outs)), (N, scale)
+        assert all(torch.equal(a, b) for a, b in zip(*outs)), (NH, N, scale)
