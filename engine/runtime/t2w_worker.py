@@ -610,7 +610,8 @@ def _worker_main(inq, outq, cfg: dict) -> None:
                           fast_slots=cfg.get("t2w_fast_slots", 49152), hift_decode_tf32=cfg.get("t2w_hift_decode_tf32", False),
                           batch_setup_encoder=cfg.get("t2w_batch_setup_encoder", False), hift_rows=cfg.get("t2w_hift_rows"),
                           merge_solve=cfg.get("t2w_merge_solve", False), fuse_setup_frames=cfg.get("t2w_fuse_setup_frames", 0),
-                          hift_lean=cfg.get("t2w_hift_lean", False), dit_fused_residual=cfg.get("t2w_dit_fused_residual", False))
+                          hift_lean=cfg.get("t2w_hift_lean", False), dit_fused_residual=cfg.get("t2w_dit_fused_residual", False),
+                          dit_fused_conv=cfg.get("t2w_dit_fused_conv", False))
     if cfg.get("t2w_graphs"):
         with torch.inference_mode():
             p0 = bt.setup(t2w.features(f"{model_dir}/assets/HT_ref_audio.wav"))

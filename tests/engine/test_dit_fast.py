@@ -95,3 +95,56 @@ def test_fast_solve_matches_reference(graphs):
         fd.release(c)
     assert fd.pool.in_use() == fd.scratch and used > fd.scratch
     assert fd.counts["graph" if graphs else "eager"] >= 7, fd.counts
+
+
+@torch.inference_mode()
+def test_fused_conv_kernels_equal_gather():
+    """``add_ln_mod_conv`` / ``ln_mish_conv`` give ``add_ln_mod`` / ``ln_mish`` + ``conv_gather`` bit for bit (im2col, new
+    caches, residual) on ragged rows of 0, 1, 2 and more tokens with strided cache views."""
+    from engine.runtime.dit_kernels import add_ln_mod, add_ln_mod_conv, conv_gather, ln_mish, ln_mish_conv
+
+    gen = torch.Generator(device="cuda").manual_seed(3)
+    C, dt = 1024, torch.float16
+    lens = [5, 0, 1, 2, 3, 40, 0, 17, 1, 56]
+    R, N = len(lens), sum(lens)
+    starts = [sum(lens[:i]) for i in range(R)]
+    meta = {"tok_row": torch.tensor([r for r, t in enumerate(lens) for _ in range(t)], dtype=torch.int32, device="cuda"),
+            "tok_pos": torch.tensor([p for t in lens for p in range(t)], dtype=torch.int32, device="cuda"),
+            "row_start": torch.tensor(starts, dtype=torch.int32, device="cuda"), "row_len": torch.tensor(lens, dtype=torch.int32, device="cuda")}
+    rn = lambda *s: torch.randn(*s, device="cuda", generator=gen).to(dt)  # noqa: E731
+    pool = rn(R, 2, 2, C)  # [row, conv, frame, C]: the solve's cache views have a row stride of 4 C
+    h, y, g, sh, sc = rn(N, C), rn(N, C), rn(C), rn(C), 1 + rn(C)
+    ln = (1 + rn(C), rn(C), 1e-5)
+    hr, a = add_ln_mod(h, g, y, sh, sc, 1e-6)
+    ref_im, ref_new = torch.full((N, 3 * C), 7.0, dtype=dt, device="cuda"), torch.full((R, 2, 2, C), 7.0, dtype=dt, device="cuda")
+    conv_gather(a, pool[:, 0], ref_new[:, 0], meta, ref_im)
+    im, new = torch.full_like(ref_im, -3.0), torch.full_like(ref_new, -3.0)
+    hf = add_ln_mod_conv(h, g, y, sh, sc, 1e-6, pool[:, 0], new[:, 0], meta, im)
+    assert torch.equal(hf, hr) and torch.equal(im, ref_im) and torch.equal(new[:, 0], ref_new[:, 0])
+    x = rn(N, C)
+    conv_gather(ln_mish(x, ln), pool[:, 1], ref_new[:, 1], meta, ref_im)
+    ln_mish_conv(x, ln, pool[:, 1], new[:, 1], meta, im)
+    assert torch.equal(im, ref_im) and torch.equal(new, ref_new)
+
+
+@torch.inference_mode()
+def test_qk_norm_scatter_equals_per_head_kernel():
+    """The one-program-per-token q/k norm (all heads, the per-head kernel's reduction order) equals the per-head kernel
+    bit for bit: q, the scattered keys and values, on activations of very different scales."""
+    from engine.runtime.dit_kernels import qk_norm_scatter
+
+    gen = torch.Generator(device="cuda").manual_seed(5)
+    NH, D, dt = 16, 64, torch.float16
+    for N, scale in ((1, 1.0), (333, 0.01), (1792, 3.0), (4100, 40.0)):
+        qkv = (torch.randn(N, 3 * NH * D, device="cuda", generator=gen) * scale
+               + torch.randn(3 * NH * D, device="cuda", generator=gen)).to(dt)
+        qn = tuple(torch.randn(D, device="cuda", generator=gen).to(dt) for _ in range(2)) + (1e-6,)
+        kn = tuple(torch.randn(D, device="cuda", generator=gen).to(dt) for _ in range(2)) + (1e-6,)
+        slots = torch.randperm(8192, device="cuda", generator=gen)[:N]
+        outs = []
+        for per_head in (True, False):
+            q = torch.full((N, NH, D), 9.0, dtype=dt, device="cuda")
+            kc, vc = torch.zeros(8192, 1, NH, D, dtype=dt, device="cuda"), torch.zeros(8192, 1, NH, D, dtype=dt, device="cuda")
+            qk_norm_scatter(qkv, qn, kn, q, kc, vc, slots, NH, D, per_head=per_head)
+            outs.append((q, kc, vc))
+        assert all(torch.equal(a, b) for a, b in zip(*outs)), (N, scale)

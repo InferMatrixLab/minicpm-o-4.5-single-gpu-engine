@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
-from engine.runtime.dit_kernels import add_ln_mod, conv_gather, ln_mish, ln_mod, qk_norm_scatter
+from engine.runtime.dit_kernels import add_ln_mod, add_ln_mod_conv, conv_gather, ln_mish, ln_mish_conv, ln_mod, qk_norm_scatter
 from engine.runtime.hostcopy import host, plan as fi_plan, to_device
 
 TRIM_SUFFIX = 100
@@ -98,10 +98,12 @@ class FastCache:
 
 class FastDiT:
     def __init__(self, cfm, steps: int, n_slots: int = 32768, max_streams: int = 96, device="cuda", use_graphs: bool = False,
-                 setup_tokens: int = 0, fused_residual: bool = False):
+                 setup_tokens: int = 0, fused_residual: bool = False, fused_conv: bool = False):
         """``setup_tokens``: tokens (both halves) every row bucket's graphs take beyond its windows, for prompt setups
         in a decode's solve (0: setups ride only the small row buckets' ``SETUP_TOKENS``).  ``fused_residual``: each
-        gated residual add and the norm after it in one kernel (``dit_kernels.add_ln_mod``, the same roundings)."""
+        gated residual add and the norm after it in one kernel (``dit_kernels.add_ln_mod``, the same roundings).
+        ``fused_conv`` (with ``fused_residual``): the norms before the two causal convolutions write the im2col buffer and
+        the new conv caches themselves (``dit_kernels.add_ln_mod_conv`` / ``ln_mish_conv``) instead of a separate gather."""
         est = cfm.estimator
         self.cfm, self.est, self.steps = cfm, est, steps
         self.depth = len(est.blocks)
@@ -114,6 +116,8 @@ class FastDiT:
         self.device, self.use_graphs = device, use_graphs
         self.setup_tokens = int(setup_tokens)
         self.fused_residual = fused_residual
+        assert fused_residual or not fused_conv, "fused_conv is a fused_residual option"
+        self.fused_conv = fused_conv
         self.top = max(bucket_top(rb, self.setup_tokens) for rb in ROW_BUCKETS)
         self.scratch = self.top  # slots reserved for pad-row tokens (never attended by real rows)
         self.pool = SlotPool(n_slots + self.scratch, steps, self.depth, self.heads, self.hd, self.dtype, device)
@@ -270,10 +274,11 @@ class FastDiT:
         cin = self.cnn.index_select(2, buf["rd"])  # [steps, depth, R, 2, 2, C]
         cout = torch.empty_like(cin)
         q = torch.empty(N, self.heads, self.hd, dtype=self.dtype, device=self.device)
+        ao = torch.empty_like(q)  # attention output (FlashInfer zero-fills one it allocates; every row's is written)
         im = torch.empty(N, 3 * H, dtype=self.dtype, device=self.device)
         x = buf["x0"]
         if self.fused_residual:
-            return self._body_fused(buf, attn, cin, cout, q, im, x)
+            return self._body_fused(buf, attn, cin, cout, q, ao, im, x)
         for step in range(self.steps):
             h = F.linear(torch.cat([torch.cat([x, x]), buf["static"]], dim=1), *self.in_proj)
             for b, blk in enumerate(self.blocks):
@@ -283,7 +288,7 @@ class FastDiT:
                 qkv = F.linear(ln_mod(h, sh, sc1, eps1), *blk["qkv"])
                 kc, vc = self.pool.k[sb], self.pool.v[sb]
                 qk_norm_scatter(qkv, blk["qn"], blk["kn"], q, kc, vc, buf["slots"], self.heads, self.hd)
-                h = torch.addcmul(h, g, F.linear(attn.run(q, (kc, vc)).view(N, H), *blk["proj"]))
+                h = torch.addcmul(h, g, F.linear(attn.run(q, (kc, vc), out=ao).view(N, H), *blk["proj"]))
                 sh, sc1, g = mod["conv"]
                 a = ln_mod(h, sh, sc1, eps3)
                 y = F.linear(conv_gather(a, cin[step, b, :, 0], cout[step, b, :, 0], buf["meta"], im), *blk["c1"])
@@ -298,7 +303,7 @@ class FastDiT:
         self.cnn.index_copy_(2, buf["wr"], cout)
         buf["out"].copy_(x)
 
-    def _body_fused(self, buf: dict, attn, cin, cout, q, im, x) -> None:
+    def _body_fused(self, buf: dict, attn, cin, cout, q, ao, im, x) -> None:
         """``_body`` with every ``h = addcmul(h, g, y)`` and the ``ln_mod`` that follows it in one kernel; the MLP's gated
         residual is carried to the next block's (or the final layer's) norm."""
         H, half = self.hidden, buf["x0"].shape[0]
@@ -317,12 +322,17 @@ class FastDiT:
                 qkv = F.linear(a, *blk["qkv"])
                 kc, vc = self.pool.k[sb], self.pool.v[sb]
                 qk_norm_scatter(qkv, blk["qn"], blk["kn"], q, kc, vc, buf["slots"], self.heads, self.hd)
-                y = F.linear(attn.run(q, (kc, vc)).view(N, H), *blk["proj"])
+                y = F.linear(attn.run(q, (kc, vc), out=ao).view(N, H), *blk["proj"])
                 sh, sc1, g2 = mod["conv"]
-                h, a = add_ln_mod(h, g, y, sh, sc1, eps3)
-                y = F.linear(conv_gather(a, cin[step, b, :, 0], cout[step, b, :, 0], buf["meta"], im), *blk["c1"])
-                y = ln_mish(y, blk["cln"])
-                y = F.linear(conv_gather(y, cin[step, b, :, 1], cout[step, b, :, 1], buf["meta"], im), *blk["c2"])
+                if self.fused_conv:
+                    h = add_ln_mod_conv(h, g, y, sh, sc1, eps3, cin[step, b, :, 0], cout[step, b, :, 0], buf["meta"], im)
+                    y = F.linear(ln_mish_conv(F.linear(im, *blk["c1"]), blk["cln"], cin[step, b, :, 1], cout[step, b, :, 1], buf["meta"], im),
+                                 *blk["c2"])
+                else:
+                    h, a = add_ln_mod(h, g, y, sh, sc1, eps3)
+                    y = F.linear(conv_gather(a, cin[step, b, :, 0], cout[step, b, :, 0], buf["meta"], im), *blk["c1"])
+                    y = ln_mish(y, blk["cln"])
+                    y = F.linear(conv_gather(y, cin[step, b, :, 1], cout[step, b, :, 1], buf["meta"], im), *blk["c2"])
                 sh, sc1, g3 = mod["mlp"]
                 h, a = add_ln_mod(h, g2, y, sh, sc1, eps2)
                 pend = (g3, F.linear(F.gelu(F.linear(a, *blk["fc1"]), approximate="tanh"), *blk["fc2"]))

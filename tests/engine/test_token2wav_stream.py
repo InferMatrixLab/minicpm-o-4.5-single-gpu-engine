@@ -487,7 +487,8 @@ def test_fused_setups_match_separate_setups(graphs):
 @pytest.mark.parametrize("graphs", [False, True])
 def test_dit_fused_residual_is_bitwise(graphs):
     """``dit_fused_residual``: the gated residual adds fused with the norms after them give the same mels, bit for bit,
-    for setups (fused into a decode too), ramped first windows, steady windows and merged finals."""
+    for setups (fused into a decode too), ramped first windows, steady windows and merged finals; so does
+    ``dit_fused_conv`` on top of it (the im2col written by the norms)."""
     from engine.models.token2wav import Token2Wav
     from engine.runtime.token2wav_batch import BatchedToken2Wav
     from engine.token2wav_chunker import StreamChunker
@@ -500,9 +501,9 @@ def test_dit_fused_residual_is_bitwise(graphs):
         ch = StreamChunker(first_chunk=8)
         plans.append([(w.tokens, w.last) for w in ch.push([int(x) for x in gen.integers(0, 6561, n)])] + [(lambda w: (w.tokens, w.last))(ch.finish())])
     mels = []
-    for fused in (False, True):
+    for fused, conv in ((False, False), (True, False), (True, True)):
         bt = BatchedToken2Wav(ours, use_graphs=graphs, fast_dit=True, fast_slots=32768, merge_solve=True, fuse_setup_frames=2048,
-                              dit_fused_residual=fused)
+                              dit_fused_residual=fused, dit_fused_conv=conv)
         rec, vocode = [], bt._vocode
         bt._vocode = lambda items, ms, *rest, vocode=vocode, rec=rec: (rec.extend(m.float().cpu() for m in ms) or vocode(items, ms, *rest))
         sts = [bt.new_stream(p, noise_seed=j, adopt=True) for j, p in enumerate(bt.setup_many(feats[:3]))]
@@ -516,8 +517,9 @@ def test_dit_fused_residual_is_bitwise(graphs):
         mels.append(rec)
         for st in sts:
             bt.release_stream(st)
-    assert len(mels[0]) == len(mels[1]) == sum(len(p) for p in plans)
-    assert all(torch.equal(x, y) for x, y in zip(*mels))
+    assert len(mels[0]) == len(mels[1]) == len(mels[2]) == sum(len(p) for p in plans)
+    assert all(torch.equal(x, y) for x, y in zip(mels[0], mels[1]))
+    assert all(torch.equal(x, y) for x, y in zip(mels[0], mels[2]))
 
 
 def test_split_prompt_features_equal_reference():
