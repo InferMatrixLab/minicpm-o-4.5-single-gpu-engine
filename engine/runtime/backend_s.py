@@ -142,7 +142,7 @@ class TrackSBackend:
                  prefill_hf_kernels: bool = False, t2w_dit_fused_conv: bool = False, t2w_hift_fused_bias: bool = False,
                  t2w_setup_prefetch: bool = False, prefill_rope_hf: bool = False, mps_client_priority: int | None = None,
                  t2w_mps_client_priority: int | None = None, t2w_encoder_batched_io: bool = False, talker_stream_priority: int = 0,
-                 thinker_stream_priority: int = 0):
+                 thinker_stream_priority: int = 0, talker_lean_codes: bool = False):
         from transformers import AutoTokenizer
 
         from engine.models.multimodal import MultimodalFrontend
@@ -325,6 +325,10 @@ class TrackSBackend:
         if tick_overlap and split_threads:
             raise ValueError("tick_overlap and split_threads are alternatives")
         self.tick_overlap = tick_overlap
+        # a K block's frames update each row's next-code and live tensors once, after the block, and not at all for a row
+        # that took every frame (its batched decode state already holds them): one host-to-device copy and one fill per
+        # frame and row fewer
+        self.talker_lean_codes = talker_lean_codes
         # False: a tick whose Thinker step completes some request's first text chunk runs serially, so that chunk starts
         # in the same tick's Talker (time to first audio); the other ticks overlap
         self.tick_overlap_first_chunks = tick_overlap_first_chunks
@@ -1041,16 +1045,30 @@ class TrackSBackend:
         for i, lv in enumerate(active):
             for name in ("codes", "seeds", "steps", "history", "live"):
                 lv.ts[name] = state[name][i:i + 1]  # a view: the batch is built anew by the next tick's cat, never written in place
-            for j in range(codes.shape[0]):
-                tok = int(codes[j, i])
-                if tok == PAD:
-                    break
-                self._take_frame(lv, tok, fed_upto=starts_len[i] + j + 1)
-                if not lv.talking:
-                    break
+            self._take_block(lv, codes[:, i].tolist(), starts_len[i])
 
-    def _take_frame(self, lv: LiveS, tok: int, fed_upto: int | None) -> None:
-        """One sampled frame.  ``fed_upto`` is the Talker KV length once the frames before ``tok`` are fed (decode path)."""
+    def _take_block(self, lv: LiveS, col: list[int], start: int) -> None:
+        """A row's frames of one K block (``col``, PAD after its EOS); ``start``: its Talker KV length before the block."""
+        from engine.talker_sampler import PAD
+
+        pend = [] if self.talker_lean_codes else None
+        for j, tok in enumerate(col):
+            if tok == PAD:
+                break
+            self._take_frame(lv, tok, fed_upto=start + j + 1, pend=pend)
+            if not lv.talking:
+                break
+        if pend and not (len(pend) == 2 * len(col) and pend[-1] == ("live",) and lv.talking):
+            # the block ended early (EOS, a chunk or frame limit): the last writes its frames made, as _take_frame makes them
+            last_code = next((e[1] for e in reversed(pend) if e[0] == "codes"), None)
+            if last_code is not None:
+                lv.ts["codes"] = to_device([last_code], torch.int64, self.device)
+            if ("live",) in pend:
+                lv.ts["live"] = torch.ones(1, dtype=torch.bool, device=self.device)
+
+    def _take_frame(self, lv: LiveS, tok: int, fed_upto: int | None, pend: list | None = None) -> None:
+        """One sampled frame.  ``fed_upto`` is the Talker KV length once the frames before ``tok`` are fed (decode path).
+        ``pend`` (``talker_lean_codes``): the next-code and live writes are recorded there instead of made."""
         eos = self.talker.cfg.eos
         if tok == eos:
             if fed_upto is not None:
@@ -1066,7 +1084,10 @@ class TrackSBackend:
         lv.chunk_frames += 1
         for w in lv.chunker.push([tok]):
             self._queue_window(lv, w)
-        lv.ts["codes"] = to_device([tok], torch.int64, self.device)
+        if pend is None:
+            lv.ts["codes"] = to_device([tok], torch.int64, self.device)
+        else:
+            pend.append(("codes", tok))
         if lv.frames >= lv.frame_cap:
             # the request's frame cap (talker max_new_tokens): the utterance ends with this frame, unfed; text the
             # Thinker has not yet passed gets no speech
@@ -1083,7 +1104,10 @@ class TrackSBackend:
             self._end_chunk(lv)
             return
         lv.talking = True
-        lv.ts["live"] = torch.ones(1, dtype=torch.bool, device=self.device)
+        if pend is None:
+            lv.ts["live"] = torch.ones(1, dtype=torch.bool, device=self.device)
+        else:
+            pend.append(("live",))
 
     def _end_chunk(self, lv: LiveS, last: bool = False) -> None:
         """The current chunk ends; the utterance too at its final chunk, or (``last``) at the frame cap."""

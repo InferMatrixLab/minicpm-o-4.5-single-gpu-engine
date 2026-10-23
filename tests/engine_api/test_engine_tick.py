@@ -322,3 +322,37 @@ def test_tick_overlap_max_live_runs_busier_ticks_serially():
         be.live = {i: SimpleNamespace(wants_audio=False, utterance_done=False) for i in range(n)}
         be._tick_overlapped([], urgent=False)
         assert calls == want, (n, calls)
+
+
+@pytest.mark.parametrize("case", ["full", "eos0", "eos1", "eos3", "pad_after_eos", "frame_cap", "chunk_limit"])
+def test_talker_lean_codes_leaves_the_same_row_state(case):
+    """``talker_lean_codes``: a K block's frames leave a row's next code, live flag, frames, chunk state and finish
+    reason as the per-frame writes do (the batched decode state holds a full block's last code and live flag: the GPU
+    test test_decode_state_holds_a_live_rows_last_code)."""
+    eos = 6562
+    # -1: PAD (after EOS)
+    cols = {"full": [5, 6, 7, 8], "eos0": [eos, -1, -1, -1], "eos1": [5, eos, -1, -1], "eos3": [5, 6, 7, eos],
+            "pad_after_eos": [5, 6, eos, -1], "frame_cap": [5, 6, 7, 8], "chunk_limit": [5, 6, 7, 8]}
+    from engine.talker_sampler import PAD
+
+    col = [PAD if t == -1 else t for t in cols[case]]
+    out = []
+    for lean in (False, True):
+        be = object.__new__(B.TrackSBackend)
+        be.talker = SimpleNamespace(cfg=SimpleNamespace(eos=eos))
+        be.cfg = SimpleNamespace(window=16)
+        be.device, be.talker_lean_codes = "cpu", lean
+        be.akv = SimpleNamespace(truncate=lambda seq, n: None)
+        be.t2wp = SimpleNamespace(send=lambda *a: None)
+        lv = B.LiveS(req=None, out=None, loop=None, prompt_ids=[], seq=0)
+        lv.chunker = SimpleNamespace(push=lambda toks: [], finish=lambda: None)
+        lv.chunks = [B.TextChunk([1], None, False), B.TextChunk([2], None, True)]
+        lv.talking, lv.frames, lv.codes = True, 10, list(range(10))
+        lv.frame_cap = 12 if case == "frame_cap" else 2048
+        lv.chunk_frames = B.TALKER_MAX_PER_CHUNK - 2 if case == "chunk_limit" else 3
+        last_full = col[-1] if case == "full" else 4  # the batched state: a full block's last code (else any value)
+        lv.ts = {"codes": torch.tensor([last_full]), "live": torch.tensor([True]), "history": torch.zeros(1, 16, dtype=torch.int64)}
+        be._take_block(lv, col, 100)
+        out.append((int(lv.ts["codes"]), bool(lv.ts["live"]), lv.frames, list(lv.codes), lv.talking, lv.feed_last, lv.finish_reason,
+                    lv.chunk_frames, len(lv.chunks)))
+    assert out[0] == out[1], out

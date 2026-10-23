@@ -87,3 +87,41 @@ def test_whole_k_graph_matches_frame_graphs(page_size, k):
         assert torch.equal(r[0], results[0][0])
         assert all(torch.equal(r[1][name], results[0][1][name]) for name in r[1])
         assert all(torch.equal(a, b) for a, b in zip(r[2], results[0][2]))
+
+
+@pytest.mark.parametrize("mode", ["eager", "frames", "whole_k", "whole_k_lean"])
+@torch.inference_mode()
+def test_decode_state_holds_a_live_rows_last_code(mode):
+    """``talker_lean_codes`` relies on this: after a K block, a row that took every frame without EOS has its last code in
+    the batched state's ``codes`` and is ``live`` there (so the per-frame host copies of both can be skipped)."""
+    from engine.models.talker import Talker
+    from engine.runtime.paged import DecoderRunner, DecoderSpec, PagedKV
+    from engine.runtime.talker_decode import TalkerDecoder
+    from engine.talker_sampler import PAD, TalkerSampling
+
+    ta = Talker.load(MODEL, device="cuda")
+    c = ta.cfg
+    spec = DecoderSpec(c.num_layers, c.hidden_size, c.num_heads, c.num_kv_heads, c.head_dim, c.rope_theta, c.rms_eps, False)
+    cfg = TalkerSampling(min_new_tokens=0, max_new_tokens=27)
+    kv = PagedKV(spec, 2048, 16)
+    pre = DecoderRunner(ta.w, spec, kv)
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    conds = [ta.condition(torch.randint(0, 150000, (n,), device="cuda", generator=gen), torch.randn(n, 4096, device="cuda", generator=gen)) for n in (12, 30, 7)]
+    hid = pre.forward(torch.cat(conds), kv.layout([0, 1, 2], [x.shape[0] for x in conds]))
+    first = torch.nn.functional.linear(hid[torch.tensor([11, 41, 48], device="cuda")], ta.head).float().argmax(-1)
+    dec = TalkerDecoder(ta, kv, spec, cfg, use_graphs=mode != "eager", buckets=(4,), whole_k=mode.startswith("whole_k"), lean_frame=mode.endswith("lean"))
+    k = 4
+    if mode != "eager":
+        dec.capture_all(ks=(k,))
+    st = {"codes": first, "seeds": torch.tensor([1, 2, 3], device="cuda"), "steps": torch.tensor([1, 5, 9], device="cuda"),
+          "history": torch.full((3, 16), PAD, dtype=torch.int64, device="cuda"), "live": torch.ones(3, dtype=torch.bool, device="cuda")}
+    st["history"][:, -1] = first
+    checked = 0
+    for _ in range(6):
+        codes = dec.decode_k([0, 1, 2], st, k)
+        for i in range(3):
+            col = codes[:, i].tolist()
+            if all(t != PAD and t != c.eos for t in col):
+                assert int(st["codes"][i]) == col[-1] and bool(st["live"][i]), (mode, i, col)
+                checked += 1
+    assert checked >= 6
